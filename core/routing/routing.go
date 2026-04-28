@@ -28,10 +28,10 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 type entry struct {
-	host       string
-	iface      string
-	expiresAt  time.Time
-	ruleID     int64
+	host      string
+	iface     string
+	expiresAt time.Time
+	ruleID    int64
 }
 
 // Manager owns the set of active host routes. Safe for concurrent use.
