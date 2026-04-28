@@ -15,7 +15,7 @@ func TestEngine_Decide(t *testing.T) {
 	src := staticSource{list: []rules.Rule{
 		{ID: 1, Pattern: "*.y.com", Action: rules.ActionBlock, Enabled: true},
 		{ID: 2, Pattern: "safe.y.com", Action: rules.ActionAllow, Interface: "", Enabled: true},
-		{ID: 3, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "utun3", Enabled: true},
+		{ID: 3, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
 	}}
 	e := New(src)
 	if err := e.Reload(context.Background()); err != nil {

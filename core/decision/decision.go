@@ -75,9 +75,8 @@ func (e *Engine) Decide(name string) Decision {
 	case rules.ActionBlock:
 		return Decision{Outcome: OutcomeBlock, RuleID: r.ID, Pattern: r.Pattern}
 	case rules.ActionAllow:
-		if r.Interface == "" {
-			return Decision{Outcome: OutcomeAllow, RuleID: r.ID, Pattern: r.Pattern}
-		}
+		return Decision{Outcome: OutcomeAllow, RuleID: r.ID, Pattern: r.Pattern}
+	case rules.ActionRoute:
 		return Decision{Outcome: OutcomeRoute, Interface: r.Interface, RuleID: r.ID, Pattern: r.Pattern}
 	}
 	return Decision{Outcome: OutcomeAllow}

@@ -111,9 +111,9 @@ func (a *App) SetSetting(key, value string) error {
 	return a.call(ipc.MethodSettingsSet, ipc.SettingsSetParams{Key: key, Value: value}, nil)
 }
 
-func (a *App) RecentLogs(limit int) ([]ipc.LogDTO, error) {
+func (a *App) RecentLogs(limit int, filter string) ([]ipc.LogDTO, error) {
 	var out []ipc.LogDTO
-	err := a.call(ipc.MethodLogsRecent, ipc.LogsRecentParams{Limit: limit}, &out)
+	err := a.call(ipc.MethodLogsRecent, ipc.LogsRecentParams{Limit: limit, Filter: filter}, &out)
 	return out, err
 }
 

@@ -8,9 +8,25 @@ import (
 type Action string
 
 const (
+	// ActionBlock returns NXDOMAIN for matching queries.
 	ActionBlock Action = "block"
+	// ActionAllow lets matching queries through the default route,
+	// overriding any broader block rule. Interface MUST be empty.
 	ActionAllow Action = "allow"
+	// ActionRoute lets matching queries through and pins their
+	// resolved IPs to a specific interface (utunN) or app
+	// (`app:KEY[,KEY...]`). Interface MUST be non-empty.
+	ActionRoute Action = "route"
 )
+
+// ValidAction reports whether v is one of the recognised actions.
+func ValidAction(v Action) bool {
+	switch v {
+	case ActionBlock, ActionAllow, ActionRoute:
+		return true
+	}
+	return false
+}
 
 type Rule struct {
 	ID        int64     `gorm:"primaryKey;column:id"`

@@ -113,9 +113,11 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
         </span>
         <span class="muted" style="font-size: 11px; color: var(--warn)">
           ⚠ Limitation: VPN apps that push their own DNS via NetworkExtension
-          (v2box, Tailscale, etc.) bypass this hijack while connected. To make
-          this firewall see those queries too, configure the VPN app itself to
-          use <code>127.0.0.1</code> as its DNS upstream.
+          (v2box, Tailscale, etc.) bypass this hijack while connected — those
+          queries never reach the daemon, so <strong>no rules apply and no log
+          entries appear for them</strong>. If your Logs tab is empty (or
+          missing entries for domains you visited), set the VPN app's DNS
+          upstream to <code>127.0.0.1</code> in the VPN's own settings.
         </span>
 
         <div v-if="sysStatus" class="col" style="gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border)">

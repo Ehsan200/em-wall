@@ -1,20 +1,46 @@
 <script lang="ts" setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { RecentLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
 type Filter = 'all' | 'block' | 'route' | 'unavailable';
 
 const logs = ref<ipc.LogDTO[]>([]);
+const totalsByAction = ref<Record<string, number>>({});
 const filter = ref<Filter>('all');
 const search = ref<string>('');
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
 let timer: number | undefined;
 
+// Map UI filter chip → daemon-side filter string. The daemon filters
+// at the DB level so a busy run of "block-app-down" entries can't
+// hide the latest "route" rows behind a 500-row window.
+function daemonFilter(f: Filter): string {
+  if (f === 'all') return '';
+  if (f === 'unavailable') return 'unavailable';
+  return f;
+}
+
 async function refresh() {
   try {
-    logs.value = (await RecentLogs(500)) || [];
+    // Latest entries scoped to the active filter (so Routed actually
+    // returns the most recent routes, not the most recent anything).
+    logs.value = (await RecentLogs(500, daemonFilter(filter.value))) || [];
+    // Header counters stay accurate by also fetching counts per group
+    // via separate small queries. We piggy-back on the same RecentLogs
+    // call with bigger limits per filter — cheap enough.
+    if (filter.value !== 'all') {
+      // For non-"all", we already have the filtered list, but the chip
+      // counters need the full breakdown. Fall through to a full fetch
+      // for counter accuracy.
+    }
+    const allRows = filter.value === 'all'
+      ? logs.value
+      : ((await RecentLogs(2000, '')) || []);
+    const counts: Record<string, number> = {};
+    for (const r of allRows) counts[r.action] = (counts[r.action] || 0) + 1;
+    totalsByAction.value = counts;
     lastRefresh.value = new Date();
     error.value = '';
   } catch (e: any) {
@@ -22,21 +48,16 @@ async function refresh() {
   }
 }
 
-// "Unavailable" groups every block-* variant except plain `block`:
-// iface-down, app-down, app-busy, app-unsupported.
+// "Unavailable" groups every block-* variant + forward-failed:
+// iface-down, app-down, app-busy, app-unsupported, route-failed,
+// forward-failed.
 function isUnavailable(action: string): boolean {
-  return action.startsWith('block-');
+  return action.startsWith('block-') || action === 'forward-failed';
 }
 
+// Client-side search only; action filtering happens at the daemon.
 const filtered = computed(() => {
   let xs = logs.value;
-  if (filter.value === 'block') {
-    xs = xs.filter(l => l.action === 'block');
-  } else if (filter.value === 'route') {
-    xs = xs.filter(l => l.action === 'route');
-  } else if (filter.value === 'unavailable') {
-    xs = xs.filter(l => isUnavailable(l.action));
-  }
   if (search.value.trim()) {
     const q = search.value.trim().toLowerCase();
     xs = xs.filter(l => l.queryName.toLowerCase().includes(q));
@@ -45,11 +66,12 @@ const filtered = computed(() => {
 });
 
 const counts = computed(() => {
-  const c = { block: 0, route: 0, unavailable: 0 };
-  for (const l of logs.value) {
-    if (l.action === 'block') c.block++;
-    else if (l.action === 'route') c.route++;
-    else if (isUnavailable(l.action)) c.unavailable++;
+  const c = { all: 0, block: 0, route: 0, unavailable: 0 };
+  for (const [action, n] of Object.entries(totalsByAction.value)) {
+    c.all += n;
+    if (action === 'block') c.block += n;
+    else if (action === 'route') c.route += n;
+    else if (isUnavailable(action)) c.unavailable += n;
   }
   return c;
 });
@@ -59,12 +81,17 @@ function fmtTime(s: string): string {
 }
 
 function actionTag(action: string): string {
-  // Anything blocked (rule match, iface down, app down, app busy
-  // during transition, app unsupported) is red. "route" stays blue.
-  if (action.startsWith('block')) return 'tag tag-block';
+  // Anything blocked (rule match, iface down, app down, app busy,
+  // app unsupported, route-failed) or forward-failed is red.
+  // "route" stays blue.
+  if (action.startsWith('block') || action === 'forward-failed') return 'tag tag-block';
   if (action === 'route') return 'tag tag-route';
   return 'tag tag-off';
 }
+
+// Switching chips should refetch immediately, not wait for the
+// 1s timer.
+watch(filter, () => { refresh(); });
 
 onMounted(() => {
   refresh();
@@ -80,7 +107,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
     <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 12px">
       <div class="row" style="gap: 0">
         <button :class="{active: filter==='all'}" class="seg" @click="filter='all'">
-          All <span class="count">{{ logs.length }}</span>
+          All <span class="count">{{ counts.all }}</span>
         </button>
         <button :class="{active: filter==='block'}" class="seg" @click="filter='block'">
           Blocked <span class="count">{{ counts.block }}</span>

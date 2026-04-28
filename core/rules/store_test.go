@@ -30,7 +30,7 @@ func TestStore_AddListGetDelete(t *testing.T) {
 		t.Fatalf("expected non-zero ID")
 	}
 
-	r2, err := s.Add(ctx, Rule{Pattern: "*.public.y.com", Action: ActionAllow, Interface: "utun3", Enabled: true})
+	r2, err := s.Add(ctx, Rule{Pattern: "*.public.y.com", Action: ActionRoute, Interface: "utun3", Enabled: true})
 	if err != nil {
 		t.Fatalf("Add 2: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestStore_AddListGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Pattern != "*.public.y.com" || got.Interface != "utun3" || got.Action != ActionAllow {
+	if got.Pattern != "*.public.y.com" || got.Interface != "utun3" || got.Action != ActionRoute {
 		t.Errorf("Get returned wrong row: %+v", got)
 	}
 
@@ -82,7 +82,7 @@ func TestStore_Update(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Action = ActionAllow
+	r.Action = ActionRoute
 	r.Interface = "utun7"
 	r.Enabled = false
 	if err := s.Update(ctx, r); err != nil {
@@ -92,7 +92,7 @@ func TestStore_Update(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Action != ActionAllow || got.Interface != "utun7" || got.Enabled {
+	if got.Action != ActionRoute || got.Interface != "utun7" || got.Enabled {
 		t.Errorf("update not persisted: %+v", got)
 	}
 }
@@ -121,11 +121,51 @@ func TestStore_Logs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	logs, err := s.RecentLogs(ctx, 10)
+	logs, err := s.RecentLogs(ctx, 10, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(logs) != 3 {
 		t.Errorf("got %d logs, want 3", len(logs))
+	}
+}
+
+func TestStore_LogsFilter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, e := range []LogEntry{
+		{QueryName: "a.com", Action: "block"},
+		{QueryName: "b.com", Action: "route"},
+		{QueryName: "c.com", Action: "block-app-down"},
+		{QueryName: "d.com", Action: "block-iface-down"},
+		{QueryName: "e.com", Action: "forward-failed"},
+		{QueryName: "f.com", Action: "route"},
+	} {
+		if err := s.Log(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		filter string
+		want   int
+	}{
+		{"", 6},
+		{"route", 2},
+		{"block", 1},
+		{"unavailable", 3}, // 2x block-* + 1x forward-failed
+		{"forward-failed", 1},
+	}
+	for _, tc := range cases {
+		got, err := s.RecentLogs(ctx, 100, tc.filter)
+		if err != nil {
+			t.Fatalf("filter=%q: %v", tc.filter, err)
+		}
+		if len(got) != tc.want {
+			names := make([]string, 0, len(got))
+			for _, e := range got {
+				names = append(names, e.QueryName+":"+e.Action)
+			}
+			t.Errorf("filter=%q: got %d, want %d (entries: %v)", tc.filter, len(got), tc.want, names)
+		}
 	}
 }

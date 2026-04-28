@@ -200,24 +200,30 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 			return // resolveIface already wrote a response and logged
 		}
 		defer release()
+		// Build the log-friendly interface label up front so EVERY
+		// failure branch (iface-down, forward-failed, route-failed)
+		// AND the success branch use the same `app:X → utunN` form.
+		// Without this, app-bound failures looked like fixed-iface
+		// failures in the Logs tab.
+		logIface := iface
+		if strings.HasPrefix(d.Interface, "app:") {
+			logIface = d.Interface + " → " + iface
+		}
 		if s.cfg.Interfaces != nil && !s.cfg.Interfaces.IsUp(iface) {
 			s.writeNX(w, req, name)
-			s.log(name, "block-iface-down", iface, d.RuleID, clientIP)
+			s.log(name, "block-iface-down", logIface, d.RuleID, clientIP)
 			return
 		}
 		resp, err := s.forward(req)
 		if err != nil {
 			s.cfg.Logger.Printf("dnsproxy: forward failed for %s: %v", name, err)
 			s.writeServFail(w, req)
+			s.log(name, "forward-failed", logIface, d.RuleID, clientIP)
 			return
 		}
 		// Fail-closed: if we can't pin even ONE answer to the chosen
 		// interface, do NOT deliver the response — otherwise the OS
 		// would route the leaked IP via the default gateway.
-		logIface := iface
-		if strings.HasPrefix(d.Interface, "app:") {
-			logIface = d.Interface + " → " + iface
-		}
 		if err := s.installRoutesFor(resp, iface, d.RuleID); err != nil {
 			s.writeNX(w, req, name)
 			s.log(name, "block-route-failed", logIface, d.RuleID, clientIP)

@@ -434,7 +434,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	s.Handle(ipc.MethodLogsRecent, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p ipc.LogsRecentParams
 		_ = json.Unmarshal(raw, &p)
-		list, err := d.store.RecentLogs(ctx, p.Limit)
+		list, err := d.store.RecentLogs(ctx, p.Limit, p.Filter)
 		if err != nil {
 			return nil, err
 		}

@@ -62,7 +62,7 @@ func TestValidate(t *testing.T) {
 func TestMostSpecific(t *testing.T) {
 	rules := []Rule{
 		{ID: 1, Pattern: "*.y.com", Action: ActionBlock, Enabled: true},
-		{ID: 2, Pattern: "*.public.y.com", Action: ActionAllow, Interface: "utun3", Enabled: true},
+		{ID: 2, Pattern: "*.public.y.com", Action: ActionRoute, Interface: "utun3", Enabled: true},
 		{ID: 3, Pattern: "z.com", Action: ActionBlock, Enabled: true},
 		{ID: 4, Pattern: "*.disabled.com", Action: ActionBlock, Enabled: false},
 	}

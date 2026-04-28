@@ -98,7 +98,8 @@ type SettingsSetParams struct {
 }
 
 type LogsRecentParams struct {
-	Limit int `json:"limit"`
+	Limit  int    `json:"limit"`
+	Filter string `json:"filter"` // "", "route", "block", "unavailable", or exact action
 }
 
 type LogDTO struct {

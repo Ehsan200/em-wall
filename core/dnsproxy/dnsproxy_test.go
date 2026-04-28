@@ -181,7 +181,7 @@ func TestServer_RouteInstallsHostRoutes(t *testing.T) {
 	routes := &fakeRoutes{}
 	logs := &fakeLogs{}
 	rs := []rules.Rule{
-		{ID: 7, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "utun3", Enabled: true},
+		{ID: 7, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
 	}
 	_, addr := startServer(t, rs, fwd, routes, logs)
 
@@ -223,7 +223,7 @@ func TestServer_RouteFailure_NX(t *testing.T) {
 	routes := &fakeRoutes{err: errors.New("no such network interface")}
 	logs := &fakeLogs{}
 	rs := []rules.Rule{
-		{ID: 99, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "utun3", Enabled: true},
+		{ID: 99, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
 	}
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	addr := pc.LocalAddr().String()
@@ -294,7 +294,7 @@ func TestServer_AppPrefix_ResolvesToCurrentUtun(t *testing.T) {
 	logs := &fakeLogs{}
 	apps := &fakeAppLocator{current: map[string]string{"v2box": "utun7"}}
 	rs := []rules.Rule{
-		{ID: 11, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "app:v2box", Enabled: true},
+		{ID: 11, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "app:v2box", Enabled: true},
 	}
 
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
@@ -335,7 +335,7 @@ func TestServer_AppPrefix_NXWhenAppDown(t *testing.T) {
 	logs := &fakeLogs{}
 	apps := &fakeAppLocator{current: map[string]string{}} // no app running
 	rs := []rules.Rule{
-		{ID: 12, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "app:v2box", Enabled: true},
+		{ID: 12, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "app:v2box", Enabled: true},
 	}
 
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
@@ -382,7 +382,7 @@ func TestServer_AppPrefix_OnlyMatchingAppCounts(t *testing.T) {
 	// v2box is running on utun4. Tailscale is NOT.
 	apps := &fakeAppLocator{current: map[string]string{"v2box": "utun4"}}
 	rs := []rules.Rule{
-		{ID: 31, Pattern: "*.work.com", Action: rules.ActionAllow,
+		{ID: 31, Pattern: "*.work.com", Action: rules.ActionRoute,
 			Interface: "app:tailscale", Enabled: true},
 	}
 
@@ -432,7 +432,7 @@ func TestServer_AppPrefix_MultiApp_PicksFirstRunning(t *testing.T) {
 	// v2box not running, hiddify running on utun9
 	apps := &fakeAppLocator{current: map[string]string{"hiddify": "utun9"}}
 	rs := []rules.Rule{
-		{ID: 21, Pattern: "*.work.com", Action: rules.ActionAllow,
+		{ID: 21, Pattern: "*.work.com", Action: rules.ActionRoute,
 			Interface: "app:v2box,hiddify", Enabled: true},
 	}
 
@@ -466,7 +466,7 @@ func TestServer_AppPrefix_MultiApp_AllDownNX(t *testing.T) {
 	logs := &fakeLogs{}
 	apps := &fakeAppLocator{current: map[string]string{}} // none running
 	rs := []rules.Rule{
-		{ID: 22, Pattern: "*.work.com", Action: rules.ActionAllow,
+		{ID: 22, Pattern: "*.work.com", Action: rules.ActionRoute,
 			Interface: "app:v2box,hiddify,tailscale", Enabled: true},
 	}
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
@@ -500,7 +500,7 @@ func TestServer_AppPrefix_NXOnTransitionTimeout(t *testing.T) {
 	logs := &fakeLogs{}
 	apps := &fakeAppLocator{current: map[string]string{"v2box": "utun7"}, timeoutMS: 1}
 	rs := []rules.Rule{
-		{ID: 13, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "app:v2box", Enabled: true},
+		{ID: 13, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "app:v2box", Enabled: true},
 	}
 
 	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
@@ -541,7 +541,7 @@ func TestServer_RouteIfaceDown_NXDOMAIN(t *testing.T) {
 	routes := &fakeRoutes{}
 	logs := &fakeLogs{}
 	rs := []rules.Rule{
-		{ID: 9, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "utun3", Enabled: true},
+		{ID: 9, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
 	}
 
 	t.Helper()

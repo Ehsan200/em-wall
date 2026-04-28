@@ -14,27 +14,39 @@ const pendingDelete = ref<number | null>(null);
 let pendingDeleteTimer: number | undefined;
 let ifaceTimer: number | undefined;
 
-// Draft "binding" describes how the route is pinned:
-//   ''        → default route (any interface)
-//   'iface'   → a specific utun/en (stored as that name)
-//   'app'     → one or more known apps (stored as 'app:KEY1,KEY2,...').
-//              At resolve time, the daemon picks the first one that's
-//              currently running.
+// Action model:
+//   block — return NXDOMAIN
+//   route — let through and pin the resolved IPs to a binding
+//
+// allow exists in the daemon for "explicit pass-through that
+// overrides a broader block" but is not exposed in the UI — the
+// implicit default for unmatched domains is already "allow".
 const draft = ref({
   pattern: '',
-  action: 'block' as 'block' | 'allow',
-  binding: '' as '' | 'iface' | 'app',
+  action: 'block' as 'block' | 'route',
+  // Only meaningful when action === 'route':
+  binding: 'iface' as 'iface' | 'app',
   iface: '',
   apps: [] as string[],
   enabled: true,
 });
 
 function draftInterfaceField(): string {
+  if (draft.value.action !== 'route') return '';
   if (draft.value.binding === 'app' && draft.value.apps.length > 0) {
     return `app:${draft.value.apps.join(',')}`;
   }
   if (draft.value.binding === 'iface') return draft.value.iface;
   return '';
+}
+
+function draftIsValid(): boolean {
+  if (!draft.value.pattern.trim()) return false;
+  if (draft.value.action === 'block') return true;
+  // route requires a non-empty binding
+  if (draft.value.binding === 'iface') return !!draft.value.iface;
+  if (draft.value.binding === 'app') return draft.value.apps.length > 0;
+  return false;
 }
 
 function toggleDraftApp(key: string) {
@@ -51,16 +63,17 @@ function toggleDraftApp(key: string) {
 type EditState = {
   id: number;
   pattern: string;
-  action: 'block' | 'allow';
-  binding: '' | 'iface' | 'app';
+  action: 'block' | 'route';
+  binding: 'iface' | 'app';
   iface: string;
   apps: string[];
   enabled: boolean;
 };
+
 const editing = ref<EditState | null>(null);
 
 function beginEdit(r: ipc.RuleDTO) {
-  let binding: '' | 'iface' | 'app' = '';
+  let binding: 'iface' | 'app' = 'iface';
   let iface = '';
   let appKeys: string[] = [];
   if (r.interface.startsWith('app:')) {
@@ -70,10 +83,16 @@ function beginEdit(r: ipc.RuleDTO) {
     binding = 'iface';
     iface = r.interface;
   }
+  // Legacy `allow` rows (pre-action-model split) collapse to `route`
+  // when they had an interface, otherwise to `block` for editing.
+  const action: 'block' | 'route' = r.action === 'route' ? 'route'
+    : (r.action === 'allow' && r.interface) ? 'route'
+    : (r.action === 'block') ? 'block'
+    : 'block';
   editing.value = {
     id: r.id,
     pattern: r.pattern,
-    action: (r.action === 'allow' ? 'allow' : 'block'),
+    action,
     binding,
     iface,
     apps: appKeys,
@@ -85,10 +104,19 @@ function cancelEdit() { editing.value = null; }
 
 function editingInterfaceField(): string {
   const e = editing.value;
-  if (!e || e.action !== 'allow') return '';
+  if (!e || e.action !== 'route') return '';
   if (e.binding === 'app' && e.apps.length > 0) return `app:${e.apps.join(',')}`;
   if (e.binding === 'iface') return e.iface;
   return '';
+}
+
+function editingIsValid(): boolean {
+  const e = editing.value;
+  if (!e || !e.pattern.trim()) return false;
+  if (e.action === 'block') return true;
+  if (e.binding === 'iface') return !!e.iface;
+  if (e.binding === 'app') return e.apps.length > 0;
+  return false;
 }
 
 function toggleEditingApp(key: string) {
@@ -100,9 +128,9 @@ function toggleEditingApp(key: string) {
 
 async function saveEdit() {
   const e = editing.value;
-  if (!e || !e.pattern.trim()) return;
+  if (!editingIsValid()) return;
   try {
-    await UpdateRule(e.id, e.pattern.trim(), e.action, editingInterfaceField(), e.enabled);
+    await UpdateRule(e!.id, e!.pattern.trim(), e!.action, editingInterfaceField(), e!.enabled);
     editing.value = null;
     await refresh();
     emit('changed');
@@ -123,13 +151,14 @@ async function refresh() {
 }
 
 async function add() {
-  if (!draft.value.pattern.trim()) return;
+  if (!draftIsValid()) return;
   try {
-    const ifaceField = draft.value.action === 'allow' ? draftInterfaceField() : '';
     await AddRule(draft.value.pattern.trim(), draft.value.action,
-      ifaceField,
+      draftInterfaceField(),
       draft.value.enabled);
     draft.value.pattern = '';
+    draft.value.iface = '';
+    draft.value.apps = [];
     await refresh();
     emit('changed');
   } catch (e: any) {
@@ -194,31 +223,45 @@ function ifaceLabel(i: ipc.InterfaceDTO): string {
 function ruleIsApp(field: string): boolean { return field.startsWith('app:'); }
 function ruleAppKey(field: string): string { return field.replace(/^app:/, ''); }
 
-function ruleAppDown(field: string): boolean {
-  if (!ruleIsApp(field)) return false;
-  const key = ruleAppKey(field);
-  const a = apps.value.find(x => x.key === key);
-  return !a || !a.currentInterface;
+// "app:v2box,hiddify" → ["v2box","hiddify"]
+function ruleAppKeys(field: string): string[] {
+  return ruleAppKey(field).split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function appByKey(key: string): ipc.AppDTO | undefined {
+  return apps.value.find(a => a.key === key);
+}
+
+function appDisplayName(key: string): string {
+  return appByKey(key)?.displayName || key;
+}
+
+// One-word live-state badge: "utun4" / "off" / "—"
+function appStatusBadge(key: string): string {
+  const a = appByKey(key);
+  if (!a) return '?';
+  if (a.currentInterface) return a.currentInterface;
+  return a.installed ? 'off' : '—';
+}
+
+function appStatusLabel(key: string): string {
+  const a = appByKey(key);
+  if (!a) return `${key} — unknown app`;
+  if (a.currentInterface) return `connected via ${a.currentInterface}`;
+  return a.installed ? 'installed but not running' : 'not installed';
 }
 
 // True if a rule's saved binding can't be honoured right now.
+// For multi-app rules ("app:v2box,hiddify"), down means NONE of the
+// listed apps is currently running — matches the daemon's behaviour
+// of trying each in order and returning NXDOMAIN if all are down.
 function bindingDown(field: string): boolean {
   if (!field) return false;
-  if (ruleIsApp(field)) return ruleAppDown(field);
-  return !interfaces.value.some(i => i.name === field);
-}
-
-function ruleBindingLabel(field: string): string {
-  if (!field) return '—';
   if (ruleIsApp(field)) {
-    const key = ruleAppKey(field);
-    const a = apps.value.find(x => x.key === key);
-    if (!a) return `app:${key} (unknown)`;
-    return a.currentInterface
-      ? `${a.displayName} → ${a.currentInterface}`
-      : `${a.displayName} (not running)`;
+    const keys = ruleAppKeys(field);
+    return !keys.some(k => !!appByKey(k)?.currentInterface);
   }
-  return field;
+  return !interfaces.value.some(i => i.name === field);
 }
 
 
@@ -239,19 +282,18 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         <input v-model="draft.pattern" placeholder="Pattern (e.g. *.bad.com)" style="flex: 1" @keyup.enter="add" />
         <select v-model="draft.action" style="width: 100px">
           <option value="block">block</option>
-          <option value="allow">allow</option>
+          <option value="route">route</option>
         </select>
         <label class="toggle">
           <input type="checkbox" v-model="draft.enabled" />
           <span class="track"></span>
         </label>
-        <button class="primary" @click="add" :disabled="!draft.pattern.trim()">Add</button>
+        <button class="primary" @click="add" :disabled="!draftIsValid()">Add</button>
       </div>
-      <div v-if="draft.action === 'allow'" class="col" style="gap: 10px; margin-top: 10px">
+      <div v-if="draft.action === 'route'" class="col" style="gap: 10px; margin-top: 10px">
         <div class="row" style="gap: 8px; align-items: center">
-          <span class="muted" style="font-size: 11px; min-width: 60px">route via:</span>
+          <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
           <div class="row" style="gap: 0">
-            <button :class="['seg', {active: draft.binding === ''}]" @click="draft.binding = ''">Default</button>
             <button :class="['seg', {active: draft.binding === 'iface'}]" @click="draft.binding = 'iface'">Interface</button>
             <button :class="['seg', {active: draft.binding === 'app'}]" @click="draft.binding = 'app'">App</button>
           </div>
@@ -293,23 +335,32 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         <template v-for="r in rules" :key="r.id">
           <!-- Compact display row -->
           <tr v-if="editing?.id !== r.id"
-              :class="{'rule-iface-down': r.action === 'allow' && r.interface && bindingDown(r.interface)}">
+              :class="{'rule-iface-down': r.action === 'route' && bindingDown(r.interface)}">
             <td><code>{{ r.pattern }}</code></td>
             <td>
-              <span :class="['tag', r.action === 'block' ? 'tag-block' : (r.interface ? 'tag-route' : 'tag-allow')]">
-                {{ r.action === 'block' ? 'block' : (r.interface ? 'route' : 'allow') }}
+              <span :class="['tag', r.action === 'block' ? 'tag-block' : 'tag-route']">
+                {{ r.action }}
               </span>
-              <span v-if="r.action === 'allow' && r.interface && bindingDown(r.interface)"
+              <span v-if="r.action === 'route' && bindingDown(r.interface)"
                     class="tag tag-block" style="margin-left: 6px"
                     :title="ruleIsApp(r.interface) ? 'App not running — queries return NXDOMAIN until it connects' : 'Configured interface is not up — queries return NXDOMAIN until it comes back'">
                 ⚠ {{ ruleIsApp(r.interface) ? 'app down' : 'iface down' }}
               </span>
             </td>
             <td>
-              <div v-if="r.action === 'allow'" class="row" style="gap: 6px; align-items: center">
-                <AppIcon v-if="ruleIsApp(r.interface)" :app-key="ruleAppKey(r.interface)" :size="18" />
-                <code style="font-size: 12px">{{ ruleBindingLabel(r.interface) }}</code>
+              <!-- Multi-app: render one chip per key with its live state -->
+              <div v-if="r.action === 'route' && ruleIsApp(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
+                <span v-for="(k, i) in ruleAppKeys(r.interface)" :key="k"
+                      class="row" style="gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 12px; font-size: 11px"
+                      :title="appStatusLabel(k)">
+                  <AppIcon :app-key="k" :size="14" />
+                  <span>{{ appDisplayName(k) }}</span>
+                  <span class="muted">{{ appStatusBadge(k) }}</span>
+                  <span v-if="i < ruleAppKeys(r.interface).length - 1" class="muted">·</span>
+                </span>
               </div>
+              <!-- Fixed interface -->
+              <code v-else-if="r.action === 'route'" style="font-size: 12px">{{ r.interface }}</code>
               <span v-else class="muted">—</span>
             </td>
             <td>
@@ -341,20 +392,19 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                          @keyup.esc="cancelEdit" />
                   <select v-model="editing!.action" style="width: 100px">
                     <option value="block">block</option>
-                    <option value="allow">allow</option>
+                    <option value="route">route</option>
                   </select>
                   <label class="toggle">
                     <input type="checkbox" v-model="editing!.enabled" />
                     <span class="track"></span>
                   </label>
-                  <button class="primary" @click="saveEdit" :disabled="!editing!.pattern.trim()">Save</button>
+                  <button class="primary" @click="saveEdit" :disabled="!editingIsValid()">Save</button>
                   <button @click="cancelEdit">Cancel</button>
                 </div>
-                <div v-if="editing!.action === 'allow'" class="col" style="gap: 10px; margin-top: 10px">
+                <div v-if="editing!.action === 'route'" class="col" style="gap: 10px; margin-top: 10px">
                   <div class="row" style="gap: 8px; align-items: center">
-                    <span class="muted" style="font-size: 11px; min-width: 60px">route via:</span>
+                    <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
                     <div class="row" style="gap: 0">
-                      <button :class="['seg', {active: editing!.binding === ''}]" @click="editing!.binding = ''">Default</button>
                       <button :class="['seg', {active: editing!.binding === 'iface'}]" @click="editing!.binding = 'iface'">Interface</button>
                       <button :class="['seg', {active: editing!.binding === 'app'}]" @click="editing!.binding = 'app'">App</button>
                     </div>

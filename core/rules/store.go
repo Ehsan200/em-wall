@@ -62,6 +62,16 @@ func Open(path string) (*Store, error) {
 	if err := db.AutoMigrate(&Rule{}, &Setting{}, &LogEntry{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// Data migration: previously, "allow" with a non-empty interface
+	// meant "route via that interface". Now that's a distinct action.
+	// Promote those rows so the data model is consistent.
+	if err := db.Exec(
+		`UPDATE rules SET action = 'route' WHERE action = 'allow' AND interface != ''`,
+	).Error; err != nil {
+		return nil, fmt.Errorf("migrate allow→route: %w", err)
+	}
+
 	return &Store{db: db}, nil
 }
 
@@ -77,11 +87,8 @@ func (s *Store) Add(ctx context.Context, r Rule) (Rule, error) {
 	if err := Validate(r.Pattern); err != nil {
 		return Rule{}, err
 	}
-	if r.Action != ActionBlock && r.Action != ActionAllow {
-		return Rule{}, ErrInvalidAction
-	}
-	if r.Action == ActionBlock {
-		r.Interface = ""
+	if err := normalizeAction(&r); err != nil {
+		return Rule{}, err
 	}
 	r.Pattern = normalize(r.Pattern)
 	r.ID = 0
@@ -102,11 +109,8 @@ func (s *Store) Update(ctx context.Context, r Rule) error {
 	if err := Validate(r.Pattern); err != nil {
 		return err
 	}
-	if r.Action != ActionBlock && r.Action != ActionAllow {
-		return ErrInvalidAction
-	}
-	if r.Action == ActionBlock {
-		r.Interface = ""
+	if err := normalizeAction(&r); err != nil {
+		return err
 	}
 	r.Pattern = normalize(r.Pattern)
 	r.UpdatedAt = time.Now().UTC()
@@ -188,13 +192,58 @@ func (s *Store) Log(ctx context.Context, e LogEntry) error {
 	return s.db.WithContext(ctx).Create(&e).Error
 }
 
-func (s *Store) RecentLogs(ctx context.Context, limit int) ([]LogEntry, error) {
+// RecentLogs returns up to limit log entries, newest first.
+//
+// filter narrows what's returned at the DB level — important so a
+// "Routed" filter doesn't get hidden by a flood of recent
+// block-app-down rows pushing routes off the latest-N window.
+//
+//	""             → no filter (default)
+//	"route"        → only successful routes
+//	"block"        → only rule-matched blocks
+//	"unavailable"  → every block-* + forward-failed (anything that
+//	                 didn't reach the destination)
+//	any other str  → exact match on action column
+func (s *Store) RecentLogs(ctx context.Context, limit int, filter string) ([]LogEntry, error) {
 	if limit <= 0 {
 		limit = 200
 	}
+	q := s.db.WithContext(ctx).Order("ts DESC").Limit(limit)
+	switch filter {
+	case "":
+		// no filter
+	case "unavailable":
+		q = q.Where("action LIKE ? OR action = ?", "block-%", "forward-failed")
+	default:
+		q = q.Where("action = ?", filter)
+	}
 	var out []LogEntry
-	err := s.db.WithContext(ctx).Order("ts DESC").Limit(limit).Find(&out).Error
+	err := q.Find(&out).Error
 	return out, err
+}
+
+// normalizeAction validates the action + interface combination and
+// canonicalises r in place:
+//
+//   - block: interface forced to "".
+//   - allow: interface forced to "" (kept internal — UI never creates
+//     these directly; it's the implicit default for unmatched
+//     queries, but stored explicit "allow" rules still serve as
+//     "override broader block").
+//   - route: interface required (utunN, enN, or "app:KEY[,KEY...]").
+func normalizeAction(r *Rule) error {
+	if !ValidAction(r.Action) {
+		return ErrInvalidAction
+	}
+	switch r.Action {
+	case ActionBlock, ActionAllow:
+		r.Interface = ""
+	case ActionRoute:
+		if r.Interface == "" {
+			return ErrInvalidAction
+		}
+	}
+	return nil
 }
 
 func isUniqueErr(err error) bool {
