@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.em-wall.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/em-walld</string>
+        <string>-db</string>
+        <string>/usr/local/var/em-wall/rules.db</string>
+        <string>-socket</string>
+        <string>/var/run/em-wall.sock</string>
+        <string>-listen</string>
+        <string>127.0.0.1:53</string>
+        <string>-upstream</string>
+        <string>1.1.1.1:53,8.8.8.8:53</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/em-wall.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/em-wall.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/em-wall</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin</string>
+    </dict>
+</dict>
+</plist>
