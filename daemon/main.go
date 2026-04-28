@@ -23,6 +23,7 @@ import (
 	"github.com/ehsan/em-wall/core/applocator"
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/dnsproxy"
+	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/pfctl"
 	"github.com/ehsan/em-wall/core/routing"
@@ -538,6 +539,91 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			MIME:      icon.MIME,
 			DataB64:   base64.StdEncoding.EncodeToString(icon.Data),
 			Installed: icon.Installed,
+		}, nil
+	})
+
+	s.Handle(ipc.MethodGroupsList, func(_ context.Context, _ json.RawMessage) (any, error) {
+		registry := groups.KnownGroups()
+		out := make([]ipc.GroupDTO, 0, len(registry))
+		for _, g := range registry {
+			out = append(out, ipc.GroupDTO{
+				Key:         g.Key,
+				DisplayName: g.DisplayName,
+				Description: g.Description,
+				Patterns:    g.Patterns,
+			})
+		}
+		return out, nil
+	})
+
+	s.Handle(ipc.MethodGroupsApply, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.GroupsApplyParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		g := groups.FindByKey(p.Key)
+		if g == nil {
+			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		}
+		// Validate the action / interface combination once up front so
+		// we don't half-create the group on a bad request.
+		probe := rules.Rule{
+			Pattern: g.Patterns[0], Action: rules.Action(p.Action),
+			Interface: p.Interface, Enabled: p.Enabled,
+		}
+		if _, err := d.store.Add(ctx, probe); err != nil {
+			// Rollback the probe insertion if it actually went through
+			// (validation passed but it was a real Add). Either way we
+			// return the error so the UI can show it.
+			if probe.ID > 0 {
+				_ = d.store.Delete(ctx, probe.ID)
+			}
+			// If the only error is duplicate-pattern, don't bail — that
+			// pattern will just be skipped below.
+			if err.Error() != rules.ErrDuplicate.Error() {
+				return nil, err
+			}
+		}
+		// Now insert the rest, tracking created vs skipped.
+		out := ipc.GroupsApplyResult{}
+		if probe.ID > 0 {
+			out.Created = append(out.Created, ruleToDTO(probe))
+		} else if probe.ID == 0 {
+			out.Skipped = append(out.Skipped, g.Patterns[0])
+		}
+		for _, pattern := range g.Patterns[1:] {
+			r := rules.Rule{
+				Pattern: pattern, Action: rules.Action(p.Action),
+				Interface: p.Interface, Enabled: p.Enabled,
+			}
+			added, err := d.store.Add(ctx, r)
+			if err != nil {
+				if err.Error() == rules.ErrDuplicate.Error() {
+					out.Skipped = append(out.Skipped, pattern)
+					continue
+				}
+				return out, err
+			}
+			out.Created = append(out.Created, ruleToDTO(added))
+		}
+		_ = d.engine.Reload(ctx)
+		return out, nil
+	})
+
+	s.Handle(ipc.MethodGroupsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.GroupsIconParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		g := groups.FindByKey(p.Key)
+		if g == nil {
+			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		}
+		icon := groups.LoadIcon(*g)
+		return ipc.GroupIconDTO{
+			Key:     g.Key,
+			MIME:    icon.MIME,
+			DataB64: base64.StdEncoding.EncodeToString(icon.Data),
 		}, nil
 	})
 

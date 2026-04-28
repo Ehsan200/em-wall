@@ -45,6 +45,9 @@ const (
 	MethodSystemRoutesList    = "system.routes.list"
 	MethodAppsList            = "apps.list"
 	MethodAppsIcon            = "apps.icon"
+	MethodGroupsList          = "groups.list"
+	MethodGroupsApply         = "groups.apply"
+	MethodGroupsIcon          = "groups.icon"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -153,6 +156,35 @@ type AppIconDTO struct {
 	MIME      string `json:"mime"`
 	DataB64   string `json:"data"` // base64 of icon bytes
 	Installed bool   `json:"installed"`
+}
+
+type GroupDTO struct {
+	Key         string   `json:"key"`
+	DisplayName string   `json:"displayName"`
+	Description string   `json:"description"`
+	Patterns    []string `json:"patterns"`
+}
+
+type GroupsIconParams struct {
+	Key string `json:"key"`
+}
+
+type GroupIconDTO struct {
+	Key     string `json:"key"`
+	MIME    string `json:"mime"`
+	DataB64 string `json:"data"`
+}
+
+type GroupsApplyParams struct {
+	Key       string `json:"key"`       // group key (e.g. "anthropic")
+	Action    string `json:"action"`    // "block" or "route"
+	Interface string `json:"interface"` // empty for block, required for route
+	Enabled   bool   `json:"enabled"`
+}
+
+type GroupsApplyResult struct {
+	Created  []RuleDTO `json:"created"`  // rules that were inserted
+	Skipped  []string  `json:"skipped"`  // patterns skipped because they already exist
 }
 
 type SystemDNSStatus struct {

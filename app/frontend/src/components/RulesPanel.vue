@@ -1,18 +1,91 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
-import { ListRules, AddRule, UpdateRule, DeleteRule, Interfaces, Apps } from '../../wailsjs/go/main/App';
+import { ListRules, AddRule, UpdateRule, DeleteRule, Interfaces, Apps, Groups, ApplyGroup } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import AppIcon from './AppIcon.vue';
+import GroupIcon from './GroupIcon.vue';
 
 const emit = defineEmits<{ (e: 'changed'): void }>();
 
 const rules = ref<ipc.RuleDTO[]>([]);
 const interfaces = ref<ipc.InterfaceDTO[]>([]);
 const apps = ref<ipc.AppDTO[]>([]);
+const knownGroups = ref<ipc.GroupDTO[]>([]);
 const error = ref<string>('');
 const pendingDelete = ref<number | null>(null);
 let pendingDeleteTimer: number | undefined;
 let ifaceTimer: number | undefined;
+
+// Group-apply working state. When the user clicks a group card, this
+// gets populated with the same shape as `draft` so the same binding
+// picker UI can be reused.
+const groupApply = ref<{
+  key: string;
+  action: 'block' | 'route';
+  binding: 'iface' | 'app';
+  iface: string;
+  apps: string[];
+  enabled: boolean;
+} | null>(null);
+
+function openGroupForm(g: ipc.GroupDTO) {
+  groupApply.value = {
+    key: g.key,
+    action: 'block',
+    binding: 'iface',
+    iface: '',
+    apps: [],
+    enabled: true,
+  };
+}
+
+function closeGroupForm() { groupApply.value = null; }
+
+function toggleGroupApp(key: string) {
+  if (!groupApply.value) return;
+  const idx = groupApply.value.apps.indexOf(key);
+  if (idx >= 0) groupApply.value.apps.splice(idx, 1);
+  else groupApply.value.apps.push(key);
+}
+
+function groupInterfaceField(): string {
+  const g = groupApply.value;
+  if (!g || g.action !== 'route') return '';
+  if (g.binding === 'app' && g.apps.length > 0) return `app:${g.apps.join(',')}`;
+  if (g.binding === 'iface') return g.iface;
+  return '';
+}
+
+function groupApplyValid(): boolean {
+  const g = groupApply.value;
+  if (!g) return false;
+  if (g.action === 'block') return true;
+  if (g.binding === 'iface') return !!g.iface;
+  return g.apps.length > 0;
+}
+
+async function applyGroup() {
+  const g = groupApply.value;
+  if (!g || !groupApplyValid()) return;
+  try {
+    const result = await ApplyGroup(g.key, g.action, groupInterfaceField(), g.enabled);
+    const created = result.created?.length || 0;
+    const skipped = result.skipped?.length || 0;
+    error.value = '';
+    if (skipped > 0) {
+      error.value = `Created ${created} rule(s); ${skipped} pattern(s) skipped (already exist).`;
+    }
+    groupApply.value = null;
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  }
+}
+
+function groupByKey(key: string): ipc.GroupDTO | undefined {
+  return knownGroups.value.find(g => g.key === key);
+}
 
 // Action model:
 //   block — return NXDOMAIN
@@ -144,6 +217,9 @@ async function refresh() {
     rules.value = (await ListRules()) || [];
     interfaces.value = (await Interfaces()) || [];
     apps.value = (await Apps()) || [];
+    if (knownGroups.value.length === 0) {
+      knownGroups.value = (await Groups()) || [];
+    }
     error.value = '';
   } catch (e: any) {
     error.value = e?.message || String(e);
@@ -276,6 +352,75 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
   <div class="panel">
     <h2>Rules</h2>
     <div v-if="error" class="error">{{ error }}</div>
+
+    <!-- Quick add from a known service group -->
+    <div class="groups-bar">
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px">
+        Quick add — one click creates rules for every domain of a service:
+      </div>
+      <div class="row" style="gap: 6px; flex-wrap: wrap">
+        <button v-for="g in knownGroups" :key="g.key"
+                class="group-card"
+                @click="openGroupForm(g)"
+                :title="g.description + '\n\n' + g.patterns.join('\n')">
+          <GroupIcon :group-key="g.key" :size="20" />
+          <span class="group-name">{{ g.displayName }}</span>
+          <span class="muted" style="font-size: 10px">{{ g.patterns.length }} domain{{ g.patterns.length === 1 ? '' : 's' }}</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Inline group-apply form, opens when a group card is clicked -->
+    <div v-if="groupApply" class="add-form" style="border-left: 3px solid var(--accent)">
+      <div class="row" style="gap: 10px; align-items: center; margin-bottom: 8px">
+        <GroupIcon :group-key="groupApply.key" :size="22" />
+        <strong>{{ groupByKey(groupApply.key)?.displayName }}</strong>
+        <span class="muted" style="font-size: 11px">
+          {{ groupByKey(groupApply.key)?.patterns.length }} pattern(s):
+          <code style="font-size: 11px">{{ groupByKey(groupApply.key)?.patterns.join(', ') }}</code>
+        </span>
+      </div>
+      <div class="row" style="gap: 8px">
+        <select v-model="groupApply.action" style="width: 100px">
+          <option value="block">block</option>
+          <option value="route">route</option>
+        </select>
+        <label class="toggle">
+          <input type="checkbox" v-model="groupApply.enabled" />
+          <span class="track"></span>
+        </label>
+        <button class="primary" @click="applyGroup" :disabled="!groupApplyValid()">Create rules</button>
+        <button @click="closeGroupForm">Cancel</button>
+      </div>
+      <div v-if="groupApply.action === 'route'" class="col" style="gap: 10px; margin-top: 10px">
+        <div class="row" style="gap: 8px; align-items: center">
+          <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
+          <div class="row" style="gap: 0">
+            <button :class="['seg', {active: groupApply.binding === 'iface'}]" @click="groupApply.binding = 'iface'">Interface</button>
+            <button :class="['seg', {active: groupApply.binding === 'app'}]" @click="groupApply.binding = 'app'">App</button>
+          </div>
+          <select v-if="groupApply.binding === 'iface'" v-model="groupApply.iface" style="flex: 1">
+            <option value="">— pick interface —</option>
+            <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
+          </select>
+          <span v-else class="muted" style="font-size: 11px; flex: 1">
+            select one or more — daemon uses the first one that's running
+            <span v-if="groupApply.apps.length" style="color: var(--accent); font-weight: 600">
+              · {{ groupApply.apps.length }} selected
+            </span>
+          </span>
+        </div>
+        <div v-if="groupApply.binding === 'app'" class="chip-grid">
+          <button v-for="a in apps" :key="a.key"
+                  :class="['app-chip', {active: groupApply.apps.includes(a.key), 'not-installed': !a.installed, 'not-running': a.installed && !a.currentInterface}]"
+                  @click="toggleGroupApp(a.key)">
+            <AppIcon :app-key="a.key" :size="20" />
+            <span>{{ a.displayName }}</span>
+            <span v-if="groupApply.apps.includes(a.key)" class="chip-rank">{{ groupApply.apps.indexOf(a.key) + 1 }}</span>
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div class="add-form">
       <div class="row" style="gap: 8px">
@@ -512,6 +657,28 @@ tr.edit-row td {
 }
 .app-chip.not-installed { opacity: 0.45; }
 .app-chip.not-running { color: var(--warn); }
+
+.groups-bar {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.group-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+.group-card:hover { background: var(--border); border-color: var(--accent); }
+.group-card .group-name { font-weight: 600; }
 
 .chip-rank {
   display: inline-flex;

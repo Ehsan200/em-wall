@@ -164,3 +164,23 @@ func (a *App) AppIcon(key string) (ipc.AppIconDTO, error) {
 	err := a.call(ipc.MethodAppsIcon, ipc.AppsIconParams{Key: key}, &out)
 	return out, err
 }
+
+func (a *App) Groups() ([]ipc.GroupDTO, error) {
+	var out []ipc.GroupDTO
+	err := a.call(ipc.MethodGroupsList, nil, &out)
+	return out, err
+}
+
+func (a *App) ApplyGroup(key, action, iface string, enabled bool) (ipc.GroupsApplyResult, error) {
+	var out ipc.GroupsApplyResult
+	err := a.call(ipc.MethodGroupsApply, ipc.GroupsApplyParams{
+		Key: key, Action: action, Interface: iface, Enabled: enabled,
+	}, &out)
+	return out, err
+}
+
+func (a *App) GroupIcon(key string) (ipc.GroupIconDTO, error) {
+	var out ipc.GroupIconDTO
+	err := a.call(ipc.MethodGroupsIcon, ipc.GroupsIconParams{Key: key}, &out)
+	return out, err
+}
