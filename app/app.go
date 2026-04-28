@@ -152,3 +152,15 @@ func (a *App) SystemRoutes() ([]ipc.SystemRouteDTO, error) {
 	err := a.call(ipc.MethodSystemRoutesList, nil, &out)
 	return out, err
 }
+
+func (a *App) Apps() ([]ipc.AppDTO, error) {
+	var out []ipc.AppDTO
+	err := a.call(ipc.MethodAppsList, nil, &out)
+	return out, err
+}
+
+func (a *App) AppIcon(key string) (ipc.AppIconDTO, error) {
+	var out ipc.AppIconDTO
+	err := a.call(ipc.MethodAppsIcon, ipc.AppsIconParams{Key: key}, &out)
+	return out, err
+}

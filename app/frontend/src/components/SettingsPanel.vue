@@ -111,6 +111,12 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           so this firewall sees every query. Original settings are saved before
           activation and restored on deactivate.
         </span>
+        <span class="muted" style="font-size: 11px; color: var(--warn)">
+          ⚠ Limitation: VPN apps that push their own DNS via NetworkExtension
+          (v2box, Tailscale, etc.) bypass this hijack while connected. To make
+          this firewall see those queries too, configure the VPN app itself to
+          use <code>127.0.0.1</code> as its DNS upstream.
+        </span>
 
         <div v-if="sysStatus" class="col" style="gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border)">
           <div class="row" style="gap: 12px"><span class="label muted" style="min-width: 140px">Upstream (validated)</span>

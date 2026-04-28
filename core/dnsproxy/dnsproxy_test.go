@@ -209,6 +209,326 @@ type fakeIfaces struct{ up map[string]bool }
 
 func (f fakeIfaces) IsUp(name string) bool { return f.up[name] }
 
+func TestServer_RouteFailure_NX(t *testing.T) {
+	answer := new(dns.Msg)
+	answer.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "x.work.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("1.2.3.4"),
+		},
+	}
+	fwd := &fakeForwarder{resp: answer}
+	// Routes manager that ALWAYS fails to install — simulates
+	// `route add -interface app:tailscale` against a non-existent iface.
+	routes := &fakeRoutes{err: errors.New("no such network interface")}
+	logs := &fakeLogs{}
+	rs := []rules.Rule{
+		{ID: 99, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "utun3", Enabled: true},
+	}
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen:     addr,
+		Decider:    eng,
+		Forwarder:  fwd,
+		Routes:     routes,
+		Interfaces: fakeIfaces{up: map[string]bool{"utun3": true}},
+		Logs:       logs,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("expected NXDOMAIN when route install fails, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "block-route-failed" {
+		t.Errorf("expected block-route-failed log, got %+v", logs.entries)
+	}
+}
+
+type fakeAppLocator struct {
+	current   map[string]string
+	holdMS    int // simulated lock-acquisition delay (writer is holding)
+	timeoutMS int // when set, AcquireForRead never returns ok (simulates persistent transition)
+}
+
+func (f *fakeAppLocator) Current(key string) string { return f.current[key] }
+
+func (f *fakeAppLocator) FirstAvailable(keys []string) (string, string) {
+	for _, k := range keys {
+		if v := f.current[k]; v != "" {
+			return k, v
+		}
+	}
+	return "", ""
+}
+
+func (f *fakeAppLocator) AcquireForRead(_ string, timeout time.Duration) (func(), bool) {
+	if f.timeoutMS > 0 {
+		// simulate write-lock hogging the entire timeout
+		time.Sleep(timeout)
+		return func() {}, false
+	}
+	if f.holdMS > 0 {
+		time.Sleep(time.Duration(f.holdMS) * time.Millisecond)
+	}
+	return func() {}, true
+}
+
+func TestServer_AppPrefix_ResolvesToCurrentUtun(t *testing.T) {
+	answer := new(dns.Msg)
+	answer.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "x.work.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("1.2.3.4"),
+		},
+	}
+	fwd := &fakeForwarder{resp: answer}
+	routes := &fakeRoutes{}
+	logs := &fakeLogs{}
+	apps := &fakeAppLocator{current: map[string]string{"v2box": "utun7"}}
+	rs := []rules.Rule{
+		{ID: 11, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "app:v2box", Enabled: true},
+	}
+
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen:     addr,
+		Decider:    eng,
+		Forwarder:  fwd,
+		Routes:     routes,
+		Interfaces: fakeIfaces{up: map[string]bool{"utun7": true}},
+		Apps:       apps,
+		Logs:       logs,
+		AppHoldMax: 200 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if len(routes.calls) != 1 || routes.calls[0].iface != "utun7" {
+		t.Errorf("expected install via utun7 (resolved from app:v2box), got %+v", routes.calls)
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "route" || logs.entries[0].iface != "app:v2box → utun7" {
+		t.Errorf("expected one route log 'app:v2box → utun7', got %+v", logs.entries)
+	}
+}
+
+func TestServer_AppPrefix_NXWhenAppDown(t *testing.T) {
+	fwd := &fakeForwarder{}
+	logs := &fakeLogs{}
+	apps := &fakeAppLocator{current: map[string]string{}} // no app running
+	rs := []rules.Rule{
+		{ID: 12, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "app:v2box", Enabled: true},
+	}
+
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen: addr, Decider: eng, Forwarder: fwd, Apps: apps, Logs: logs,
+		AppHoldMax: 100 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("expected NXDOMAIN, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if fwd.calls != 0 {
+		t.Errorf("should not forward when app is down")
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-down" {
+		t.Errorf("expected one block-app-down log, got %+v", logs.entries)
+	}
+}
+
+// Bug repro: rule binds to a specific app (Tailscale), a DIFFERENT
+// app (v2box) is running. The rule must NOT match v2box just
+// because *some* VPN is up — the rule says Tailscale, Tailscale is
+// not running, NXDOMAIN with block-app-down.
+func TestServer_AppPrefix_OnlyMatchingAppCounts(t *testing.T) {
+	answer := new(dns.Msg)
+	answer.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "x.work.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("1.2.3.4"),
+		},
+	}
+	fwd := &fakeForwarder{resp: answer}
+	routes := &fakeRoutes{}
+	logs := &fakeLogs{}
+	// v2box is running on utun4. Tailscale is NOT.
+	apps := &fakeAppLocator{current: map[string]string{"v2box": "utun4"}}
+	rs := []rules.Rule{
+		{ID: 31, Pattern: "*.work.com", Action: rules.ActionAllow,
+			Interface: "app:tailscale", Enabled: true},
+	}
+
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen: addr, Decider: eng, Forwarder: fwd, Routes: routes,
+		Interfaces: fakeIfaces{up: map[string]bool{"utun4": true}},
+		Apps:       apps, Logs: logs,
+		AppHoldMax: 100 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("expected NXDOMAIN — rule says app:tailscale and only v2box is running; got %s",
+			dns.RcodeToString[resp.Rcode])
+	}
+	if fwd.calls != 0 {
+		t.Errorf("daemon must NOT forward upstream when the named app is down")
+	}
+	if len(routes.calls) != 0 {
+		t.Errorf("daemon must NOT install routes via v2box for a tailscale-bound rule")
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-down" {
+		t.Errorf("expected one block-app-down log, got %+v", logs.entries)
+	}
+}
+
+func TestServer_AppPrefix_MultiApp_PicksFirstRunning(t *testing.T) {
+	answer := new(dns.Msg)
+	answer.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "x.work.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("1.2.3.4"),
+		},
+	}
+	fwd := &fakeForwarder{resp: answer}
+	routes := &fakeRoutes{}
+	logs := &fakeLogs{}
+	// v2box not running, hiddify running on utun9
+	apps := &fakeAppLocator{current: map[string]string{"hiddify": "utun9"}}
+	rs := []rules.Rule{
+		{ID: 21, Pattern: "*.work.com", Action: rules.ActionAllow,
+			Interface: "app:v2box,hiddify", Enabled: true},
+	}
+
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen: addr, Decider: eng, Forwarder: fwd, Routes: routes,
+		Interfaces: fakeIfaces{up: map[string]bool{"utun9": true}},
+		Apps:       apps, Logs: logs,
+		AppHoldMax: 200 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR with multi-app fallback, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if len(routes.calls) != 1 || routes.calls[0].iface != "utun9" {
+		t.Errorf("expected route via utun9 (hiddify, fallback from v2box), got %+v", routes.calls)
+	}
+}
+
+func TestServer_AppPrefix_MultiApp_AllDownNX(t *testing.T) {
+	fwd := &fakeForwarder{}
+	logs := &fakeLogs{}
+	apps := &fakeAppLocator{current: map[string]string{}} // none running
+	rs := []rules.Rule{
+		{ID: 22, Pattern: "*.work.com", Action: rules.ActionAllow,
+			Interface: "app:v2box,hiddify,tailscale", Enabled: true},
+	}
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen: addr, Decider: eng, Forwarder: fwd, Apps: apps, Logs: logs,
+		AppHoldMax: 100 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("expected NXDOMAIN when all apps are down, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if fwd.calls != 0 {
+		t.Errorf("should not forward when no app available")
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-down" {
+		t.Errorf("expected one block-app-down log, got %+v", logs.entries)
+	}
+}
+
+func TestServer_AppPrefix_NXOnTransitionTimeout(t *testing.T) {
+	fwd := &fakeForwarder{}
+	logs := &fakeLogs{}
+	apps := &fakeAppLocator{current: map[string]string{"v2box": "utun7"}, timeoutMS: 1}
+	rs := []rules.Rule{
+		{ID: 13, Pattern: "*.work.com", Action: rules.ActionAllow, Interface: "app:v2box", Enabled: true},
+	}
+
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	eng := decision.New(ruleSet(rs))
+	_ = eng.Reload(context.Background())
+	s, _ := New(Config{
+		Listen: addr, Decider: eng, Forwarder: fwd, Apps: apps, Logs: logs,
+		AppHoldMax: 50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	<-s.Ready()
+
+	resp := query(t, addr, "x.work.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("expected NXDOMAIN on transition timeout, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if fwd.calls != 0 {
+		t.Errorf("should not forward during transition timeout")
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-busy" {
+		t.Errorf("expected one block-app-busy log, got %+v", logs.entries)
+	}
+}
+
 func TestServer_RouteIfaceDown_NXDOMAIN(t *testing.T) {
 	answer := new(dns.Msg)
 	answer.Answer = []dns.RR{

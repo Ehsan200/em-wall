@@ -28,10 +28,10 @@ pfctl -a em-wall -F all 2>/dev/null || true
 echo "==> removing files"
 rm -f "$PLIST_DST" "$DAEMON_BIN_DST" "$SOCKET" "$ANCHOR_FILE"
 
-if grep -q '^anchor "em-wall"' "$PF_CONF"; then
+if grep -qE '^(rdr-)?anchor "em-wall"' "$PF_CONF"; then
     echo "==> stripping em-wall lines from $PF_CONF"
     cp "$PF_CONF" "$PF_CONF.em-wall.uninstall.$(date +%s)"
-    sed -i.tmp '/em-wall: encrypted DNS blocking anchor/d;/^anchor "em-wall"$/d;/^load anchor "em-wall" from /d' "$PF_CONF"
+    sed -i.tmp '/em-wall: anchors for DNS hijack/d;/em-wall: encrypted DNS blocking anchor/d;/^rdr-anchor "em-wall"$/d;/^anchor "em-wall"$/d;/^load anchor "em-wall" from /d' "$PF_CONF"
     rm -f "$PF_CONF.tmp"
     pfctl -f "$PF_CONF" || true
 fi

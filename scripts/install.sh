@@ -39,19 +39,22 @@ chmod 0644 "$ANCHOR_FILE"
 if ! grep -q '^anchor "em-wall"' "$PF_CONF"; then
     echo "==> patching $PF_CONF (adding em-wall anchor)"
     cp "$PF_CONF" "$PF_CONF.em-wall.bak.$(date +%s)"
+    # Strip any partial prior state.
+    sed -i.tmp '/em-wall: anchors for DNS hijack/d;/em-wall: encrypted DNS blocking anchor/d;/^rdr-anchor "em-wall"$/d;/^anchor "em-wall"$/d;/^load anchor "em-wall" from /d' "$PF_CONF"
+    rm -f "$PF_CONF.tmp"
     {
         echo ''
         echo '# em-wall: encrypted DNS blocking anchor'
         echo 'anchor "em-wall"'
         echo 'load anchor "em-wall" from "/etc/pf.anchors/em-wall"'
     } >> "$PF_CONF"
-    pfctl -f "$PF_CONF" || echo "warning: pfctl reload failed (pf may not be enabled yet)"
 else
     echo "==> $PF_CONF already references em-wall anchor"
 fi
 
 echo "==> ensuring pf is enabled"
 pfctl -e 2>/dev/null || true
+pfctl -f "$PF_CONF" 2>/dev/null || true
 
 echo "==> installing LaunchDaemon plist"
 install -m 0644 -o root -g wheel "$PLIST_SRC" "$PLIST_DST"

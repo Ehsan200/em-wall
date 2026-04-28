@@ -3,8 +3,10 @@ import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { RecentLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
+type Filter = 'all' | 'block' | 'route' | 'unavailable';
+
 const logs = ref<ipc.LogDTO[]>([]);
-const filter = ref<'all' | 'block' | 'route' | 'block-iface-down'>('all');
+const filter = ref<Filter>('all');
 const search = ref<string>('');
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
@@ -20,10 +22,20 @@ async function refresh() {
   }
 }
 
+// "Unavailable" groups every block-* variant except plain `block`:
+// iface-down, app-down, app-busy, app-unsupported.
+function isUnavailable(action: string): boolean {
+  return action.startsWith('block-');
+}
+
 const filtered = computed(() => {
   let xs = logs.value;
-  if (filter.value !== 'all') {
-    xs = xs.filter(l => l.action === filter.value);
+  if (filter.value === 'block') {
+    xs = xs.filter(l => l.action === 'block');
+  } else if (filter.value === 'route') {
+    xs = xs.filter(l => l.action === 'route');
+  } else if (filter.value === 'unavailable') {
+    xs = xs.filter(l => isUnavailable(l.action));
   }
   if (search.value.trim()) {
     const q = search.value.trim().toLowerCase();
@@ -33,11 +45,11 @@ const filtered = computed(() => {
 });
 
 const counts = computed(() => {
-  const c = { block: 0, route: 0, ifdown: 0 };
+  const c = { block: 0, route: 0, unavailable: 0 };
   for (const l of logs.value) {
     if (l.action === 'block') c.block++;
     else if (l.action === 'route') c.route++;
-    else if (l.action === 'block-iface-down') c.ifdown++;
+    else if (isUnavailable(l.action)) c.unavailable++;
   }
   return c;
 });
@@ -47,7 +59,9 @@ function fmtTime(s: string): string {
 }
 
 function actionTag(action: string): string {
-  if (action === 'block' || action === 'block-iface-down') return 'tag tag-block';
+  // Anything blocked (rule match, iface down, app down, app busy
+  // during transition, app unsupported) is red. "route" stays blue.
+  if (action.startsWith('block')) return 'tag tag-block';
   if (action === 'route') return 'tag tag-route';
   return 'tag tag-off';
 }
@@ -74,8 +88,9 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
         <button :class="{active: filter==='route'}" class="seg" @click="filter='route'">
           Routed <span class="count">{{ counts.route }}</span>
         </button>
-        <button :class="{active: filter==='block-iface-down'}" class="seg" @click="filter='block-iface-down'">
-          Iface down <span class="count">{{ counts.ifdown }}</span>
+        <button :class="{active: filter==='unavailable'}" class="seg" @click="filter='unavailable'"
+                title="Iface down + App down + App busy + App unsupported">
+          Unavailable <span class="count">{{ counts.unavailable }}</span>
         </button>
       </div>
       <input v-model="search" placeholder="filter by domain…" style="width: 220px" />

@@ -127,6 +127,27 @@ func (m *Manager) RemoveByRule(ctx context.Context, ruleID int64) error {
 	return firstErr
 }
 
+// RemoveByInterface flushes every route currently pinned to iface.
+// Used by the applocator watcher when an app's utun number changes —
+// stale routes via the old utun must go before the new ones land.
+func (m *Manager) RemoveByInterface(ctx context.Context, iface string) error {
+	m.mu.Lock()
+	var hosts []string
+	for h, e := range m.routes {
+		if e.iface == iface {
+			hosts = append(hosts, h)
+		}
+	}
+	m.mu.Unlock()
+	var firstErr error
+	for _, h := range hosts {
+		if err := m.Remove(ctx, h); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // SweepExpired removes routes whose TTL has passed.
 func (m *Manager) SweepExpired(ctx context.Context) int {
 	now := m.now()
@@ -238,18 +259,21 @@ type Interface struct {
 	Owner string // best-effort label, e.g. "Tailscale", "WireGuard", "VPN: Work"
 }
 
-// detectVPNOwners labels tunnel interfaces with their owner. Strategy
-// (in priority order, later sources only fill gaps):
+// detectVPNOwners labels tunnel interfaces with their owner. Two
+// sources, both per-interface and accurate:
 //
-//  1. lsof: every process with an open `utun_control` ctl-socket has
-//     a "unit" number that maps directly to the utun. Most accurate
-//     when this code runs as root (which the daemon does).
+//  1. lsof on /Applications/X.app processes attached to the utun.
+//     Skips Apple system processes (nesessionmanager etc.). Resolves
+//     generic "PacketTunnel" NEPacketTunnelProvider helpers to their
+//     parent .app via `ps -o command=`.
 //
-//  2. SystemConfiguration via scutil — picks up NEPacketTunnelProvider
-//     VPNs registered as a Network Service.
+//  2. SystemConfiguration via scutil — picks up VPNs registered as
+//     Network Services and overlays a friendlier name.
 //
-//  3. Process-name scan — last-ditch hint for known VPN binaries; can
-//     only label "some VPN is running", not which utun is which.
+// We deliberately do NOT fall back to a global process scan: a
+// global "v2box is running somewhere" hint applied to every utun is
+// misleading (Apple's rapportd/identityservicesd own utuns too).
+// Honest "—" beats wrong-but-plausible.
 func detectVPNOwners() map[string]string {
 	out := map[string]string{}
 
@@ -268,105 +292,103 @@ func detectVPNOwners() map[string]string {
 		}
 	}
 
-	// 2. Process-scan fallback for tunnels not covered above.
-	psOut, _ := exec.Command("/bin/ps", "-axo", "comm").Output()
-	procs := strings.ToLower(string(psOut))
-	containsAny := func(needles ...string) bool {
-		for _, n := range needles {
-			if strings.Contains(procs, n) {
-				return true
-			}
-		}
-		return false
-	}
-
-	var hints []string
-	if containsAny("tailscaled", "tailscale.app") {
-		hints = append(hints, "Tailscale")
-	}
-	if containsAny("wireguard-go", "wg-quick", "wireguard.app") {
-		hints = append(hints, "WireGuard")
-	}
-	if containsAny("openvpn", "tunnelblick", "viscosity") {
-		hints = append(hints, "OpenVPN")
-	}
-	if containsAny("warp-svc", "cloudflarewarp") {
-		hints = append(hints, "Cloudflare WARP")
-	}
-	if containsAny("nordvpn") {
-		hints = append(hints, "NordVPN")
-	}
-	if containsAny("expressvpn") {
-		hints = append(hints, "ExpressVPN")
-	}
-	if containsAny("protonvpn") {
-		hints = append(hints, "ProtonVPN")
-	}
-	if containsAny("mullvad") {
-		hints = append(hints, "Mullvad")
-	}
-	if containsAny("globalprotect") {
-		hints = append(hints, "GlobalProtect")
-	}
-	if containsAny("anyconnect", "cisco_secure_client") {
-		hints = append(hints, "Cisco AnyConnect")
-	}
-	if containsAny("v2box", "v2ray", "v2rayn") {
-		hints = append(hints, "v2box")
-	}
-	if containsAny("clash", "clashx", "clashverge", "stash") {
-		hints = append(hints, "Clash")
-	}
-	if containsAny("shadowsocks") {
-		hints = append(hints, "Shadowsocks")
-	}
-
-	if len(hints) > 0 {
-		label := strings.Join(hints, " / ")
-		ifs, _ := net.Interfaces()
-		for _, ifc := range ifs {
-			if ifc.Flags&net.FlagUp == 0 {
-				continue
-			}
-			if !isTunnelName(ifc.Name) {
-				continue
-			}
-			if _, already := out[ifc.Name]; already {
-				continue
-			}
-			out[ifc.Name] = label + " (process-scan)"
-		}
-	}
 	return out
 }
 
-// lsofUtunOwners returns iface→process-name for every utun that has
-// a known owning process. Walks `lsof -nP` output and matches lines
-// with `[ctl com.apple.net.utun_control id <id> unit <unit>]` — the
-// `unit` number maps to utun(unit-1). Requires root for full
-// visibility; the daemon runs as root so this is fine in production.
+// LsofUtunOwners is the exported alias for use by other packages
+// (e.g. applocator) that need the same per-utun process map.
+func LsofUtunOwners() map[string]string { return lsofUtunOwners() }
+
+// lsofUtunOwners returns iface→owner-name for every utun that has a
+// known owning process. Walks `lsof -nP +c 0` output (no name
+// truncation) for `[ctl com.apple.net.utun_control … unit U]`.
+//
+// Resolution rules per utun:
+//
+//  1. Apple system processes (nesessionmanager, rapportd,
+//     identityservicesd, configd) are *skipped* as candidates — they
+//     attach to utuns owned by other apps but aren't the real owner.
+//
+//  2. For NetworkExtension tunnels the owner shows up as the generic
+//     "PacketTunnel" (the appex binary, same name across every
+//     NEPacketTunnelProvider VPN). We resolve the actual app by
+//     reading the process's full path via `ps -o command= -p <pid>`
+//     and extracting `/Applications/<App>.app`.
+//
+//  3. Anything else is reported under its own process name.
+//
+// Requires root for full lsof visibility; the daemon runs as root so
+// this is fine in production.
 func lsofUtunOwners() map[string]string {
 	out := map[string]string{}
-	cmd := exec.Command("/usr/sbin/lsof", "-nP")
+	cmd := exec.Command("/usr/sbin/lsof", "-nP", "+c", "0")
 	b, err := cmd.Output()
 	if err != nil {
 		return out
 	}
-	re := regexp.MustCompile(`(\S+)\s+\d+\s.*\[ctl com\.apple\.net\.utun_control id \d+ unit (\d+)\]`)
+	re := regexp.MustCompile(`(\S+)\s+(\d+)\s.*\[ctl com\.apple\.net\.utun_control id \d+ unit (\d+)\]`)
+
+	type cand struct{ proc, pid string }
+	perUtun := map[string][]cand{}
+
 	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
-		proc := m[1]
-		unit, err := strconv.Atoi(m[2])
+		proc, pid := m[1], m[2]
+		unit, err := strconv.Atoi(m[3])
 		if err != nil || unit < 1 {
 			continue
 		}
-		ifname := fmt.Sprintf("utun%d", unit-1)
-		// Don't overwrite — keep the first process seen so multiple fd
-		// holders on the same tunnel don't churn the label.
-		if _, ok := out[ifname]; !ok {
-			out[ifname] = proc
+		if isAppleSystemProc(proc) {
+			continue
 		}
+		ifname := fmt.Sprintf("utun%d", unit-1)
+		perUtun[ifname] = append(perUtun[ifname], cand{proc, pid})
+	}
+
+	for ifname, cs := range perUtun {
+		// Prefer a candidate whose process name we can resolve back to
+		// a /Applications/X.app bundle (the real VPN app). Falls
+		// through to the raw process name otherwise.
+		var resolved string
+		for _, c := range cs {
+			if name := bundleNameForPid(c.pid); name != "" {
+				resolved = name
+				break
+			}
+		}
+		if resolved == "" && len(cs) > 0 {
+			resolved = cs[0].proc
+		}
+		out[ifname] = resolved
 	}
 	return out
+}
+
+// isAppleSystemProc identifies Apple-shipped processes that hold open
+// fds on user VPN utuns but aren't the real owners.
+func isAppleSystemProc(name string) bool {
+	switch name {
+	case "nesessionmanager", "rapportd", "identityservicesd",
+		"configd", "neagent", "mDNSResponder":
+		return true
+	}
+	return false
+}
+
+var bundleNameRe = regexp.MustCompile(`/Applications/([^/]+)\.app`)
+
+// bundleNameForPid returns the leaf .app name from the executable
+// path of the given pid (e.g. "v2box" for
+// /Applications/v2box.app/Contents/PlugIns/PacketTunnel.appex/...).
+// Returns "" if the path isn't under /Applications/.
+func bundleNameForPid(pid string) string {
+	out, err := exec.Command("/bin/ps", "-o", "command=", "-p", pid).Output()
+	if err != nil {
+		return ""
+	}
+	if m := bundleNameRe.FindStringSubmatch(string(out)); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // scutilServiceMapping returns iface→service-name for every network

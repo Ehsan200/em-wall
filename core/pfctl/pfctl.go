@@ -102,9 +102,9 @@ func (m *Manager) Sync(ctx context.Context, desiredOn bool) error {
 // use them as upstream resolvers.
 func blockRules() string {
 	v4 := []string{
-		"1.1.1.1", "1.0.0.1", // Cloudflare
-		"8.8.8.8", "8.8.4.4", // Google
-		"9.9.9.9", "149.112.112.112", // Quad9
+		"1.1.1.1", "1.0.0.1",
+		"8.8.8.8", "8.8.4.4",
+		"9.9.9.9", "149.112.112.112",
 	}
 	v6 := []string{
 		"2606:4700:4700::1111", "2606:4700:4700::1001",

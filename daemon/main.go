@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ehsan/em-wall/core/applocator"
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/dnsproxy"
 	"github.com/ehsan/em-wall/core/ipc"
@@ -26,6 +28,13 @@ import (
 	"github.com/ehsan/em-wall/core/routing"
 	"github.com/ehsan/em-wall/core/rules"
 )
+
+// lsofProvider adapts core/routing's exported LsofUtunOwners to the
+// LsofProvider interface that applocator depends on. Keeps applocator
+// free of any direct dependency on routing.
+type lsofProvider struct{}
+
+func (lsofProvider) LsofUtunOwners() map[string]string { return routing.LsofUtunOwners() }
 
 const Version = "0.1.0"
 
@@ -57,6 +66,8 @@ func main() {
 	router := routing.New(nil)
 	pf := pfctl.New(nil)
 	sysDNS := NewSystemDNS(nil)
+	apps := applocator.NewResolver(lsofProvider{})
+	apps.Refresh() // populate initial app→utun mapping
 
 	logSink := &storeLogSink{store: store}
 
@@ -72,6 +83,7 @@ func main() {
 		Forwarder:  fwd,
 		Routes:     router,
 		Interfaces: dnsproxy.DefaultInterfaceChecker,
+		Apps:       apps,
 		Logs:       logSink,
 		Logger:     log.Default(),
 	})
@@ -87,6 +99,7 @@ func main() {
 		pf:         pf,
 		sysDNS:     sysDNS,
 		dnsServer:  dnsServer,
+		apps:       apps,
 		listenAddr: *listenAddr,
 		upstream:   joinCSV(upstreams),
 		startedAt:  time.Now(),
@@ -118,7 +131,7 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 
 	go func() {
 		defer wg.Done()
@@ -147,6 +160,34 @@ func main() {
 				return
 			case <-t.C:
 				router.SweepExpired(ctx)
+			}
+		}
+	}()
+
+	// App watcher: 1s tick. On each detected change, take the per-app
+	// write-lock (queries for that app block briefly), flush stale
+	// per-host routes pinned to the old utun, then release. The next
+	// query installs fresh routes via the new utun. New rules are
+	// picked up automatically by the next query (engine cache).
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				changes := apps.Refresh()
+				for _, c := range changes {
+					release := apps.AcquireForWrite(c.Key)
+					if c.Old != "" {
+						_ = router.RemoveByInterface(ctx, c.Old)
+					}
+					log.Printf("em-walld: app %s: %s → %s", c.Key,
+						orDash(c.Old), orDash(c.New))
+					release()
+				}
 			}
 		}
 	}()
@@ -197,6 +238,7 @@ type handlerDeps struct {
 	pf         *pfctl.Manager
 	sysDNS     *SystemDNS
 	dnsServer  *dnsproxy.Server
+	apps       *applocator.Resolver
 	listenAddr string
 	upstream   string
 	startedAt  time.Time
@@ -269,6 +311,13 @@ func splitCSV(s string) []string {
 
 func joinCSV(parts []string) string { return strings.Join(parts, ",") }
 
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
 func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	s.Handle(ipc.MethodStatus, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		list, _ := d.store.List(ctx)
@@ -329,6 +378,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := d.store.Update(ctx, r); err != nil {
 			return nil, err
 		}
+		// Flush per-host routes installed for this rule. The next DNS
+		// query will reinstall them via the new binding (or not, if
+		// the rule is now disabled / now points elsewhere). Without
+		// this, switching a rule from utun4 to app:tailscale would
+		// leave the original utun4 routes in the OS table — letting
+		// browser-cached IPs reach the destination via the wrong path.
+		_ = d.router.RemoveByRule(ctx, p.ID)
 		_ = d.engine.Reload(ctx)
 		return map[string]any{"ok": true}, nil
 	})
@@ -445,6 +501,44 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			}
 		}
 		return out, nil
+	})
+
+	s.Handle(ipc.MethodAppsList, func(_ context.Context, _ json.RawMessage) (any, error) {
+		registry := d.apps.Apps()
+		out := make([]ipc.AppDTO, 0, len(registry))
+		for _, a := range registry {
+			path := a.InstalledPath()
+			if path == "" {
+				path = a.BundlePath // fall back to primary so UI has SOMETHING to show
+			}
+			out = append(out, ipc.AppDTO{
+				Key:          a.Key,
+				DisplayName:  a.DisplayName,
+				BundleID:     a.BundleID,
+				BundlePath:   path,
+				Installed:    a.IsInstalled(),
+				CurrentIface: d.apps.Current(a.Key),
+			})
+		}
+		return out, nil
+	})
+
+	s.Handle(ipc.MethodAppsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.AppsIconParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		a := applocator.FindByKey(p.Key)
+		if a == nil {
+			return nil, fmt.Errorf("unknown app: %s", p.Key)
+		}
+		icon := applocator.LoadIcon(*a)
+		return ipc.AppIconDTO{
+			Key:       a.Key,
+			MIME:      icon.MIME,
+			DataB64:   base64.StdEncoding.EncodeToString(icon.Data),
+			Installed: icon.Installed,
+		}, nil
 	})
 
 	s.Handle(ipc.MethodReload, func(ctx context.Context, _ json.RawMessage) (any, error) {

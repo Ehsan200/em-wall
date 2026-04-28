@@ -8,12 +8,12 @@ import (
 )
 
 type fakeRunner struct {
-	mu       sync.Mutex
-	plain    [][]string
-	withIn   [][]string
+	mu        sync.Mutex
+	plain     [][]string
+	withIn    [][]string
 	stdinSeen []string
-	out      []byte
-	err      error
+	out       []byte
+	err       error
 }
 
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
