@@ -28,17 +28,17 @@ type ErrorBody struct {
 
 // Method names. Keep this list as the single source of truth.
 const (
-	MethodStatus           = "status"
-	MethodRulesList        = "rules.list"
-	MethodRulesAdd         = "rules.add"
-	MethodRulesUpdate      = "rules.update"
-	MethodRulesDelete      = "rules.delete"
-	MethodSettingsGet      = "settings.get"
-	MethodSettingsSet      = "settings.set"
-	MethodLogsRecent       = "logs.recent"
-	MethodRoutesActive     = "routes.active"
-	MethodInterfacesList   = "interfaces.list"
-	MethodReload           = "reload"
+	MethodStatus              = "status"
+	MethodRulesList           = "rules.list"
+	MethodRulesAdd            = "rules.add"
+	MethodRulesUpdate         = "rules.update"
+	MethodRulesDelete         = "rules.delete"
+	MethodSettingsGet         = "settings.get"
+	MethodSettingsSet         = "settings.set"
+	MethodLogsRecent          = "logs.recent"
+	MethodRoutesActive        = "routes.active"
+	MethodInterfacesList      = "interfaces.list"
+	MethodReload              = "reload"
 	MethodSystemDNSStatus     = "system.dns.status"
 	MethodSystemDNSActivate   = "system.dns.activate"
 	MethodSystemDNSDeactivate = "system.dns.deactivate"
@@ -139,11 +139,11 @@ type SystemRouteDTO struct {
 }
 
 type AppDTO struct {
-	Key         string `json:"key"`
-	DisplayName string `json:"displayName"`
-	BundleID    string `json:"bundleId"`
-	BundlePath  string `json:"bundlePath"`
-	Installed   bool   `json:"installed"`
+	Key          string `json:"key"`
+	DisplayName  string `json:"displayName"`
+	BundleID     string `json:"bundleId"`
+	BundlePath   string `json:"bundlePath"`
+	Installed    bool   `json:"installed"`
 	CurrentIface string `json:"currentInterface"` // empty if not running
 }
 
@@ -183,13 +183,13 @@ type GroupsApplyParams struct {
 }
 
 type GroupsApplyResult struct {
-	Created  []RuleDTO `json:"created"`  // rules that were inserted
-	Skipped  []string  `json:"skipped"`  // patterns skipped because they already exist
+	Created []RuleDTO `json:"created"` // rules that were inserted
+	Skipped []string  `json:"skipped"` // patterns skipped because they already exist
 }
 
 type SystemDNSStatus struct {
-	Active            bool                `json:"active"`              // any service has 127.0.0.1
-	Upstream          []string            `json:"upstream"`            // current daemon upstream
-	DetectedResolvers []string            `json:"detectedResolvers"`   // what scutil sees (excl. loopback)
-	PerService        map[string][]string `json:"perService"`          // current per-service DNS
+	Active            bool                `json:"active"`            // any service has 127.0.0.1
+	Upstream          []string            `json:"upstream"`          // current daemon upstream
+	DetectedResolvers []string            `json:"detectedResolvers"` // what scutil sees (excl. loopback)
+	PerService        map[string][]string `json:"perService"`        // current per-service DNS
 }
