@@ -18,7 +18,9 @@ DB_DIR="/usr/local/var/em-wall"
 
 echo "==> building em-walld"
 pushd "$REPO_ROOT" >/dev/null
-go build -o "$REPO_ROOT/build/em-walld" ./daemon
+# -buildvcs=false: when invoked under sudo, git refuses to read .git/
+# because it's owned by the regular user. We don't need VCS stamping.
+go build -buildvcs=false -o "$REPO_ROOT/build/em-walld" ./daemon
 popd >/dev/null
 
 echo "==> installing binary to $DAEMON_BIN_DST"

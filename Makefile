@@ -15,7 +15,7 @@ daemon: $(DAEMON_BIN)
 
 $(DAEMON_BIN):
 	mkdir -p $(BUILD_DIR)
-	$(GO) build -o $(DAEMON_BIN) ./daemon
+	$(GO) build -buildvcs=false -o $(DAEMON_BIN) ./daemon
 
 app:
 	cd $(APP_DIR) && $(WAILS) build

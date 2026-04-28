@@ -91,6 +91,23 @@ function ifaceLabel(i: ipc.InterfaceDTO): string {
   return i.owner ? `${i.name} — ${i.owner}` : i.name;
 }
 
+// True if the rule's chosen interface is not currently up. Used to
+// surface a warning while preserving the saved value.
+function ifaceDown(name: string): boolean {
+  if (!name) return false;
+  return !interfaces.value.some(i => i.name === name);
+}
+
+// Returns the dropdown options for a given rule, always including the
+// rule's currently saved interface even if it's missing/down.
+function optionsFor(saved: string): { name: string; label: string; down: boolean }[] {
+  const opts = interfaces.value.map(i => ({ name: i.name, label: ifaceLabel(i), down: false }));
+  if (saved && !interfaces.value.some(i => i.name === saved)) {
+    opts.unshift({ name: saved, label: `${saved} — down`, down: true });
+  }
+  return opts;
+}
+
 onMounted(() => {
   refresh();
   ifaceTimer = window.setInterval(refreshInterfaces, 3000);
@@ -131,17 +148,22 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         </tr>
       </thead>
       <tbody>
-        <tr v-for="r in rules" :key="r.id">
+        <tr v-for="r in rules" :key="r.id" :class="{'rule-iface-down': r.action === 'allow' && r.interface && ifaceDown(r.interface)}">
           <td><code>{{ r.pattern }}</code></td>
           <td>
             <span :class="['tag', r.action === 'block' ? 'tag-block' : (r.interface ? 'tag-route' : 'tag-allow')]">
               {{ r.action === 'block' ? 'block' : (r.interface ? 'route' : 'allow') }}
             </span>
+            <span v-if="r.action === 'allow' && r.interface && ifaceDown(r.interface)"
+                  class="tag tag-block" style="margin-left: 6px"
+                  title="Configured interface is not up — queries to this domain return NXDOMAIN until the interface comes back">
+              ⚠ iface down
+            </span>
           </td>
           <td>
             <select v-if="r.action === 'allow'" :value="r.interface" @change="changeIface(r, ($event.target as HTMLSelectElement).value)">
               <option value="">default route</option>
-              <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }}</option>
+              <option v-for="o in optionsFor(r.interface)" :key="o.name" :value="o.name" :disabled="o.down">{{ o.label }}</option>
             </select>
             <span v-else class="muted">—</span>
           </td>
@@ -169,3 +191,8 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
     </table>
   </div>
 </template>
+
+<style scoped>
+tr.rule-iface-down td { background: rgba(255, 111, 111, 0.05); }
+tr.rule-iface-down code { opacity: 0.85; }
+</style>

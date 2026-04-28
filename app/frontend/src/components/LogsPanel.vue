@@ -1,148 +1,139 @@
 <script lang="ts" setup>
-import { ref, onMounted, onUnmounted } from 'vue';
-import { RecentLogs, ActiveRoutes, SystemRoutes, Interfaces } from '../../wailsjs/go/main/App';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { RecentLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
 const logs = ref<ipc.LogDTO[]>([]);
-const ourRoutes = ref<ipc.ActiveRouteDTO[]>([]);
-const sysRoutes = ref<ipc.SystemRouteDTO[]>([]);
-const interfaces = ref<ipc.InterfaceDTO[]>([]);
+const filter = ref<'all' | 'block' | 'route' | 'block-iface-down'>('all');
+const search = ref<string>('');
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
+let timer: number | undefined;
 
-let logsTimer: number | undefined;
-let networkTimer: number | undefined;
-
-async function refreshLogs() {
+async function refresh() {
   try {
-    logs.value = (await RecentLogs(200)) || [];
-    ourRoutes.value = (await ActiveRoutes()) || [];
+    logs.value = (await RecentLogs(500)) || [];
+    lastRefresh.value = new Date();
     error.value = '';
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
 }
 
-async function refreshNetwork() {
-  try {
-    sysRoutes.value = (await SystemRoutes()) || [];
-    interfaces.value = (await Interfaces()) || [];
-    lastRefresh.value = new Date();
-  } catch (e: any) {
-    // Don't clobber log errors with network errors.
+const filtered = computed(() => {
+  let xs = logs.value;
+  if (filter.value !== 'all') {
+    xs = xs.filter(l => l.action === filter.value);
   }
-}
+  if (search.value.trim()) {
+    const q = search.value.trim().toLowerCase();
+    xs = xs.filter(l => l.queryName.toLowerCase().includes(q));
+  }
+  return xs;
+});
+
+const counts = computed(() => {
+  const c = { block: 0, route: 0, ifdown: 0 };
+  for (const l of logs.value) {
+    if (l.action === 'block') c.block++;
+    else if (l.action === 'route') c.route++;
+    else if (l.action === 'block-iface-down') c.ifdown++;
+  }
+  return c;
+});
 
 function fmtTime(s: string): string {
   try { return new Date(s).toLocaleTimeString(); } catch { return s; }
 }
 
 function actionTag(action: string): string {
-  if (action === 'block') return 'tag tag-block';
+  if (action === 'block' || action === 'block-iface-down') return 'tag tag-block';
   if (action === 'route') return 'tag tag-route';
-  if (action === 'block-iface-down') return 'tag tag-block';
   return 'tag tag-off';
 }
 
 onMounted(() => {
-  refreshLogs();
-  refreshNetwork();
-  logsTimer = window.setInterval(refreshLogs, 1000);
-  networkTimer = window.setInterval(refreshNetwork, 5000);
+  refresh();
+  timer = window.setInterval(refresh, 1000);
 });
-onUnmounted(() => {
-  if (logsTimer) window.clearInterval(logsTimer);
-  if (networkTimer) window.clearInterval(networkTimer);
-});
+onUnmounted(() => { if (timer) window.clearInterval(timer); });
 </script>
 
 <template>
   <div class="panel">
     <div v-if="error" class="error">{{ error }}</div>
 
-    <h2>Network interfaces
-      <span class="muted" style="font-weight:400; font-size: 12px">
-        ({{ interfaces.length }}) · refreshed every 5s
-        <span v-if="lastRefresh"> · last {{ lastRefresh.toLocaleTimeString() }}</span>
-      </span>
-    </h2>
-    <table v-if="interfaces.length">
-      <thead>
-        <tr><th>Name</th><th>Owner</th><th>Index</th><th>MTU</th><th>Flags</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="i in interfaces" :key="i.name">
-          <td><code>{{ i.name }}</code></td>
-          <td>
-            <span v-if="i.owner" class="tag tag-route">{{ i.owner }}</span>
-            <span v-else class="muted">—</span>
-          </td>
-          <td class="muted">{{ i.index }}</td>
-          <td class="muted">{{ i.mtu }}</td>
-          <td class="muted" style="font-size: 11px">{{ i.flags }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 12px">
+      <div class="row" style="gap: 0">
+        <button :class="{active: filter==='all'}" class="seg" @click="filter='all'">
+          All <span class="count">{{ logs.length }}</span>
+        </button>
+        <button :class="{active: filter==='block'}" class="seg" @click="filter='block'">
+          Blocked <span class="count">{{ counts.block }}</span>
+        </button>
+        <button :class="{active: filter==='route'}" class="seg" @click="filter='route'">
+          Routed <span class="count">{{ counts.route }}</span>
+        </button>
+        <button :class="{active: filter==='block-iface-down'}" class="seg" @click="filter='block-iface-down'">
+          Iface down <span class="count">{{ counts.ifdown }}</span>
+        </button>
+      </div>
+      <input v-model="search" placeholder="filter by domain…" style="width: 220px" />
+    </div>
 
-    <h2 style="margin-top:24px">System routes
-      <span class="muted" style="font-weight:400; font-size: 12px">({{ sysRoutes.length }})</span>
-    </h2>
-    <table v-if="sysRoutes.length">
-      <thead>
-        <tr><th>Family</th><th>Destination</th><th>Gateway</th><th>Flags</th><th>Interface</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="(r, i) in sysRoutes" :key="r.family + ':' + r.destination + ':' + i">
-          <td class="muted">{{ r.family }}</td>
-          <td><code>{{ r.destination }}</code></td>
-          <td><code>{{ r.gateway }}</code></td>
-          <td class="muted" style="font-size: 11px">{{ r.flags }}</td>
-          <td><code>{{ r.interface }}</code></td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="muted" style="font-size: 11px; margin-bottom: 8px">
+      live · 1s refresh · {{ lastRefresh ? lastRefresh.toLocaleTimeString() : '—' }} ·
+      showing {{ filtered.length }} of {{ logs.length }}
+    </div>
 
-    <h2 style="margin-top:24px">Active per-host routes (installed by em-wall)
-      <span class="muted" style="font-weight:400; font-size: 12px">({{ ourRoutes.length }})</span>
-    </h2>
-    <table v-if="ourRoutes.length">
-      <thead>
-        <tr><th>Host</th><th>Interface</th><th>Rule</th><th>Expires</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in ourRoutes" :key="r.host">
-          <td><code>{{ r.host }}</code></td>
-          <td><span class="tag tag-route">{{ r.interface }}</span></td>
-          <td class="muted">#{{ r.ruleId }}</td>
-          <td class="muted">{{ fmtTime(r.expiresAt) }}</td>
-        </tr>
-      </tbody>
-    </table>
-    <div v-else class="muted">No per-host routes installed by em-wall yet.</div>
-
-    <h2 style="margin-top:24px">Recent decisions
-      <span class="muted" style="font-weight:400; font-size: 12px">({{ logs.length }}) · live</span>
-    </h2>
     <table>
       <thead>
         <tr><th>Time</th><th>Domain</th><th>Action</th><th>Interface</th><th>Client</th></tr>
       </thead>
       <tbody>
-        <tr v-for="l in logs" :key="l.id">
-          <td class="muted">{{ fmtTime(l.timestamp) }}</td>
+        <tr v-for="l in filtered" :key="l.id">
+          <td class="muted" style="white-space: nowrap">{{ fmtTime(l.timestamp) }}</td>
           <td><code>{{ l.queryName }}</code></td>
-          <td>
-            <span :class="actionTag(l.action)">{{ l.action }}</span>
-          </td>
+          <td><span :class="actionTag(l.action)">{{ l.action }}</span></td>
           <td class="muted">{{ l.interface || '—' }}</td>
           <td class="muted">{{ l.clientIp || '—' }}</td>
         </tr>
-        <tr v-if="!logs.length">
+        <tr v-if="!filtered.length">
           <td colspan="5" class="muted" style="text-align:center; padding:24px">
-            No decisions logged yet. Plain allows are not logged.
+            <span v-if="!logs.length">No decisions logged yet. Plain allows are not logged.</span>
+            <span v-else>No matches for current filter.</span>
           </td>
         </tr>
       </tbody>
     </table>
   </div>
 </template>
+
+<style scoped>
+.seg {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 0;
+  padding: 6px 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.seg:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+.seg:last-child  { border-right: 1px solid var(--border); border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+.seg.active {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--accent);
+}
+.count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  background: var(--border);
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.seg.active .count { background: var(--accent); color: #fff; }
+</style>
