@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -831,6 +832,7 @@ func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
 		return fmt.Errorf("apply 127.0.0.1: %w", err)
 	}
 	_ = d.store.SetSetting(ctx, "system_dns_active", "true")
+	flushDNSCache()
 	return nil
 }
 
@@ -995,7 +997,15 @@ func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
 		}
 	}
 	_ = d.store.SetSetting(ctx, "system_dns_active", "false")
+	flushDNSCache()
 	return nil
+}
+
+// flushDNSCache tells macOS to discard its resolver cache after a
+// system DNS change so stale pre-change answers don't keep being served.
+func flushDNSCache() {
+	exec.Command("dscacheutil", "-flushcache").Run()
+	exec.Command("killall", "-HUP", "mDNSResponder").Run()
 }
 
 // normalizeGroupPattern lowercases and trims a pattern so comparisons
