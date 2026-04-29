@@ -125,7 +125,15 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	h, ok := s.handlers[req.Method]
 	if !ok {
-		return Response{ID: req.ID, Error: &ErrorBody{Code: "unknown_method", Message: req.Method}}
+		// Be explicit so the UI doesn't render a bare method name as an
+		// error toast. The most common cause is a fresh app talking to
+		// an older daemon binary that never registered this handler —
+		// in that case re-install em-wall from Settings to pick up the
+		// new daemon.
+		return Response{ID: req.ID, Error: &ErrorBody{
+			Code:    "unknown_method",
+			Message: "daemon doesn't recognise method " + req.Method + " — your installed daemon is older than this app, reinstall via Settings → Uninstall → Install",
+		}}
 	}
 	result, err := h(ctx, req.Params)
 	if err != nil {

@@ -184,12 +184,28 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 
 // Logging.
 
+// MaxLogEntries is the rolling cap on stored DNS log rows. Older rows
+// are pruned by Log on every write, so the table stays bounded
+// regardless of query volume. Bumping this is fine — the prune query
+// is a single cutoff-id DELETE which is cheap at any reasonable size.
+const MaxLogEntries = 500
+
 func (s *Store) Log(ctx context.Context, e LogEntry) error {
 	e.ID = 0
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}
-	return s.db.WithContext(ctx).Create(&e).Error
+	if err := s.db.WithContext(ctx).Create(&e).Error; err != nil {
+		return err
+	}
+	// Trim everything older than the Nth-newest row. Subquery returns
+	// NULL when there are <N rows, in which case `id < NULL` matches
+	// nothing — safe no-op while the table is still filling up.
+	return s.db.WithContext(ctx).Exec(
+		`DELETE FROM log_entries WHERE id < (
+            SELECT id FROM log_entries ORDER BY id DESC LIMIT 1 OFFSET ?
+        )`, MaxLogEntries-1,
+	).Error
 }
 
 // RecentLogs returns up to limit log entries, newest first.

@@ -24,10 +24,14 @@ APP_RES_ANCHOR  := $(APP_RES_DIR)/em-wall.pf.anchor
 
 all: daemon app
 
-daemon: $(DAEMON_BIN)
-
-$(DAEMON_BIN):
-	mkdir -p $(BUILD_DIR)
+# daemon is PHONY — `go build` is the only thing that knows whether
+# the binary is current relative to its sources, and Go's build cache
+# makes a no-op rebuild sub-second. Letting Make decide via mtime on a
+# single output file silently misses changes in daemon/*.go, core/**,
+# go.mod, etc. and ships a stale daemon to the .app — which is the
+# bug that caused "reinstall didn't bring the new methods".
+daemon:
+	@mkdir -p $(BUILD_DIR)
 	$(GO) build -buildvcs=false -o $(DAEMON_BIN) ./daemon
 
 # `make app` builds the Wails .app *without* the embedded daemon.
@@ -37,34 +41,28 @@ app:
 	cd $(APP_DIR) && $(WAILS) build
 
 # `make app-bundle` is the primary user-facing build target. It
-# refreshes the embedded resources, then runs `wails build` so the
-# resulting .app is fully self-contained.
+# refreshes the embedded resources (always rebuilds the daemon from
+# source, see above) then runs `wails build` so the resulting .app is
+# fully self-contained.
 app-bundle: app-resources
 	cd $(APP_DIR) && $(WAILS) build
 
 # Stage the daemon binary, plist and pf anchor stub into the embed
-# resources dir. Run as a dependency of app-bundle and run-app so
-# `wails dev` and the bundled .app see the same files.
-app-resources: $(APP_RES_BIN) $(APP_RES_PLIST) $(APP_RES_ANCHOR)
-
-$(APP_RES_BIN): $(DAEMON_BIN)
-	mkdir -p $(APP_RES_DIR)
+# resources dir. Always runs — see the daemon target for why we don't
+# trust mtimes here. The cp is cheap; the daemon rebuild is what
+# matters.
+app-resources: daemon
+	@mkdir -p $(APP_RES_DIR)
 	cp $(DAEMON_BIN) $(APP_RES_BIN)
 	chmod 0755 $(APP_RES_BIN)
-
-$(APP_RES_PLIST): launchd/com.em-wall.daemon.plist
-	mkdir -p $(APP_RES_DIR)
 	cp launchd/com.em-wall.daemon.plist $(APP_RES_PLIST)
-
-$(APP_RES_ANCHOR):
-	mkdir -p $(APP_RES_DIR)
-	test -f $(APP_RES_ANCHOR) || printf '# em-wall pf anchor — rewritten at runtime by core/pfctl\n' > $(APP_RES_ANCHOR)
+	@test -f $(APP_RES_ANCHOR) || printf '# em-wall pf anchor — rewritten at runtime by core/pfctl\n' > $(APP_RES_ANCHOR)
 
 test: test-core
 test-core:
 	$(GO) test ./core/...
 
-run-daemon: $(DAEMON_BIN)
+run-daemon: daemon
 	@echo "running em-walld with a local DB and socket — no root, no port 53, system DNS untouched"
 	mkdir -p tmp
 	$(DAEMON_BIN) \

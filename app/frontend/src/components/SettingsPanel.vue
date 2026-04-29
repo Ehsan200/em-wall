@@ -3,11 +3,19 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   GetSetting, SetSetting,
   SystemDNSStatus, ActivateSystemDNS, DeactivateSystemDNS,
-  InstallStatus, Uninstall,
+  InstallStatus, Install, Uninstall, WaitForDaemon,
 } from '../../wailsjs/go/main/App';
 import type { ipc, installer } from '../../wailsjs/go/models';
 
-const emit = defineEmits<{ (e: 'changed'): void }>();
+const emit = defineEmits<{
+  (e: 'changed'): void
+  // Fired with true at the start of Reinstall and false when it
+  // finishes (success, error, or user-cancelled prompt). App.vue uses
+  // this to suppress the install gate while the LaunchDaemon is in
+  // its bootout/bootstrap window — otherwise the regular 2s poll
+  // observes daemonRunning=false and yanks the user out of Settings.
+  (e: 'reinstalling', value: boolean): void
+}>();
 
 const blockEncrypted = ref<boolean>(false);
 const sysStatus = ref<ipc.SystemDNSStatus | null>(null);
@@ -44,6 +52,73 @@ function bytes(n: number): string {
 
 async function loadInstallStatus() {
   try { installStatus.value = await InstallStatus(); } catch { /* ignore */ }
+}
+
+// ---- Reinstall daemon ----
+//
+// Re-runs the install script (idempotent: bootouts the LaunchDaemon,
+// overwrites the on-disk binary with whatever this app embeds, then
+// bootstrap+kickstart). Use this when an "unknown method" error tells
+// you the running daemon is older than this app, or whenever a
+// deployed binary feels broken and you want a clean redeploy without
+// losing your rules DB.
+const reinstallBusy = ref<boolean>(false);
+const reinstallError = ref<string>('');
+const reinstallStage = ref<'idle' | 'authorising' | 'starting'>('idle');
+const reinstallSucceeded = ref<boolean>(false);
+// Counts seconds remaining while WaitForDaemon polls. Drives the
+// inline hint so the user sees the timer ticking instead of a static
+// "Starting daemon…" — without it, a 10-second wait feels broken.
+const reinstallSecondsLeft = ref<number>(0);
+
+const REINSTALL_MAX_WAIT_MS = 15000;
+
+async function reinstallDaemon() {
+  reinstallBusy.value = true;
+  reinstallError.value = '';
+  reinstallSucceeded.value = false;
+  reinstallStage.value = 'authorising';
+  emit('reinstalling', true);
+  try {
+    await Install();
+    reinstallStage.value = 'starting';
+
+    // Run WaitForDaemon and a 1-Hz countdown ticker concurrently. The
+    // ticker is purely cosmetic — it's there so the user can see "12
+    // seconds left, 11 seconds left…" instead of a frozen spinner
+    // while launchctl bootout/bootstrap/kickstart works through its
+    // pipeline.
+    reinstallSecondsLeft.value = Math.ceil(REINSTALL_MAX_WAIT_MS / 1000);
+    const ticker = window.setInterval(() => {
+      if (reinstallSecondsLeft.value > 0) reinstallSecondsLeft.value -= 1;
+    }, 1000);
+    let ok = false;
+    try {
+      ok = await WaitForDaemon(REINSTALL_MAX_WAIT_MS);
+    } finally {
+      window.clearInterval(ticker);
+      reinstallSecondsLeft.value = 0;
+    }
+
+    if (!ok) {
+      reinstallError.value = `Daemon redeployed but did not answer within ${REINSTALL_MAX_WAIT_MS / 1000}s. Check Console.app for "em-walld" — it may still be starting in the background.`;
+    } else {
+      reinstallSucceeded.value = true;
+      setTimeout(() => { reinstallSucceeded.value = false; }, 4000);
+    }
+    emit('changed');
+  } catch (e: any) {
+    const msg = e?.message || String(e);
+    if (msg !== 'cancelled') reinstallError.value = msg;
+  } finally {
+    reinstallBusy.value = false;
+    reinstallStage.value = 'idle';
+    await loadInstallStatus();
+    // Clear the suppression after loadInstallStatus so App.vue's next
+    // poll sees the truthful (post-reinstall) state — daemon up, gate
+    // not needed, user stays exactly where they were.
+    emit('reinstalling', false);
+  }
 }
 
 async function doUninstall() {
@@ -223,6 +298,42 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
             <span class="track"></span>
           </label>
         </label>
+      </div>
+
+      <!-- Reinstall daemon (recovery) -->
+      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+        <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px">
+          <div class="col" style="gap: 4px; flex: 1">
+            <strong>Reinstall daemon</strong>
+            <span class="muted" style="font-size: 12px; line-height: 1.5">
+              Redeploys <code>/usr/local/bin/em-walld</code> from this app
+              bundle and restarts the LaunchDaemon. Use this when you see
+              an <em>"unknown method"</em> error — that means the daemon
+              installed on disk is older than this app and doesn't know
+              about newer features yet. Your rules DB is left alone.
+            </span>
+            <span class="muted" style="font-size: 11px; line-height: 1.5">
+              The whole flow can take up to ~{{ REINSTALL_MAX_WAIT_MS / 1000 }} seconds:
+              macOS asks for your password, the binary is overwritten, the
+              old LaunchDaemon is booted out, and the new one is bootstrapped
+              and kickstarted. Don't quit the app during it.
+            </span>
+            <span v-if="reinstallSucceeded" class="muted" style="font-size: 11px; color: var(--success)">
+              ✓ Daemon redeployed and running.
+            </span>
+            <span v-if="reinstallError" class="error" style="margin: 4px 0 0 0">{{ reinstallError }}</span>
+          </div>
+          <div class="col" style="gap: 6px; align-items: flex-end">
+            <button class="primary" :disabled="reinstallBusy" @click="reinstallDaemon">
+              <template v-if="!reinstallBusy">Reinstall</template>
+              <template v-else-if="reinstallStage === 'authorising'">Waiting for password…</template>
+              <template v-else-if="reinstallStage === 'starting'">
+                Starting daemon…<span v-if="reinstallSecondsLeft > 0"> ({{ reinstallSecondsLeft }}s)</span>
+              </template>
+              <template v-else>Reinstalling…</template>
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Uninstall (danger zone) -->

@@ -64,6 +64,17 @@ function bytes(n: number): string {
         password.
       </p>
 
+      <div class="col" style="gap: 4px; margin: 0 0 14px 0; padding: 10px 12px; background: rgba(255, 200, 110, 0.08); border: 1px solid rgba(255, 200, 110, 0.3); border-radius: 6px">
+        <strong style="font-size: 12px">Before you ever delete this app</strong>
+        <span class="muted" style="font-size: 11px; line-height: 1.5">
+          Open <strong>Settings → Uninstall em-wall</strong> first. The daemon
+          binary, LaunchDaemon plist, and DNS settings live <em>outside</em>
+          this <code>.app</code> bundle, so dragging the app to Trash leaves a
+          privileged process running with no UI to control it — and DNS
+          pointing at <code>127.0.0.1</code> with nothing answering.
+        </span>
+      </div>
+
       <div class="col" style="gap: 4px; margin: 14px 0; padding: 12px; background: var(--bg-2, rgba(255,255,255,0.03)); border: 1px solid var(--border); border-radius: 6px">
         <div class="muted" style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px">Will install</div>
         <div class="row" style="gap: 8px"><code>/usr/local/bin/em-walld</code><span class="muted" style="font-size: 11px">— the daemon binary</span></div>

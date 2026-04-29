@@ -188,6 +188,23 @@ func (a *App) GroupIcon(key string) (ipc.GroupIconDTO, error) {
 	return out, err
 }
 
+// DeleteGroupRules deletes every rule whose pattern matches one of the
+// group's canonical patterns. Hand-edited rules drop out of group
+// membership and aren't touched.
+func (a *App) DeleteGroupRules(key string) (ipc.GroupsBulkResult, error) {
+	var out ipc.GroupsBulkResult
+	err := a.call(ipc.MethodGroupsDeleteRules, ipc.GroupsDeleteRulesParams{Key: key}, &out)
+	return out, err
+}
+
+// SetGroupEnabled flips enabled on every rule belonging to the group.
+// Same matching rule as DeleteGroupRules.
+func (a *App) SetGroupEnabled(key string, enabled bool) (ipc.GroupsBulkResult, error) {
+	var out ipc.GroupsBulkResult
+	err := a.call(ipc.MethodGroupsSetEnabled, ipc.GroupsSetEnabledParams{Key: key, Enabled: enabled}, &out)
+	return out, err
+}
+
 // ---- Install / uninstall (local, no daemon needed) ----
 //
 // These methods don't go over IPC — they manipulate the host directly

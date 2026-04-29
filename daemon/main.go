@@ -132,7 +132,7 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 
 	go func() {
 		defer wg.Done()
@@ -188,6 +188,34 @@ func main() {
 					log.Printf("em-walld: app %s: %s → %s", c.Key,
 						orDash(c.Old), orDash(c.New))
 					release()
+				}
+			}
+		}
+	}()
+
+	// Upstream watcher: every 10s, validate that the current upstream
+	// still answers. When the user switches Wi-Fi, sleeps/wakes the
+	// laptop, or toggles a VPN, the DHCP-supplied resolver we picked at
+	// activation time is often no longer reachable — every query hangs
+	// or NXDOMAIN's because we're forwarding into the void. The fix is
+	// to notice and re-pick atomically: chooseUpstream reads
+	// AllDHCPDNS, which queries `ipconfig getoption en0
+	// domain_name_server` live, so it reflects whichever network we're
+	// on now. Forwarder swap is atomic — no daemon restart, no
+	// DNS-down window for the user.
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if changed, err := deps.refreshUpstreamIfStale(ctx); err != nil {
+					log.Printf("em-walld: upstream refresh failed: %v", err)
+				} else if changed {
+					log.Printf("em-walld: upstream refreshed: now using %s", deps.upstream)
 				}
 			}
 		}
@@ -610,6 +638,76 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return out, nil
 	})
 
+	// Bulk delete every rule that came from a group's pattern list.
+	// Match is normalized-equality of pattern (groups.go patterns are
+	// canonical lowercase). Rules the user hand-edited won't match
+	// anymore — that's the intended behavior, edits opt out of group
+	// membership.
+	s.Handle(ipc.MethodGroupsDeleteRules, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.GroupsDeleteRulesParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		g := groups.FindByKey(p.Key)
+		if g == nil {
+			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		}
+		ids, err := d.matchingRuleIDs(ctx, g.Patterns)
+		if err != nil {
+			return nil, err
+		}
+		var deleted []int64
+		for _, id := range ids {
+			_ = d.router.RemoveByRule(ctx, id)
+			if err := d.store.Delete(ctx, id); err != nil {
+				continue
+			}
+			deleted = append(deleted, id)
+		}
+		_ = d.engine.Reload(ctx)
+		return ipc.GroupsBulkResult{Affected: len(deleted), RuleIDs: deleted}, nil
+	})
+
+	// Bulk enable/disable. Same matching rule as delete. We re-use
+	// store.Update so per-rule normalization runs (e.g. action/interface
+	// validation), but the only field that's actually changing is
+	// enabled. Disabled rules also get their per-host routes flushed —
+	// otherwise traffic could keep using cached pinned routes after
+	// the rule "stops" mattering.
+	s.Handle(ipc.MethodGroupsSetEnabled, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.GroupsSetEnabledParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		g := groups.FindByKey(p.Key)
+		if g == nil {
+			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		}
+		all, err := d.store.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var touched []int64
+		for _, r := range all {
+			if !ruleBelongsToGroup(r.Pattern, g.Patterns) {
+				continue
+			}
+			if r.Enabled == p.Enabled {
+				continue // already in the desired state
+			}
+			r.Enabled = p.Enabled
+			if err := d.store.Update(ctx, r); err != nil {
+				continue
+			}
+			if !p.Enabled {
+				_ = d.router.RemoveByRule(ctx, r.ID)
+			}
+			touched = append(touched, r.ID)
+		}
+		_ = d.engine.Reload(ctx)
+		return ipc.GroupsBulkResult{Affected: len(touched), RuleIDs: touched}, nil
+	})
+
 	s.Handle(ipc.MethodGroupsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
 		var p ipc.GroupsIconParams
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -815,6 +913,65 @@ func sanitizeSnapshot(snap map[string][]string) map[string][]string {
 	return out
 }
 
+// refreshUpstreamIfStale validates the current upstream(s) with a real
+// query. If at least one still answers, no-op. Otherwise it re-picks
+// via chooseUpstream and swaps the forwarder atomically. Called by
+// the network watcher on a 10s tick — also safe to call on demand.
+//
+// Returns changed=true only when the upstream was actually swapped.
+// The intent is "DNS keeps working when the user changes network":
+// chooseUpstream reads AllDHCPDNS / scutil / per-service backup, all
+// of which reflect the current network state, so the new upstream is
+// whatever's reachable on whichever Wi-Fi/Ethernet/VPN the user moved
+// to. We don't touch system DNS — 127.0.0.1 stays in every service's
+// resolver list, the daemon just forwards somewhere different now.
+func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) {
+	d.mu.Lock()
+	current := splitCSV(d.upstream)
+	d.mu.Unlock()
+
+	// Cheap health check: if any current upstream still answers, leave
+	// it alone. ValidateResolvers runs them in parallel with a 1.5s
+	// timeout each, so this finishes well within the 10s tick.
+	if len(current) > 0 {
+		if working := ValidateResolvers(ctx, current); len(working) > 0 {
+			return false, nil
+		}
+	}
+
+	// Current upstream is dead — typically because the user moved
+	// networks. Re-pick from sources that read fresh state.
+	snap, err := d.sysDNS.CaptureAll()
+	if err != nil {
+		return false, fmt.Errorf("capture: %w", err)
+	}
+	clean := sanitizeSnapshot(snap)
+	upstream := d.chooseUpstream(ctx, clean)
+	if len(upstream) == 0 {
+		// Last-ditch public fallback — still validated.
+		if working := ValidateResolvers(ctx, []string{"1.1.1.1:53", "8.8.8.8:53"}); len(working) > 0 {
+			upstream = working
+		}
+	}
+	if len(upstream) == 0 {
+		return false, fmt.Errorf("no working upstream DNS on current network")
+	}
+	if joinCSV(upstream) == joinCSV(current) {
+		// New pick happens to match what we already had (e.g. validation
+		// flapped). Don't churn the forwarder.
+		return false, nil
+	}
+
+	if err := d.store.SetSetting(ctx, "upstream_dns", joinCSV(upstream)); err != nil {
+		return false, fmt.Errorf("save upstream: %w", err)
+	}
+	d.dnsServer.SetForwarder(dnsproxy.NewMultiUpstream(upstream, 3*time.Second))
+	d.mu.Lock()
+	d.upstream = joinCSV(upstream)
+	d.mu.Unlock()
+	return true, nil
+}
+
 func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
 	raw, err := d.store.GetSetting(ctx, "system_dns_backup", "")
 	if err != nil {
@@ -839,6 +996,70 @@ func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
 	}
 	_ = d.store.SetSetting(ctx, "system_dns_active", "false")
 	return nil
+}
+
+// normalizeGroupPattern lowercases and trims a pattern so comparisons
+// don't depend on user-typed whitespace or trailing dots.
+func normalizeGroupPattern(s string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(s, ".")))
+}
+
+// ruleCoveredByGroupPattern reports whether rulePat sits inside the
+// scope of groupPat. Mirrors core/rules.Match's wildcard semantics so
+// the same rules that *would* be hit by a group's wildcard at query
+// time are also the ones treated as group members for delete-all /
+// enable-all bulk actions.
+//
+//   group "*.openai.com" covers rules: openai.com, *.openai.com,
+//                                       api.openai.com, *.api.openai.com
+//   group "openai.com"   covers only:  openai.com (exact match)
+//
+// This is what the user expects: "chatgpt.com" should be considered
+// part of the OpenAI group because OpenAI lists "*.chatgpt.com".
+func ruleCoveredByGroupPattern(rulePat, groupPat string) bool {
+	rp := normalizeGroupPattern(rulePat)
+	gp := normalizeGroupPattern(groupPat)
+	if rp == "" || gp == "" {
+		return false
+	}
+	if rp == gp {
+		return true
+	}
+	if !strings.HasPrefix(gp, "*.") {
+		return false // exact-only group pattern
+	}
+	suffix := gp[2:]
+	body := rp
+	if strings.HasPrefix(rp, "*.") {
+		body = rp[2:]
+	}
+	return body == suffix || strings.HasSuffix(body, "."+suffix)
+}
+
+// ruleBelongsToGroup is the union over a group's pattern list.
+func ruleBelongsToGroup(rulePat string, groupPats []string) bool {
+	for _, gp := range groupPats {
+		if ruleCoveredByGroupPattern(rulePat, gp) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchingRuleIDs returns IDs of rules covered by any of patterns. Used
+// by the bulk delete handler. Order is unspecified.
+func (d *handlerDeps) matchingRuleIDs(ctx context.Context, patterns []string) ([]int64, error) {
+	all, err := d.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for _, r := range all {
+		if ruleBelongsToGroup(r.Pattern, patterns) {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
 }
 
 func ruleToDTO(r rules.Rule) ipc.RuleDTO {

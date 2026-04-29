@@ -48,6 +48,8 @@ const (
 	MethodGroupsList          = "groups.list"
 	MethodGroupsApply         = "groups.apply"
 	MethodGroupsIcon          = "groups.icon"
+	MethodGroupsDeleteRules   = "groups.delete-rules"
+	MethodGroupsSetEnabled    = "groups.set-enabled"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -185,6 +187,28 @@ type GroupsApplyParams struct {
 type GroupsApplyResult struct {
 	Created []RuleDTO `json:"created"` // rules that were inserted
 	Skipped []string  `json:"skipped"` // patterns skipped because they already exist
+}
+
+// GroupsDeleteRulesParams identifies which group's rules to remove.
+// The daemon resolves the group key to its pattern list and deletes
+// every rule whose pattern matches one of those patterns exactly.
+type GroupsDeleteRulesParams struct {
+	Key string `json:"key"`
+}
+
+// GroupsSetEnabledParams flips the enabled flag on every rule that
+// was created from a group's patterns. Same matching rule as delete.
+type GroupsSetEnabledParams struct {
+	Key     string `json:"key"`
+	Enabled bool   `json:"enabled"`
+}
+
+// GroupsBulkResult reports how many rules were touched by a bulk
+// operation. RuleIDs is the list affected, in case the UI wants to
+// invalidate cached state for them.
+type GroupsBulkResult struct {
+	Affected int     `json:"affected"`
+	RuleIDs  []int64 `json:"ruleIds"`
 }
 
 type SystemDNSStatus struct {

@@ -15,15 +15,26 @@ const status = ref<ipc.StatusResult | null>(null);
 const error = ref<string>('');
 const install = ref<installer.Status | null>(null);
 const packaged = ref<boolean>(true);
+// True while Settings → Reinstall is mid-flight. Reinstall bootouts the
+// LaunchDaemon and re-bootstraps it; in between, our 2s poll observes
+// daemonRunning=false and would flip the whole UI back to the install
+// gate, losing the user's context inside Settings. Suppressing the
+// gate while this flag is set keeps them on the Settings tab end to
+// end. SettingsPanel is the only emitter — it sets true before
+// calling Install() and clears it after WaitForDaemon returns.
+const reinstalling = ref<boolean>(false);
 let timer: number | undefined;
 
 // Show the install gate when:
 //  - this is a packaged build (so install can actually do anything), AND
+//  - we're not currently in the middle of a Reinstall (transient
+//    daemon-down windows shouldn't kick the user out of Settings), AND
 //  - the daemon isn't fully installed and running.
 // The dev path (unpackaged build) skips the gate so devs can hit a
 // separately-running daemon — they're expected to know what they're doing.
 const showInstallGate = computed(() =>
-  packaged.value && (!install.value || !install.value.daemonRunning || !install.value.binaryPresent || !install.value.plistPresent)
+  packaged.value && !reinstalling.value &&
+  (!install.value || !install.value.daemonRunning || !install.value.binaryPresent || !install.value.plistPresent)
 );
 
 async function refresh() {
@@ -72,6 +83,8 @@ onUnmounted(() => {
     <RulesPanel    v-if="tab==='rules'"    @changed="refresh" />
     <LogsPanel     v-else-if="tab==='logs'" />
     <NetworkPanel  v-else-if="tab==='network'" />
-    <SettingsPanel v-else                  @changed="refresh" />
+    <SettingsPanel v-else
+                   @changed="refresh"
+                   @reinstalling="(v: boolean) => reinstalling = v" />
   </template>
 </template>
