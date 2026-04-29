@@ -1,8 +1,8 @@
 // Package pfctl manages a small pf anchor that blocks encrypted DNS
 // (DoT on TCP/853 and DoH to a curated set of well-known endpoints).
 //
-// One-time install (done by scripts/install.sh) must add this to
-// /etc/pf.conf:
+// One-time install (done by app/internal/installer at app install time)
+// must add this to /etc/pf.conf:
 //   anchor "em-wall"
 //   load anchor "em-wall" from "/etc/pf.anchors/em-wall"
 // and ensure pf is enabled (`pfctl -e`). At runtime this package
@@ -66,7 +66,7 @@ func (m *Manager) Enable(ctx context.Context) error {
 		return fmt.Errorf("pfctl load anchor: %w (%s)", err, trim(out))
 	}
 	if looksLikeAnchorMissing(out) {
-		return errors.New("pfctl: anchor 'em-wall' not declared in /etc/pf.conf — run scripts/install.sh first")
+		return errors.New("pfctl: anchor 'em-wall' not declared in /etc/pf.conf — reinstall em-wall from the app's Install panel")
 	}
 	m.mu.Lock()
 	m.enabled = true

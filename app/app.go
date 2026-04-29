@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
+
+	"app/internal/installer"
 
 	"github.com/ehsan/em-wall/core/ipc"
 )
@@ -183,4 +186,95 @@ func (a *App) GroupIcon(key string) (ipc.GroupIconDTO, error) {
 	var out ipc.GroupIconDTO
 	err := a.call(ipc.MethodGroupsIcon, ipc.GroupsIconParams{Key: key}, &out)
 	return out, err
+}
+
+// ---- Install / uninstall (local, no daemon needed) ----
+//
+// These methods don't go over IPC — they manipulate the host directly
+// from the unprivileged UI process via osascript admin escalation. The
+// frontend uses InstallStatus to gate the install panel and the
+// uninstall section in Settings.
+
+// InstallStatus reports what's on disk and whether the LaunchDaemon
+// is running. Polled by the UI; cheap.
+func (a *App) InstallStatus() installer.Status {
+	return installer.Probe(a.ctx)
+}
+
+// IsPackaged is true when this app build embedded the daemon binary.
+// Plain `wails dev` builds return false — the install panel hides
+// itself in that case so devs aren't told to run an install that
+// would fail.
+func (a *App) IsPackaged() bool {
+	return installer.IsPackaged()
+}
+
+// Install runs the privileged install script. Surfaces user-cancelled
+// prompts as the literal string "cancelled" so the frontend can
+// distinguish them from real errors.
+func (a *App) Install() error {
+	if err := installer.Install(a.ctx); err != nil {
+		if installer.IsCancelled(err) {
+			return fmt.Errorf("cancelled")
+		}
+		return err
+	}
+	return nil
+}
+
+// Uninstall runs the privileged uninstall script. Before tearing the
+// daemon down, it asks the still-running daemon to restore the system
+// DNS settings — otherwise removing the daemon while every network
+// service has 127.0.0.1 as its resolver would brick DNS for the whole
+// machine. Best-effort: if the daemon isn't reachable (e.g. already
+// crashed), the uninstall proceeds anyway.
+func (a *App) Uninstall(purge bool) error {
+	var sys ipc.SystemDNSStatus
+	if err := a.call(ipc.MethodSystemDNSStatus, nil, &sys); err == nil && sys.Active {
+		var out ipc.SystemDNSStatus
+		_ = a.call(ipc.MethodSystemDNSDeactivate, nil, &out)
+	}
+
+	if err := installer.Uninstall(a.ctx, purge); err != nil {
+		if installer.IsCancelled(err) {
+			return fmt.Errorf("cancelled")
+		}
+		return err
+	}
+	// Drop any cached IPC connection — the daemon (and its socket) are
+	// gone now, and the next Status() call should fail cleanly rather
+	// than blocking on a half-dead connection.
+	a.mu.Lock()
+	if a.client != nil {
+		_ = a.client.Close()
+		a.client = nil
+	}
+	a.mu.Unlock()
+	return nil
+}
+
+// WaitForDaemon polls until the daemon answers Status() or the
+// timeout elapses. Used by the UI right after Install completes — the
+// LaunchDaemon takes a moment to come up and the user shouldn't see
+// "daemon not reachable" in between.
+func (a *App) WaitForDaemon(timeoutMs int) bool {
+	if timeoutMs <= 0 {
+		timeoutMs = 5000
+	}
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		// Drop stale client; force fresh dial each tick.
+		a.mu.Lock()
+		if a.client != nil {
+			_ = a.client.Close()
+			a.client = nil
+		}
+		a.mu.Unlock()
+		var out ipc.StatusResult
+		if err := a.call(ipc.MethodStatus, nil, &out); err == nil {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
 }

@@ -19,3 +19,6 @@ app/em-wall
 app/build/bin/
 app/frontend/dist/
 app/frontend/wailsjs/
+app/internal/installer/resources/em-walld
+app/internal/installer/resources/com.em-wall.daemon.plist
+app/internal/installer/resources/em-wall.pf.anchor

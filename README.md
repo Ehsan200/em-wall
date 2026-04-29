@@ -57,8 +57,8 @@ core/                    Go library, fully testable without root
 
 daemon/                  em-walld main, wires core/* together
 app/                     Wails + Vue UI (separate Go module via go.work)
-launchd/                 LaunchDaemon plist
-scripts/                 install.sh / uninstall.sh
+launchd/                 LaunchDaemon plist (template)
+scripts/smoketest/       end-to-end smoke test harness
 ```
 
 ## Develop
@@ -73,19 +73,23 @@ make run-app         # in another terminal: wails dev
 
 ## Install (real firewall)
 
+Install/uninstall happens from inside the .app — there is no shell-script CLI path.
+
 ```bash
-make install          # sudo, builds + installs daemon, plist, pf anchor
-sudo networksetup -setdnsservers Wi-Fi 127.0.0.1
-make run-app          # launch the UI to manage rules
+make app-bundle       # produces app/build/bin/em-wall.app
+open app/build/bin/em-wall.app
 ```
+
+On first launch the app shows an **Install** panel. Clicking it triggers the standard macOS authorization prompt; the embedded daemon, LaunchDaemon plist, and pf anchor are installed for you. Activate the system DNS hijack via the **Settings** tab.
 
 ## Uninstall
 
-```bash
-make uninstall                # leaves DB and logs in place
-sudo ./scripts/uninstall.sh --purge   # also removes DB and logs
-sudo networksetup -setdnsservers Wi-Fi empty
-```
+In the running app, go to **Settings → Uninstall em-wall**. The flow:
+
+- Asks the daemon to deactivate the DNS hijack first (restoring your original per-service DNS from its saved backup).
+- Removes `/usr/local/bin/em-walld`, the LaunchDaemon plist, and the pf anchor; reverts the `anchor "em-wall"` line in `/etc/pf.conf` (a backup is written next to it).
+- Runs a final safety sweep: any network service still pointing at `127.0.0.1` is reset to DHCP-supplied DNS so the host can't be left with broken resolution.
+- Optional **Also delete my rules and logs** toggle for purging `/usr/local/var/em-wall/` and the log file.
 
 ## Phase 2 (future): NEPacketTunnelProvider
 

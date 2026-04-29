@@ -1,0 +1,4 @@
+# resources/ holds the daemon binary, plist, and pf anchor that get
+# embedded into the Wails app at build time. The Makefile target
+# `make app-bundle` populates this directory before invoking
+# `wails build`. None of these files are checked in.
