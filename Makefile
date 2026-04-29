@@ -19,7 +19,7 @@ APP_RES_BIN     := $(APP_RES_DIR)/em-walld
 APP_RES_PLIST   := $(APP_RES_DIR)/com.em-wall.daemon.plist
 APP_RES_ANCHOR  := $(APP_RES_DIR)/em-wall.pf.anchor
 
-.PHONY: all daemon app app-bundle app-resources test test-core lint \
+.PHONY: all daemon app app-bundle app-resources app-icon test test-core lint \
         run-daemon run-app clean tidy
 
 all: daemon app
@@ -37,20 +37,23 @@ daemon:
 # `make app` builds the Wails .app *without* the embedded daemon.
 # Useful for fast iteration on the UI. The resulting binary will
 # refuse to run Install (ErrNotPackaged), so this is dev-only.
-app:
+app: app-icon
 	cd $(APP_DIR) && $(WAILS) build
 
 # `make app-bundle` is the primary user-facing build target. It
 # refreshes the embedded resources (always rebuilds the daemon from
 # source, see above) then runs `wails build` so the resulting .app is
 # fully self-contained.
-app-bundle: app-resources
+app-bundle: app-resources app-icon
 	cd $(APP_DIR) && $(WAILS) build
 
 # Stage the daemon binary, plist and pf anchor stub into the embed
 # resources dir. Always runs — see the daemon target for why we don't
 # trust mtimes here. The cp is cheap; the daemon rebuild is what
 # matters.
+app-icon:
+	cp assets/appicon.png $(APP_DIR)/build/appicon.png
+
 app-resources: daemon
 	@mkdir -p $(APP_RES_DIR)
 	cp $(DAEMON_BIN) $(APP_RES_BIN)
@@ -73,7 +76,7 @@ run-daemon: daemon
 
 # `wails dev` builds the app from source. Stage resources first so the
 # install panel can be tested end-to-end against the production paths.
-run-app: app-resources
+run-app: app-resources app-icon
 	cd $(APP_DIR) && $(WAILS) dev
 
 tidy:

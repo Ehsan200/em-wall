@@ -17,6 +17,9 @@ go.work.sum
 app/app
 app/em-wall
 app/build/bin/
+!app/build/
+app/build/*
+!app/build/appicon.png
 app/frontend/dist/
 app/frontend/wailsjs/
 app/internal/installer/resources/em-walld
