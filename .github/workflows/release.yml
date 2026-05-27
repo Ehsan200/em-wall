@@ -45,12 +45,18 @@ jobs:
           go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
+      - name: Resolve version from tag
+        run: |
+          # Strip leading "v" from the tag so the value embedded in the
+          # daemon binary matches what the UI prints as "v{{ version }}".
+          # Single source of truth = the git tag.
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Build .app bundle
-        run: make app-bundle
+        run: make app-bundle VERSION="$VERSION"
 
       - name: Package DMG
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -72,6 +78,21 @@ jobs:
           body: |
             macOS build of Em Wall ${{ github.ref_name }}.
 
-            The DMG is **unsigned** — on first launch macOS will block it. Either right-click the app and choose **Open**, or run `xattr -dr com.apple.quarantine "/Applications/Em Wall.app"` after dragging it to Applications.
+            ## Install
 
-            Linux and Windows builds are not produced: Em Wall is macOS-only (the daemon depends on `pfctl`, `/sbin/route`, `scutil`, `networksetup`, and `osascript`).
+            1. Open the DMG and drag **Em Wall** into **Applications**.
+            2. Launch it from Applications. macOS will block the first launch because the build is **unsigned**.
+            3. Open **System Settings → Privacy & Security** (click here on macOS: [x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension](x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension)), scroll to the bottom, and click **Open Anyway** next to the Em Wall message. Confirm the second prompt with **Open**.
+            4. Inside the app, the **Install** screen will run the LaunchDaemon installer (you'll get one standard admin prompt).
+
+            ### Terminal shortcut
+
+            If you'd rather skip the Privacy & Security dance, clear the quarantine flag once after dragging the app to Applications:
+
+            ```
+            xattr -dr com.apple.quarantine "/Applications/Em Wall.app"
+            ```
+
+            ## Platform support
+
+            Linux and Windows builds are **not** produced. Em Wall is macOS-only: the daemon shells out to `pfctl`, `/sbin/route`, `scutil`, `networksetup`, and `osascript`, none of which exist on other platforms.

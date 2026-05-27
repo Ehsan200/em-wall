@@ -12,6 +12,13 @@ BUILD_DIR   ?= build
 DAEMON_BIN  := $(BUILD_DIR)/em-walld
 APP_DIR     := app
 
+# VERSION is the single source of truth for the build's reported version
+# (shown in the app status bar, used in DMG name, etc.). The release
+# pipeline sets it from the git tag with the leading "v" stripped.
+# Local builds default to "dev".
+VERSION     ?= dev
+LDFLAGS     := -X main.Version=$(VERSION)
+
 # Resources embedded into the Wails app binary at build time. Populated
 # by the `app-resources` target, read by app/internal/installer/embed.go.
 APP_RES_DIR := $(APP_DIR)/internal/installer/resources
@@ -32,7 +39,7 @@ all: daemon app
 # bug that caused "reinstall didn't bring the new methods".
 daemon:
 	@mkdir -p $(BUILD_DIR)
-	$(GO) build -buildvcs=false -o $(DAEMON_BIN) ./daemon
+	$(GO) build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(DAEMON_BIN) ./daemon
 
 # `make app` builds the Wails .app *without* the embedded daemon.
 # Useful for fast iteration on the UI. The resulting binary will

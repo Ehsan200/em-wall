@@ -38,7 +38,11 @@ type lsofProvider struct{}
 
 func (lsofProvider) LsofUtunOwners() map[string]string { return routing.LsofUtunOwners() }
 
-const Version = "0.1.0"
+// Version is the single source of truth for the running build's version.
+// It is injected at link time via `-ldflags "-X main.Version=$TAG"` by
+// the release pipeline (the value comes from the git tag, with the
+// leading "v" stripped). Local builds fall back to "dev".
+var Version = "dev"
 
 func main() {
 	var (
