@@ -145,7 +145,7 @@ async function doUninstall() {
 
 async function loadSettings() {
   try {
-    blockEncrypted.value = (await GetSetting('block_encrypted_dns', 'false')) === 'true';
+    blockEncrypted.value = (await GetSetting('block_encrypted_dns', 'true')) === 'true';
   } catch (e: any) {
     error.value = e?.message || String(e);
   }

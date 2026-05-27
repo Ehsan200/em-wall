@@ -107,8 +107,9 @@ func main() {
 	}
 	registerHandlers(ipcSrv, deps)
 
-	// Restore pf state from settings.
-	if v, _ := store.GetSetting(context.Background(), "block_encrypted_dns", "false"); v == "true" {
+	// Restore pf state from settings. Default-on so fresh installs
+	// block DoH/DoT without the user having to toggle it.
+	if v, _ := store.GetSetting(context.Background(), "block_encrypted_dns", "true"); v == "true" {
 		if err := pf.Enable(context.Background()); err != nil {
 			log.Printf("em-walld: pf enable failed (continuing): %v", err)
 		}
@@ -350,7 +351,7 @@ func orDash(s string) string {
 func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	s.Handle(ipc.MethodStatus, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		list, _ := d.store.List(ctx)
-		blockEnc, _ := d.store.GetSetting(ctx, "block_encrypted_dns", "false")
+		blockEnc, _ := d.store.GetSetting(ctx, "block_encrypted_dns", "true")
 		return ipc.StatusResult{
 			Version:           version.Version,
 			Uptime:            time.Since(d.startedAt).Round(time.Second).String(),
