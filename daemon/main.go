@@ -29,6 +29,7 @@ import (
 	"github.com/ehsan/em-wall/core/pfctl"
 	"github.com/ehsan/em-wall/core/routing"
 	"github.com/ehsan/em-wall/core/rules"
+	"github.com/ehsan/em-wall/core/version"
 )
 
 // lsofProvider adapts core/routing's exported LsofUtunOwners to the
@@ -37,12 +38,6 @@ import (
 type lsofProvider struct{}
 
 func (lsofProvider) LsofUtunOwners() map[string]string { return routing.LsofUtunOwners() }
-
-// Version is the single source of truth for the running build's version.
-// It is injected at link time via `-ldflags "-X main.Version=$TAG"` by
-// the release pipeline (the value comes from the git tag, with the
-// leading "v" stripped). Local builds fall back to "dev".
-var Version = "dev"
 
 func main() {
 	var (
@@ -357,7 +352,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		list, _ := d.store.List(ctx)
 		blockEnc, _ := d.store.GetSetting(ctx, "block_encrypted_dns", "false")
 		return ipc.StatusResult{
-			Version:           Version,
+			Version:           version.Version,
 			Uptime:            time.Since(d.startedAt).Round(time.Second).String(),
 			BlockEncryptedDNS: blockEnc == "true",
 			UpstreamDNS:       d.upstream,

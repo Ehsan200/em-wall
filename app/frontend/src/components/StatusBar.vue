@@ -4,6 +4,7 @@ import type { ipc } from '../../wailsjs/go/models';
 defineProps<{
   status: ipc.StatusResult | null;
   error: string;
+  appVersion: string;
 }>();
 </script>
 
@@ -20,10 +21,11 @@ defineProps<{
       </div>
       <div><span class="label">Rules</span> {{ status.ruleCount }}</div>
       <div><span class="label">Uptime</span> {{ status.uptime }}</div>
-      <div style="margin-left:auto" class="muted">v{{ status.version }}</div>
+      <div style="margin-left:auto" class="muted">v{{ appVersion || status.version }}</div>
     </template>
     <template v-else>
       <div><span class="tag tag-block">daemon unreachable</span> <span class="muted">{{ error || 'connecting…' }}</span></div>
+      <div v-if="appVersion" style="margin-left:auto" class="muted">v{{ appVersion }}</div>
     </template>
   </div>
 </template>

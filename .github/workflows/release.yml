@@ -47,11 +47,13 @@ jobs:
 
       - name: Resolve version from tag
         run: |
-          # Strip leading "v" from the tag so the value embedded in the
-          # daemon binary matches what the UI prints as "v{{ version }}".
-          # Single source of truth = the git tag.
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Sync wails.json productVersion to tag
+        run: |
+          sed -i.bak 's/"productVersion": "[^"]*"/"productVersion": "'"$VERSION"'"/' app/wails.json
+          rm app/wails.json.bak
 
       - name: Build .app bundle
         run: make app-bundle VERSION="$VERSION"

@@ -9,6 +9,7 @@ import (
 	"app/internal/installer"
 
 	"github.com/ehsan/em-wall/core/ipc"
+	"github.com/ehsan/em-wall/core/version"
 )
 
 // App is the Wails-bound surface. Every public method is callable from
@@ -71,6 +72,10 @@ func (a *App) call(method string, params, result any) error {
 }
 
 // ---- Public methods (bound to the frontend) ----
+
+func (a *App) AppVersion() string {
+	return version.Version
+}
 
 func (a *App) Status() (ipc.StatusResult, error) {
 	var out ipc.StatusResult

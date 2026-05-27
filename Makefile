@@ -12,12 +12,8 @@ BUILD_DIR   ?= build
 DAEMON_BIN  := $(BUILD_DIR)/em-walld
 APP_DIR     := app
 
-# VERSION is the single source of truth for the build's reported version
-# (shown in the app status bar, used in DMG name, etc.). The release
-# pipeline sets it from the git tag with the leading "v" stripped.
-# Local builds default to "dev".
 VERSION     ?= dev
-LDFLAGS     := -X main.Version=$(VERSION)
+LDFLAGS     := -X github.com/ehsan/em-wall/core/version.Version=$(VERSION)
 
 # Resources embedded into the Wails app binary at build time. Populated
 # by the `app-resources` target, read by app/internal/installer/embed.go.
@@ -45,14 +41,14 @@ daemon:
 # Useful for fast iteration on the UI. The resulting binary will
 # refuse to run Install (ErrNotPackaged), so this is dev-only.
 app: app-icon
-	cd $(APP_DIR) && $(WAILS) build
+	cd $(APP_DIR) && $(WAILS) build -ldflags "$(LDFLAGS)"
 
 # `make app-bundle` is the primary user-facing build target. It
 # refreshes the embedded resources (always rebuilds the daemon from
 # source, see above) then runs `wails build` so the resulting .app is
 # fully self-contained.
 app-bundle: app-resources app-icon
-	cd $(APP_DIR) && $(WAILS) build
+	cd $(APP_DIR) && $(WAILS) build -ldflags "$(LDFLAGS)"
 
 # Stage the daemon binary, plist and pf anchor stub into the embed
 # resources dir. Always runs — see the daemon target for why we don't
@@ -85,7 +81,7 @@ run-daemon: daemon
 # `wails dev` builds the app from source. Stage resources first so the
 # install panel can be tested end-to-end against the production paths.
 run-app: app-resources app-icon
-	cd $(APP_DIR) && $(WAILS) dev
+	cd $(APP_DIR) && $(WAILS) dev -ldflags "$(LDFLAGS)"
 
 tidy:
 	$(GO) mod tidy

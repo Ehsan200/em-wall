@@ -6,13 +6,14 @@ import LogsPanel from './components/LogsPanel.vue';
 import NetworkPanel from './components/NetworkPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
-import { Status, InstallStatus, IsPackaged } from '../wailsjs/go/main/App';
+import { Status, InstallStatus, IsPackaged, AppVersion } from '../wailsjs/go/main/App';
 import type { ipc, installer } from '../wailsjs/go/models';
 
 type Tab = 'rules' | 'logs' | 'network' | 'settings';
 const tab = ref<Tab>('rules');
 const status = ref<ipc.StatusResult | null>(null);
 const error = ref<string>('');
+const appVersion = ref<string>('');
 const install = ref<installer.Status | null>(null);
 const packaged = ref<boolean>(true);
 // True while Settings → Reinstall is mid-flight. Reinstall bootouts the
@@ -58,6 +59,7 @@ async function onInstalled() {
 
 onMounted(async () => {
   try { packaged.value = await IsPackaged(); } catch { packaged.value = false; }
+  try { appVersion.value = await AppVersion(); } catch { appVersion.value = ''; }
   await refresh();
   timer = window.setInterval(refresh, 2000);
 });
@@ -67,7 +69,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <StatusBar :status="status" :error="error" />
+  <StatusBar :status="status" :error="error" :appVersion="appVersion" />
 
   <template v-if="showInstallGate">
     <InstallPanel :status="install" :packaged="packaged" @installed="onInstalled" />
