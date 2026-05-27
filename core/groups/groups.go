@@ -114,6 +114,54 @@ func KnownGroups() []Group {
 			Icon: svgBranded("M", "#ff7000", "#ffd200", "#ffffff"),
 		},
 		{
+			Key:         "youtube",
+			DisplayName: "YouTube",
+			Description: "YouTube web/app, video CDN, thumbnails",
+			Patterns: []string{
+				"*.youtube.com",
+				"*.youtu.be",
+				"*.youtube-nocookie.com",
+				"*.googlevideo.com",
+				"*.ytimg.com",
+				"*.ggpht.com",
+			},
+			Icon: svgYouTube(),
+		},
+		{
+			Key:         "spotify",
+			DisplayName: "Spotify",
+			Description: "Spotify app/web, audio + image CDN",
+			Patterns: []string{
+				"*.spotify.com",
+				"*.scdn.co",
+				"*.spotifycdn.com",
+				"*.spoti.fi",
+			},
+			Icon: svgSpotify(),
+		},
+		{
+			Key:         "soundcloud",
+			DisplayName: "SoundCloud",
+			Description: "SoundCloud web/app + media CDN",
+			Patterns: []string{
+				"*.soundcloud.com",
+				"*.sndcdn.com",
+			},
+			Icon: svgSoundCloud(),
+		},
+		{
+			Key:         "jetbrains",
+			DisplayName: "JetBrains",
+			Description: "IDEs, Toolbox, account, plugins, AI Assistant",
+			Patterns: []string{
+				"*.jetbrains.com",
+				"*.jetbrains.space",
+				"*.jetbrains.ai",
+				"*.intellij.net",
+			},
+			Icon: svgJetBrains(),
+		},
+		{
 			Key:         "telemetry-common",
 			DisplayName: "Common telemetry / analytics",
 			Description: "Sentry, Mixpanel, Segment, Amplitude, Datadog browser",
@@ -151,4 +199,51 @@ func svgBranded(initials, fill, accent, text string) string {
 		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="` + fill + `" stroke="` + accent + `" stroke-width="2"/>` +
 		`<text x="32" y="42" font-family="Helvetica,Arial,sans-serif" font-size="22" font-weight="700" ` +
 		`text-anchor="middle" fill="` + text + `">` + initials + `</text></svg>`
+}
+
+// The icon builders below produce recognizable brand glyphs framed in the
+// same rounded-square badge as svgBranded, so all groups stay visually
+// consistent. Any of them can be overridden by dropping a real
+// icons/<key>.svg|.png|.ico file (see LoadIcon).
+
+// svgYouTube: red badge with a white play triangle.
+func svgYouTube() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ff0000"/>` +
+		`<path d="M25 21 L46 32 L25 43 Z" fill="#ffffff"/></svg>`
+}
+
+// svgSpotify: green badge with the three black "sound" arcs.
+func svgSpotify() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#1db954"/>` +
+		`<g fill="none" stroke="#0d1b12" stroke-linecap="round">` +
+		`<path d="M17 25c11-3.5 22-2 30 2.4" stroke-width="5"/>` +
+		`<path d="M18.5 34c9-2.5 18.5-1 25 2.3" stroke-width="4"/>` +
+		`<path d="M20 42.5c7.5-2 14.5-1 20 1.4" stroke-width="3"/></g></svg>`
+}
+
+// svgSoundCloud: orange badge with a white waveform.
+func svgSoundCloud() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ff5500"/>` +
+		`<g fill="#ffffff">` +
+		`<rect x="15" y="29" width="4" height="11" rx="2"/>` +
+		`<rect x="23" y="23" width="4" height="17" rx="2"/>` +
+		`<rect x="31" y="19" width="4" height="21" rx="2"/>` +
+		`<rect x="39" y="25" width="4" height="15" rx="2"/>` +
+		`<rect x="47" y="31" width="4" height="9" rx="2"/></g></svg>`
+}
+
+// svgJetBrains: gradient badge with the "JB" wordmark and underline.
+func svgJetBrains() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<defs><linearGradient id="jb" x1="0" y1="64" x2="64" y2="0">` +
+		`<stop offset="0" stop-color="#fe315d"/>` +
+		`<stop offset="0.55" stop-color="#f97a12"/>` +
+		`<stop offset="1" stop-color="#b24cf0"/></linearGradient></defs>` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="url(#jb)"/>` +
+		`<text x="32" y="34" font-family="Helvetica,Arial,sans-serif" font-size="19" font-weight="800" ` +
+		`text-anchor="middle" fill="#ffffff">JB</text>` +
+		`<rect x="18" y="44" width="20" height="4" rx="1" fill="#ffffff"/></svg>`
 }
