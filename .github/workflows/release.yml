@@ -84,12 +84,16 @@ jobs:
 
             1. Open the DMG and drag **Em Wall** into **Applications**.
             2. Launch it from Applications. macOS will block the first launch because the build is **unsigned**.
-            3. Open **System Settings → Privacy & Security** (click here on macOS: [x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension](x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension)), scroll to the bottom, and click **Open Anyway** next to the Em Wall message. Confirm the second prompt with **Open**.
-            4. Inside the app, the **Install** screen will run the LaunchDaemon installer (you'll get one standard admin prompt).
+            3. Open Privacy & Security in System Settings — easiest way is to paste this in Terminal:
+               ```
+               open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+               ```
+               Scroll to the bottom of the pane and click **Open Anyway** next to the Em Wall message, then confirm with **Open**.
+            4. Inside the app, the **Install** screen will run the LaunchDaemon installer (one standard admin prompt).
 
             ### Terminal shortcut
 
-            If you'd rather skip the Privacy & Security dance, clear the quarantine flag once after dragging the app to Applications:
+            Skip the Privacy & Security pane entirely by clearing the quarantine flag after dragging the app to Applications:
 
             ```
             xattr -dr com.apple.quarantine "/Applications/Em Wall.app"
