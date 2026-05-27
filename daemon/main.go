@@ -42,12 +42,19 @@ type lsofProvider struct{}
 
 func (lsofProvider) LsofUtunOwners() map[string]string { return routing.LsofUtunOwners() }
 
+// publicFallbackDNS is the last-resort upstream used only when no
+// system/DHCP/VPN resolver can be discovered AND validated. Without a
+// fallback, em-wall would refuse to activate and leave the host with no
+// DNS, so we fall back to well-known always-on public resolvers
+// (Cloudflare + Google). Overridable at launch via -upstream.
+var publicFallbackDNS = []string{"1.1.1.1:53", "8.8.8.8:53"}
+
 func main() {
 	var (
 		dbPath         = flag.String("db", "/usr/local/var/em-wall/rules.db", "path to SQLite database")
 		sockPath       = flag.String("socket", ipc.DefaultSocketPath, "path to IPC unix socket")
 		listenAddr     = flag.String("listen", "127.0.0.1:53", "DNS proxy listen address")
-		upstream       = flag.String("upstream", "1.1.1.1:53,8.8.8.8:53", "comma-separated upstream DNS servers")
+		upstream       = flag.String("upstream", strings.Join(publicFallbackDNS, ","), "comma-separated upstream DNS servers")
 		noAutoActivate = flag.Bool("no-auto-activate", false, "do not touch system DNS on startup (for tests / dev)")
 		proxyTestTgt   = flag.String("proxy-test-target", defaultProxyTestTarget, "host:port dialed through a proxy by proxies.test to check reachability")
 	)
@@ -122,13 +129,13 @@ func main() {
 
 	ipcSrv := ipc.NewServer(*sockPath, log.Default())
 	deps := &handlerDeps{
-		store:      store,
-		proxyStore: proxyStore,
-		proxyTable: proxyTable,
-		engine:     engine,
-		router:     router,
-		pf:         pf,
-		sysDNS:     sysDNS,
+		store:         store,
+		proxyStore:    proxyStore,
+		proxyTable:    proxyTable,
+		engine:        engine,
+		router:        router,
+		pf:            pf,
+		sysDNS:        sysDNS,
 		dnsServer:     dnsServer,
 		apps:          apps,
 		listenAddr:    *listenAddr,
@@ -368,7 +375,7 @@ func loadUpstream(store *rules.Store, flagDefault string) []string {
 	if ips, err := sd.DetectResolvers(); err == nil && len(ips) > 0 {
 		return WithPort53(ips)
 	}
-	return []string{"1.1.1.1:53", "8.8.8.8:53"}
+	return publicFallbackDNS
 }
 
 // stripLoopback drops 127.* / ::1 entries from a list of host[:port]
@@ -1270,9 +1277,9 @@ func normalizeGroupPattern(s string) string {
 // time are also the ones treated as group members for delete-all /
 // enable-all bulk actions.
 //
-//   group "*.openai.com" covers rules: openai.com, *.openai.com,
-//                                       api.openai.com, *.api.openai.com
-//   group "openai.com"   covers only:  openai.com (exact match)
+//	group "*.openai.com" covers rules: openai.com, *.openai.com,
+//	                                    api.openai.com, *.api.openai.com
+//	group "openai.com"   covers only:  openai.com (exact match)
 //
 // This is what the user expects: "chatgpt.com" should be considered
 // part of the OpenAI group because OpenAI lists "*.chatgpt.com".
@@ -1347,4 +1354,3 @@ func proxyToDTO(p proxy.Proxy) ipc.ProxyDTO {
 		UpdatedAt:   p.UpdatedAt.Format(time.RFC3339),
 	}
 }
-

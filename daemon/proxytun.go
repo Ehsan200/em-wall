@@ -18,12 +18,18 @@ import (
 const proxyUDPIdleTimeout = 60 * time.Second
 
 // proxyUTUNAddr is the point-to-point address assigned to the daemon's
-// utun. RFC 2544 benchmarking range (198.18.0.0/15) is almost never
-// used in real networks, so it won't collide with the user's other
-// VPNs. The address itself isn't routed — proxy-bound traffic reaches
-// the utun via the per-host routes the DNS layer installs, which are
-// more specific than any VPN's default route.
-const proxyUTUNAddr = "198.18.0.1"
+// utun. The address itself isn't routed — proxy-bound traffic reaches
+// the utun via the per-host routes the DNS layer installs (by interface
+// name), which are more specific than any VPN's default route — so this
+// only needs to be an address nothing else claims.
+//
+// It must stay OUT of 198.18.0.0/15: that RFC 2544 range is exactly what
+// fake-IP proxies (V2BOX, sing-box, Clash, v2ray) hand out, and a clash
+// there means their fake-IPs and our tun fight over the same addresses
+// (symptom: "no proxy mapping for 198.18.0.x; dropping"). TEST-NET-1
+// (192.0.2.0/24, RFC 5737) is reserved for documentation and used by
+// nothing in practice, so it's collision-free.
+const proxyUTUNAddr = "192.0.2.1"
 
 // defaultProxyTestTarget is the endpoint the proxies.test handler dials
 // through a proxy to confirm reachability, overridable via the

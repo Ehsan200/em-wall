@@ -566,25 +566,62 @@ func NewMultiUpstream(servers []string, timeout time.Duration) *MultiUpstream {
 	}
 }
 
+// Forward sends msg to each upstream in turn and returns the best answer.
+// A definitive reply (NOERROR or NXDOMAIN) is returned as soon as an
+// upstream gives one. SERVFAIL/REFUSED and transport errors are treated as
+// SOFT failures: we move on to the next upstream, and if every upstream
+// soft-fails we retry the whole list once. Those failures are usually
+// transient — a cold recursive cache or a slow path to the authoritative
+// servers (e.g. a CDN on distant nameservers) — and an upstream resolver's
+// own cache would normally hide them. Without this, the first upstream's
+// momentary SERVFAIL was returned verbatim, so one flaky resolver (or one
+// unlucky moment) surfaced to the client as a hard failure even when a
+// retry or the second upstream would have answered.
 func (m *MultiUpstream) Forward(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	var best *dns.Msg
 	var lastErr error
-	for _, srv := range m.Servers {
-		resp, _, err := m.udpClient.ExchangeContext(ctx, msg, srv)
-		if err == nil && resp != nil && !resp.Truncated {
-			return resp, nil
-		}
-		if resp != nil && resp.Truncated {
-			resp, _, err = m.tcpClient.ExchangeContext(ctx, msg, srv)
-			if err == nil && resp != nil {
-				return resp, nil
+
+	attempt := func() {
+		for _, srv := range m.Servers {
+			resp, err := m.exchange(ctx, srv, msg)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp == nil {
+				continue
+			}
+			if resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError {
+				best = resp // definitive — stop here
+				return
+			}
+			if best == nil {
+				best = resp // keep the soft failure as a fallback
 			}
 		}
-		if err != nil {
-			lastErr = err
-		}
+	}
+
+	attempt()
+	if best == nil || (best.Rcode != dns.RcodeSuccess && best.Rcode != dns.RcodeNameError) {
+		// Everything errored or soft-failed; give it one more pass.
+		attempt()
+	}
+	if best != nil {
+		return best, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("dnsproxy: no upstream answered")
 	}
 	return nil, lastErr
+}
+
+// exchange queries srv over UDP, retrying over TCP if the reply was
+// truncated. Returns the response (which may carry any Rcode) and any
+// transport error.
+func (m *MultiUpstream) exchange(ctx context.Context, srv string, msg *dns.Msg) (*dns.Msg, error) {
+	resp, _, err := m.udpClient.ExchangeContext(ctx, msg, srv)
+	if err == nil && resp != nil && resp.Truncated {
+		resp, _, err = m.tcpClient.ExchangeContext(ctx, msg, srv)
+	}
+	return resp, err
 }
