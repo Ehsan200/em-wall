@@ -23,7 +23,7 @@ APP_RES_PLIST   := $(APP_RES_DIR)/com.em-wall.daemon.plist
 APP_RES_ANCHOR  := $(APP_RES_DIR)/em-wall.pf.anchor
 
 .PHONY: all daemon app app-bundle app-resources app-icon test test-core lint \
-        run-daemon run-app clean tidy
+        run-daemon run-daemon-root run-app clean tidy
 
 all: daemon app
 
@@ -75,6 +75,28 @@ run-daemon: daemon
 	$(DAEMON_BIN) \
 		-db ./tmp/dev.db \
 		-socket ./tmp/em-wall.sock \
+		-listen 127.0.0.1:5353 \
+		-no-auto-activate
+
+# `run-daemon-root` runs the built daemon under sudo so it can open the
+# proxy utun — proxy routing needs root. sudo prompts for your password;
+# if you cancel or mistype it, sudo just exits (nothing crashes). Even
+# with root, an un-openable utun is non-fatal — the daemon logs
+# "proxy routing disabled" and keeps serving.
+#
+# Uses the DEFAULT socket so `make run-app` pairs with this daemon, but
+# keeps -no-auto-activate so it NEVER rewrites system DNS — there's
+# nothing to brick if you Ctrl-C it. (Full app-traffic interception
+# still needs the DNS hijack; use the installed app for that.)
+#
+# Don't run this while em-wall is installed: the LaunchDaemon already
+# owns /var/run/em-wall.sock and the two would clash.
+run-daemon-root: daemon
+	@echo "running em-walld as root (sudo will prompt for your password; cancel is safe)…"
+	@mkdir -p tmp
+	sudo $(DAEMON_BIN) \
+		-db ./tmp/dev.db \
+		-socket /var/run/em-wall.sock \
 		-listen 127.0.0.1:5353 \
 		-no-auto-activate
 

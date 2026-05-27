@@ -54,6 +54,55 @@ func main() {
 		log.Fatalf("rules.delete: %v", err)
 	}
 	fmt.Println("deleted rule")
+
+	// ---- Proxies CRUD ----
+	var proxy ipc.ProxyDTO
+	if err := c.Call(ipc.MethodProxiesAdd, ipc.ProxiesAddParams{
+		Name: "smoketest-work", Protocol: "socks5",
+		Host: "127.0.0.1", Port: 1080,
+		Username: "alice", Password: "s3cret",
+	}, &proxy); err != nil {
+		log.Fatalf("proxies.add: %v", err)
+	}
+	fmt.Printf("added proxy id=%d name=%s hasPassword=%v\n", proxy.ID, proxy.Name, proxy.HasPassword)
+
+	// Rule referencing a non-existent proxy should be rejected.
+	var rejected ipc.RuleDTO
+	if err := c.Call(ipc.MethodRulesAdd, ipc.RulesAddParams{
+		Pattern: "*.proxytest.invalid", Action: "route",
+		Interface: "proxy:no-such-proxy", Enabled: true,
+	}, &rejected); err == nil {
+		fmt.Println("FAIL: rule with unknown proxy ref was accepted")
+		os.Exit(1)
+	}
+	fmt.Println("rule with unknown proxy ref correctly rejected")
+
+	// Rule referencing the new proxy should succeed.
+	var pxRule ipc.RuleDTO
+	if err := c.Call(ipc.MethodRulesAdd, ipc.RulesAddParams{
+		Pattern: "*.proxytest.invalid", Action: "route",
+		Interface: "proxy:smoketest-work", Enabled: true,
+	}, &pxRule); err != nil {
+		log.Fatalf("proxies-bound rule.add: %v", err)
+	}
+	fmt.Printf("added proxy-bound rule id=%d interface=%s\n", pxRule.ID, pxRule.Interface)
+
+	// Deleting the proxy while it's referenced should fail.
+	if err := c.Call(ipc.MethodProxiesDelete, ipc.ProxiesDeleteParams{ID: proxy.ID}, nil); err == nil {
+		fmt.Println("FAIL: proxy delete should have been blocked by rule reference")
+		os.Exit(1)
+	}
+	fmt.Println("proxy delete correctly blocked while referenced")
+
+	// Tear down rule, then proxy.
+	if err := c.Call(ipc.MethodRulesDelete, ipc.RulesDeleteParams{ID: pxRule.ID}, nil); err != nil {
+		log.Fatalf("rules.delete (px-bound): %v", err)
+	}
+	if err := c.Call(ipc.MethodProxiesDelete, ipc.ProxiesDeleteParams{ID: proxy.ID}, nil); err != nil {
+		log.Fatalf("proxies.delete: %v", err)
+	}
+	fmt.Println("deleted proxy")
+
 	fmt.Println("PASS")
 }
 

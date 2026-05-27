@@ -210,6 +210,42 @@ func (a *App) SetGroupEnabled(key string, enabled bool) (ipc.GroupsBulkResult, e
 	return out, err
 }
 
+// ---- Proxies ----
+
+func (a *App) ListProxies() ([]ipc.ProxyDTO, error) {
+	var out []ipc.ProxyDTO
+	err := a.call(ipc.MethodProxiesList, nil, &out)
+	return out, err
+}
+
+func (a *App) AddProxy(name, protocol, host string, port int, username, password string) (ipc.ProxyDTO, error) {
+	var out ipc.ProxyDTO
+	err := a.call(ipc.MethodProxiesAdd, ipc.ProxiesAddParams{
+		Name: name, Protocol: protocol, Host: host, Port: port,
+		Username: username, Password: password,
+	}, &out)
+	return out, err
+}
+
+// UpdateProxy updates the stored proxy. Pass an empty password string to
+// keep the existing password unchanged.
+func (a *App) UpdateProxy(id int64, name, protocol, host string, port int, username, password string) error {
+	return a.call(ipc.MethodProxiesUpdate, ipc.ProxiesUpdateParams{
+		ID: id, Name: name, Protocol: protocol, Host: host, Port: port,
+		Username: username, Password: password,
+	}, nil)
+}
+
+func (a *App) DeleteProxy(id int64) error {
+	return a.call(ipc.MethodProxiesDelete, ipc.ProxiesDeleteParams{ID: id}, nil)
+}
+
+func (a *App) TestProxy(id int64) (ipc.ProxiesTestResult, error) {
+	var out ipc.ProxiesTestResult
+	err := a.call(ipc.MethodProxiesTest, ipc.ProxiesTestParams{ID: id}, &out)
+	return out, err
+}
+
 // ---- Install / uninstall (local, no daemon needed) ----
 //
 // These methods don't go over IPC — they manipulate the host directly

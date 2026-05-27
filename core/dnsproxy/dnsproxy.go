@@ -16,6 +16,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/ehsan/em-wall/core/decision"
+	"github.com/ehsan/em-wall/core/proxy"
 )
 
 // Forwarder asks an upstream DNS server. Production uses MultiUpstream;
@@ -73,6 +74,21 @@ type LogSink interface {
 	Log(name, action, iface string, ruleID int64, clientIP string)
 }
 
+// ProxyResolver translates a "proxy:NAME[,NAME2,...]" interface field
+// into a concrete upstream-proxy choice, and records the
+// IP → (proxyNames, hostname) mapping that the netstack handler
+// consults later. nil = no "proxy:" prefix support (rules using it
+// degrade to NXDOMAIN with action "block-proxy-unsupported").
+//
+// HasProxy is a cheap existence check used during resolution; the
+// daemon's implementation reads from core/proxy.Store. We don't do
+// live reachability here — that's a Phase B+ refinement — so a proxy
+// whose upstream is down still "exists" until the user deletes it.
+type ProxyResolver interface {
+	HasProxy(name string) bool
+	Record(ip net.IP, hostname string, proxyNames []string, ttl time.Duration, ruleID int64)
+}
+
 type Config struct {
 	Listen      string        // e.g. "127.0.0.1:53"
 	NegativeTTL uint32        // TTL on NXDOMAIN responses
@@ -83,8 +99,14 @@ type Config struct {
 	Routes      RouteInstaller
 	Interfaces  InterfaceChecker // nil → no enforcement (allow-via-iface won't strictly enforce)
 	Apps        AppLocator       // nil → no `app:` prefix support
-	Logs        LogSink
-	Logger      *log.Logger
+	Proxies     ProxyResolver    // nil → no `proxy:` prefix support
+	// ProxyTun is the kernel-assigned name of the daemon-owned utun
+	// where the user-space TCP stack accepts proxy-routed connections.
+	// Empty disables the "proxy:" path; resolveIface will treat such
+	// rules as unsupported.
+	ProxyTun string
+	Logs     LogSink
+	Logger   *log.Logger
 }
 
 type Server struct {
@@ -206,7 +228,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		// Without this, app-bound failures looked like fixed-iface
 		// failures in the Logs tab.
 		logIface := iface
-		if strings.HasPrefix(d.Interface, "app:") {
+		if strings.HasPrefix(d.Interface, "app:") || proxy.IsProxyInterface(d.Interface) {
 			logIface = d.Interface + " → " + iface
 		}
 		if s.cfg.Interfaces != nil && !s.cfg.Interfaces.IsUp(iface) {
@@ -229,6 +251,14 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 			s.log(name, "block-route-failed", logIface, d.RuleID, clientIP)
 			return
 		}
+		// For proxy-routed answers, also record the per-IP mapping so
+		// the netstack TCP handler knows which upstream proxy to use
+		// when the client subsequently connects. installRoutesFor
+		// already pinned the IP to our utun; now we annotate that
+		// pin with (proxyNames, hostname).
+		if proxy.IsProxyInterface(d.Interface) && s.cfg.Proxies != nil {
+			s.recordProxyMapping(resp, name, d.Interface, d.RuleID)
+		}
 		_ = w.WriteMsg(resp)
 		s.log(name, "route", logIface, d.RuleID, clientIP)
 		return
@@ -250,18 +280,55 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 // resolveIface translates the rule's stored interface field into a
 // concrete interface name. Cases:
 //
-//   - empty                   → "" (caller treats as default route)
-//   - "utunN" / "enN"         → returned as-is
-//   - "app:<k1>[,<k2>,...]"   → resolved via the AppLocator. Walks
+//   - empty                       → "" (caller treats as default route)
+//   - "utunN" / "enN"             → returned as-is
+//   - "app:<k1>[,<k2>,...]"       → resolved via the AppLocator. Walks
 //     the candidate list in order and uses the first running app's
 //     utun. Acquires the per-app read lock (waits up to AppHoldMax).
 //     The caller MUST invoke release() after writing the response
 //     and installing any routes.
+//   - "proxy:<n1>[,<n2>,...]"     → resolved via the ProxyResolver.
+//     Returns the daemon-owned utun (cfg.ProxyTun) so per-host routes
+//     are pinned there. The TCP layer (proxytun + netstack) then
+//     dispatches per-connection through the chosen upstream proxy.
+//     No locking needed — proxy records are static config, not
+//     transient like app utun assignments.
 //
 // Returns ok=false if a response has already been written (no apps
 // running, lock timeout, …) — the caller must stop processing.
 func (s *Server) resolveIface(stored, qname string, ruleID int64, clientIP string, w dns.ResponseWriter, req *dns.Msg) (iface string, release func(), ok bool) {
 	noop := func() {}
+	if proxy.IsProxyInterface(stored) {
+		if s.cfg.Proxies == nil || s.cfg.ProxyTun == "" {
+			s.writeServFail(w, req)
+			s.log(qname, "block-proxy-unsupported", stored, ruleID, clientIP)
+			return "", noop, false
+		}
+		names := proxy.ParseInterface(stored)
+		if len(names) == 0 {
+			s.writeNX(w, req, qname)
+			s.log(qname, "block-proxy-missing", stored, ruleID, clientIP)
+			return "", noop, false
+		}
+		// Pick the first proxy whose record still exists. We don't do
+		// live reachability here — if the upstream is down the TCP
+		// splice will fail and the client sees a connection reset.
+		// Rule-time validation already rejected unknown names, but a
+		// proxy can be deleted between then and now.
+		picked := ""
+		for _, n := range names {
+			if s.cfg.Proxies.HasProxy(n) {
+				picked = n
+				break
+			}
+		}
+		if picked == "" {
+			s.writeNX(w, req, qname)
+			s.log(qname, "block-proxy-missing", stored, ruleID, clientIP)
+			return "", noop, false
+		}
+		return s.cfg.ProxyTun, noop, true
+	}
 	if !strings.HasPrefix(stored, "app:") {
 		return stored, noop, true
 	}
@@ -411,6 +478,42 @@ func (s *Server) installRoutesFor(resp *dns.Msg, iface string, ruleID int64) err
 		}
 	}
 	return nil
+}
+
+// recordProxyMapping annotates each A/AAAA IP in resp with the proxy
+// binding so the netstack TCP handler can dispatch the connection to
+// the right upstream proxy when the client subsequently connects.
+// Mirrors installRoutesFor's answer walk — the route pin (IP → our
+// utun) and this proxy mapping (IP → proxyNames, hostname) are the two
+// halves of the same "this IP is proxy-routed" fact, so they use the
+// same TTL floor. hostname is the queried name, recorded so the
+// upstream CONNECT/SOCKS request preserves it for SNI and proxy-side
+// hostname ACLs instead of dialing a bare IP.
+func (s *Server) recordProxyMapping(resp *dns.Msg, hostname, stored string, ruleID int64) {
+	names := proxy.ParseInterface(stored)
+	if len(names) == 0 {
+		return
+	}
+	for _, rr := range resp.Answer {
+		var ip net.IP
+		var ttl uint32
+		switch v := rr.(type) {
+		case *dns.A:
+			ip, ttl = v.A, v.Hdr.Ttl
+		case *dns.AAAA:
+			ip, ttl = v.AAAA, v.Hdr.Ttl
+		default:
+			continue
+		}
+		if ip == nil {
+			continue
+		}
+		life := time.Duration(ttl) * time.Second
+		if life < s.cfg.RouteTTLMin {
+			life = s.cfg.RouteTTLMin
+		}
+		s.cfg.Proxies.Record(ip, hostname, names, life, ruleID)
+	}
 }
 
 func (s *Server) log(name, action, iface string, ruleID int64, clientIP string) {

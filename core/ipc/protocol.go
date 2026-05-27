@@ -50,6 +50,11 @@ const (
 	MethodGroupsIcon          = "groups.icon"
 	MethodGroupsDeleteRules   = "groups.delete-rules"
 	MethodGroupsSetEnabled    = "groups.set-enabled"
+	MethodProxiesList         = "proxies.list"
+	MethodProxiesAdd          = "proxies.add"
+	MethodProxiesUpdate       = "proxies.update"
+	MethodProxiesDelete       = "proxies.delete"
+	MethodProxiesTest         = "proxies.test"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -209,6 +214,61 @@ type GroupsSetEnabledParams struct {
 type GroupsBulkResult struct {
 	Affected int     `json:"affected"`
 	RuleIDs  []int64 `json:"ruleIds"`
+}
+
+// ProxyDTO is the public view of a stored upstream proxy. Note: the
+// Password field is intentionally omitted — list/get/update responses
+// never carry it. The UI displays HasPassword instead so the user
+// knows credentials are stored without exposing them, and editing
+// a proxy without setting Password keeps the previous value.
+type ProxyDTO struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Protocol    string `json:"protocol"` // "socks5" or "http"
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	HasPassword bool   `json:"hasPassword"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+type ProxiesAddParams struct {
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type ProxiesUpdateParams struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	// Password: empty string means "keep existing", any non-empty value
+	// replaces the stored password. The UI shows a "leave blank to
+	// keep" hint when editing.
+	Password string `json:"password"`
+}
+
+type ProxiesDeleteParams struct {
+	ID int64 `json:"id"`
+}
+
+// ProxiesTestParams identifies the proxy to dial. Phase A returns a
+// placeholder result; Phase B wires this to an actual connect-and-
+// handshake test via core/proxy.Dialer.
+type ProxiesTestParams struct {
+	ID int64 `json:"id"`
+}
+
+type ProxiesTestResult struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
 }
 
 type SystemDNSStatus struct {

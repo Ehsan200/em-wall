@@ -6,6 +6,7 @@ import {
   InstallStatus, Install, Uninstall, WaitForDaemon,
 } from '../../wailsjs/go/main/App';
 import type { ipc, installer } from '../../wailsjs/go/models';
+import ProxiesPanel from './ProxiesPanel.vue';
 
 const emit = defineEmits<{
   (e: 'changed'): void
@@ -278,6 +279,9 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           </button>
         </div>
       </div>
+
+      <!-- Proxies (managed in its own component) -->
+      <ProxiesPanel />
 
       <!-- Encrypted DNS toggle -->
       <div class="col" style="gap: 8px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">

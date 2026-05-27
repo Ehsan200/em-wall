@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +29,7 @@ import (
 	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/pfctl"
+	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/routing"
 	"github.com/ehsan/em-wall/core/rules"
 	"github.com/ehsan/em-wall/core/version"
@@ -46,8 +49,15 @@ func main() {
 		listenAddr     = flag.String("listen", "127.0.0.1:53", "DNS proxy listen address")
 		upstream       = flag.String("upstream", "1.1.1.1:53,8.8.8.8:53", "comma-separated upstream DNS servers")
 		noAutoActivate = flag.Bool("no-auto-activate", false, "do not touch system DNS on startup (for tests / dev)")
+		proxyTestTgt   = flag.String("proxy-test-target", defaultProxyTestTarget, "host:port dialed through a proxy by proxies.test to check reachability")
 	)
 	flag.Parse()
+
+	// Parse the proxy reachability probe target once. An invalid value
+	// falls back to the default rather than failing startup — the test
+	// feature is non-critical and shouldn't keep the daemon from
+	// booting.
+	proxyTestHost, proxyTestPort := parseProxyTestTarget(*proxyTestTgt)
 
 	if err := os.MkdirAll(filepath.Dir(*dbPath), 0o755); err != nil {
 		log.Fatalf("em-walld: mkdir db dir: %v", err)
@@ -58,6 +68,22 @@ func main() {
 		log.Fatalf("em-walld: open store: %v", err)
 	}
 	defer store.Close()
+
+	proxyStore, err := proxy.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("em-walld: open proxy store: %v", err)
+	}
+	defer proxyStore.Close()
+
+	// IP→proxy mapping populated by the DNS layer, consumed by the
+	// netstack TCP handler. minTTL keeps a mapping alive long enough
+	// that a connection opened right after resolution isn't orphaned
+	// by an aggressive sweep.
+	proxyTable := proxy.NewTable(60 * time.Second)
+	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, log.Default())
+	if proxyTunnel != nil {
+		defer proxyTunnel.Stop()
+	}
 
 	engine := decision.New(store)
 	if err := engine.Reload(context.Background()); err != nil {
@@ -85,6 +111,8 @@ func main() {
 		Routes:     router,
 		Interfaces: dnsproxy.DefaultInterfaceChecker,
 		Apps:       apps,
+		Proxies:    &proxyResolver{store: proxyStore, table: proxyTable},
+		ProxyTun:   proxyTunName,
 		Logs:       logSink,
 		Logger:     log.Default(),
 	})
@@ -95,15 +123,19 @@ func main() {
 	ipcSrv := ipc.NewServer(*sockPath, log.Default())
 	deps := &handlerDeps{
 		store:      store,
+		proxyStore: proxyStore,
+		proxyTable: proxyTable,
 		engine:     engine,
 		router:     router,
 		pf:         pf,
 		sysDNS:     sysDNS,
-		dnsServer:  dnsServer,
-		apps:       apps,
-		listenAddr: *listenAddr,
-		upstream:   joinCSV(upstreams),
-		startedAt:  time.Now(),
+		dnsServer:     dnsServer,
+		apps:          apps,
+		listenAddr:    *listenAddr,
+		upstream:      joinCSV(upstreams),
+		startedAt:     time.Now(),
+		proxyTestHost: proxyTestHost,
+		proxyTestPort: proxyTestPort,
 	}
 	registerHandlers(ipcSrv, deps)
 
@@ -151,7 +183,8 @@ func main() {
 		}
 	}()
 
-	// Periodic route TTL sweeper.
+	// Periodic route TTL sweeper. Also sweeps the proxy IP→proxy table
+	// on the same tick so expired mappings don't outlive their routes.
 	go func() {
 		defer wg.Done()
 		t := time.NewTicker(15 * time.Second)
@@ -162,6 +195,7 @@ func main() {
 				return
 			case <-t.C:
 				router.SweepExpired(ctx)
+				proxyTable.SweepExpired()
 			}
 		}
 	}()
@@ -222,6 +256,20 @@ func main() {
 		}
 	}()
 
+	// Proxy tunnel: shuttle packets between the daemon-owned utun and
+	// the netstack TCP stack. Only when the utun opened successfully
+	// (needs root) — otherwise proxy: rules are unsupported and there's
+	// nothing to serve. Start() blocks until ctx is cancelled or the
+	// utun fd is closed by Stop().
+	if proxyTunnel != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("em-walld: proxy tunnel serving on %s", proxyTunName)
+			proxyTunnel.Start(ctx)
+		}()
+	}
+
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -231,6 +279,12 @@ func main() {
 	cancel()
 	dnsServer.Shutdown()
 	ipcSrv.Shutdown()
+	if proxyTunnel != nil {
+		// Closes the utun fd, which unblocks the read loop (ctx alone
+		// can't — it's parked in a blocking Read). Idempotent with the
+		// deferred Stop().
+		proxyTunnel.Stop()
+	}
 	router.Flush(context.Background())
 
 	done := make(chan struct{})
@@ -263,6 +317,8 @@ func (s *storeLogSink) Log(name, action, iface string, ruleID int64, clientIP st
 
 type handlerDeps struct {
 	store      *rules.Store
+	proxyStore *proxy.Store
+	proxyTable *proxy.Table
 	engine     *decision.Engine
 	router     *routing.Manager
 	pf         *pfctl.Manager
@@ -272,6 +328,11 @@ type handlerDeps struct {
 	listenAddr string
 	upstream   string
 	startedAt  time.Time
+
+	// Reachability-probe target for proxies.test, parsed from the
+	// -proxy-test-target flag. host may be an IP literal or a DNS name.
+	proxyTestHost string
+	proxyTestPort int
 
 	mu sync.Mutex // guards upstream
 }
@@ -341,6 +402,24 @@ func splitCSV(s string) []string {
 
 func joinCSV(parts []string) string { return strings.Join(parts, ",") }
 
+// parseProxyTestTarget splits a "host:port" string into its parts for
+// the proxies.test reachability probe. host may be an IP or a DNS
+// name. On any parse error (missing port, non-numeric port, etc.) it
+// logs and falls back to the default target — the test feature is
+// non-critical, so a bad flag shouldn't block daemon startup.
+func parseProxyTestTarget(s string) (host string, port int) {
+	h, p, err := net.SplitHostPort(strings.TrimSpace(s))
+	if err == nil {
+		if n, perr := strconv.Atoi(p); perr == nil && n >= 1 && n <= 65535 && h != "" {
+			return h, n
+		}
+	}
+	log.Printf("em-walld: invalid -proxy-test-target %q, using default %q", s, defaultProxyTestTarget)
+	dh, dp, _ := net.SplitHostPort(defaultProxyTestTarget)
+	n, _ := strconv.Atoi(dp)
+	return dh, n
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "—"
@@ -379,6 +458,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
+		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
 		r := rules.Rule{
 			Pattern:   p.Pattern,
 			Action:    rules.Action(p.Action),
@@ -398,6 +480,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
+		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
 		r := rules.Rule{
 			ID:        p.ID,
 			Pattern:   p.Pattern,
@@ -415,6 +500,10 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		// leave the original utun4 routes in the OS table — letting
 		// browser-cached IPs reach the destination via the wrong path.
 		_ = d.router.RemoveByRule(ctx, p.ID)
+		// Same reasoning for proxy mappings: drop any IP→proxy entries
+		// this rule installed so a now-stale binding doesn't keep
+		// dispatching cached IPs through the old proxy.
+		d.proxyTable.RemoveByRule(p.ID)
 		_ = d.engine.Reload(ctx)
 		return map[string]any{"ok": true}, nil
 	})
@@ -425,6 +514,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			return nil, err
 		}
 		_ = d.router.RemoveByRule(ctx, p.ID)
+		d.proxyTable.RemoveByRule(p.ID)
 		if err := d.store.Delete(ctx, p.ID); err != nil {
 			return nil, err
 		}
@@ -660,6 +750,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		var deleted []int64
 		for _, id := range ids {
 			_ = d.router.RemoveByRule(ctx, id)
+			d.proxyTable.RemoveByRule(id)
 			if err := d.store.Delete(ctx, id); err != nil {
 				continue
 			}
@@ -702,6 +793,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			}
 			if !p.Enabled {
 				_ = d.router.RemoveByRule(ctx, r.ID)
+				d.proxyTable.RemoveByRule(r.ID)
 			}
 			touched = append(touched, r.ID)
 		}
@@ -750,6 +842,164 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		return d.systemDNSStatus(), nil
 	})
+
+	s.Handle(ipc.MethodProxiesList, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		list, err := d.proxyStore.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ipc.ProxyDTO, len(list))
+		for i, p := range list {
+			out[i] = proxyToDTO(p)
+		}
+		return out, nil
+	})
+
+	s.Handle(ipc.MethodProxiesAdd, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.ProxiesAddParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		added, err := d.proxyStore.Add(ctx, proxy.Proxy{
+			Name:     p.Name,
+			Protocol: proxy.Protocol(p.Protocol),
+			Host:     p.Host,
+			Port:     p.Port,
+			Username: p.Username,
+			Password: p.Password,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return proxyToDTO(added), nil
+	})
+
+	s.Handle(ipc.MethodProxiesUpdate, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.ProxiesUpdateParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if err := d.proxyStore.Update(ctx, proxy.Proxy{
+			ID:       p.ID,
+			Name:     p.Name,
+			Protocol: proxy.Protocol(p.Protocol),
+			Host:     p.Host,
+			Port:     p.Port,
+			Username: p.Username,
+			Password: p.Password,
+		}); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodProxiesDelete, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.ProxiesDeleteParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		// Refuse to delete a proxy that's still referenced by any
+		// rule's Interface field, otherwise that rule would silently
+		// break at the next DNS query.
+		stored, err := d.proxyStore.Get(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		refs, err := d.rulesReferencingProxy(ctx, stored.Name)
+		if err != nil {
+			return nil, err
+		}
+		if len(refs) > 0 {
+			return nil, fmt.Errorf("proxy %q is referenced by %d rule(s); remove or edit those rules first", stored.Name, len(refs))
+		}
+		if err := d.proxyStore.Delete(ctx, p.ID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	// Live reachability check: open a connection through the proxy to a
+	// well-known always-on TCP endpoint. Success means we reached the
+	// proxy, completed its auth/handshake, and it connected onward. We
+	// dial a raw IP (no hostname) so the probe doesn't depend on
+	// proxy-side DNS — it's a pure reachability check of the proxy.
+	s.Handle(ipc.MethodProxiesTest, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.ProxiesTestParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		stored, err := d.proxyStore.Get(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		dialer, err := proxy.NewDialer(stored)
+		if err != nil {
+			return ipc.ProxiesTestResult{OK: false, Message: err.Error()}, nil
+		}
+		// An IP-literal target dials by IP (no proxy-side DNS); a DNS
+		// name is passed as the hostname so the proxy resolves it.
+		var hostname string
+		ip := net.ParseIP(d.proxyTestHost)
+		if ip == nil {
+			hostname = d.proxyTestHost
+		}
+		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		start := time.Now()
+		conn, err := dialer.Dial(tctx, hostname, ip, d.proxyTestPort)
+		if err != nil {
+			return ipc.ProxiesTestResult{
+				OK:      false,
+				Message: fmt.Sprintf("connect via %s://%s:%d failed: %v", stored.Protocol, stored.Host, stored.Port, err),
+			}, nil
+		}
+		_ = conn.Close()
+		return ipc.ProxiesTestResult{
+			OK:      true,
+			Message: fmt.Sprintf("reached %s through proxy in %s", net.JoinHostPort(d.proxyTestHost, strconv.Itoa(d.proxyTestPort)), time.Since(start).Round(time.Millisecond)),
+		}, nil
+	})
+}
+
+// validateProxyRefs checks that every proxy name referenced by a
+// rule's Interface field actually exists in the proxy store. Returns
+// nil for non-proxy interfaces (utunN, app:KEY, empty), or a wrapped
+// error naming the missing proxies.
+func (d *handlerDeps) validateProxyRefs(ctx context.Context, iface string) error {
+	if !proxy.IsProxyInterface(iface) {
+		return nil
+	}
+	names := proxy.ParseInterface(iface)
+	if len(names) == 0 {
+		return fmt.Errorf("interface %q references no proxy names", iface)
+	}
+	missing, err := d.proxyStore.NamesExist(ctx, names)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("unknown proxy reference(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// rulesReferencingProxy returns the IDs of rules whose Interface
+// field includes name in a "proxy:NAME[,...]" list.
+func (d *handlerDeps) rulesReferencingProxy(ctx context.Context, name string) ([]int64, error) {
+	all, err := d.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for _, r := range all {
+		if !proxy.IsProxyInterface(r.Interface) {
+			continue
+		}
+		if slices.Contains(proxy.ParseInterface(r.Interface), name) {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
 }
 
 // systemDNSStatus snapshots the current per-service DNS, what scutil
@@ -1081,6 +1331,20 @@ func ruleToDTO(r rules.Rule) ipc.RuleDTO {
 		Enabled:   r.Enabled,
 		CreatedAt: r.CreatedAt.Format(time.RFC3339),
 		UpdatedAt: r.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func proxyToDTO(p proxy.Proxy) ipc.ProxyDTO {
+	return ipc.ProxyDTO{
+		ID:          p.ID,
+		Name:        p.Name,
+		Protocol:    string(p.Protocol),
+		Host:        p.Host,
+		Port:        p.Port,
+		Username:    p.Username,
+		HasPassword: p.Password != "",
+		CreatedAt:   p.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   p.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
