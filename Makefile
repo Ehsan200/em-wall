@@ -52,6 +52,7 @@ app-bundle: app-resources app-icon
 # trust mtimes here. The cp is cheap; the daemon rebuild is what
 # matters.
 app-icon:
+	@mkdir -p $(APP_DIR)/build
 	cp assets/appicon.png $(APP_DIR)/build/appicon.png
 
 app-resources: daemon
