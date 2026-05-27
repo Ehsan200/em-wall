@@ -30,7 +30,7 @@ The IPC protocol is **newline-framed JSON-RPC** over `/var/run/em-wall.sock`. Th
 
 ### `core/` is intentionally OS-agnostic
 
-The package layout under `core/` is structured so it can survive a phase 2 port to `NEPacketTunnelProvider` / `NEDNSProxyProvider` (requires Apple Developer Program). The OS-coupled bits (`dnsproxy`, `routing`, `pfctl`) are isolated behind interfaces; `rules`, `decision`, `groups`, `applocator`, `ipc` are pure Go.
+The OS-coupled bits (`dnsproxy`, `routing`, `pfctl`) are isolated behind interfaces; `rules`, `decision`, `groups`, `applocator`, `ipc` are pure Go.
 
 ```
 core/rules       — GORM+SQLite store, wildcard matcher (`*.x.com` matches apex + subs)
@@ -71,10 +71,6 @@ The installer is the **only** install path — there is no shell script counterp
 - `installer.Install` extracts the embedded files into a temp dir, writes a bash script with the install steps inlined, and runs it via `osascript ... do shell script "..." with administrator privileges`. macOS shows the standard auth prompt; cancellation surfaces as `installer.ErrCancelled`, which `App.Install`/`App.Uninstall` translate into a literal "cancelled" error so the frontend can ignore it silently.
 - `App.Uninstall` first asks the still-running daemon (over IPC) to deactivate the system DNS hijack so the daemon's saved per-service backup restores the *original* DNS. The uninstall script then runs a safety sweep at the very end: any service whose first DNS entry is still `127.0.0.1` is reset to DHCP-supplied, then `dscacheutil -flushcache` and `killall -HUP mDNSResponder` are invoked. This is the last line of defence against leaving the host with broken DNS if the deactivate IPC failed (daemon already crashed, lost backup, etc.). The Settings → Uninstall section requires typed confirmation (`uninstall` or `delete everything`) and offers a purge toggle for the rules DB and log file.
 - `App.InstallStatus` (filesystem inspection) is local to the UI process — no IPC. The install panel polls it; daemon-side `Status()` is the regular IPC call that fails until the daemon is running.
-
-### Phase 1 vs phase 2
-
-Phase 1 = current. DNS-layer enforcement only — apps with hardcoded IPs bypass it. Phase 2 swaps `core/dnsproxy` for `NEDNSProxyProvider` and `core/routing` for `NEPacketTunnelProvider` (split-tunnel re-emission); `pfctl` becomes redundant. The `core/*` rule engine and SQLite layer are the same in both phases. Don't add OS-coupled logic outside `dnsproxy`/`routing`/`pfctl`.
 
 ## Conventions
 
