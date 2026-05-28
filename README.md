@@ -1,12 +1,15 @@
 # em-wall
 
-A macOS firewall that works at the DNS layer. Every domain lookup on your machine passes through em-wall before any connection is made — rules decide whether it is blocked, allowed, or routed through a specific network interface.
+![em-wall](assets/screenshots/main.png)
+
+A macOS firewall that works at the DNS layer. Every domain lookup on your machine passes through em-wall before any connection is made — rules decide whether it is blocked, allowed, or routed through a specific network interface, VPN app, SOCKS/HTTP proxy, or embedded Xray outbound.
 
 - Block domains and wildcards (`*.example.com` matches the apex and all subdomains).
-- Route specific domains out a chosen interface — useful for pinning traffic to a VPN tunnel without routing everything through it.
+- Route specific domains out a chosen target: a raw interface (`utun3`), a running VPN app by key (`app:tailscale`), a configured upstream proxy (`proxy:work`), or an embedded Xray outbound (`xray:home`).
+- Curated domain groups (OpenAI, Anthropic, Google, Meta, X, Telegram, JetBrains, …) for one-click bulk rules, plus bulk enable/disable/delete on whole groups.
 - Optional toggle to block encrypted DNS (DoH/DoT), which would otherwise bypass the firewall entirely.
 - Live log of every DNS query with the decision that was applied.
-- Curated domain groups (OpenAI, Google, Meta, …) for one-click bulk rules.
+- Embedded [xray-core](https://github.com/XTLS/Xray-core): manage outbounds, import VLESS/VMess/Trojan links, edit raw JSON in a Monaco editor, per-entry latency test, capped rolling log.
 
 ## How it works
 
@@ -22,10 +25,20 @@ em-walld  (LaunchDaemon, root)
   ├─ core/decision   rule engine, in-memory cache
   ├─ core/dnsproxy   UDP + TCP server on 127.0.0.1:53
   ├─ core/routing    per-host route installer via /sbin/route
+  ├─ core/applocator app-key → currently-owned utun lookup (lsof)
+  ├─ core/proxy      SOCKS/HTTP upstream proxies (proxy:NAME target)
+  ├─ core/proxytun   userspace TUN that funnels matched traffic into a proxy
+  ├─ core/xray       embedded xray-core lifecycle + config builder
   └─ core/pfctl      pf anchor for DoH/DoT blocking
 ```
 
-The daemon owns everything — the UI is a thin client that forwards calls over IPC. On each DNS query the engine finds the most-specific matching rule (exact beats wildcard at the same depth), then either returns NXDOMAIN, forwards upstream, or forwards and installs a per-host route for every A/AAAA answer.
+The daemon owns everything — the UI is a thin client that forwards calls over IPC. On each DNS query the engine finds the most-specific matching rule (exact beats wildcard at the same depth) and dispatches:
+
+- **block** → NXDOMAIN with a negative-cache TTL.
+- **allow** with no interface → forward upstream as normal.
+- **allow/route** with `Interface = "utunN"` → forward, then install `route -host <ip> -interface utunN` for every A/AAAA in the answer.
+- **route** with `Interface = "app:KEY[,KEY...]"` → resolve the app key to its current utun via `applocator` (first running wins) and pin routes there; an app watcher flushes and re-installs on utun changes so restarting the VPN doesn't strand traffic.
+- **route** with `Interface = "proxy:NAME"` or `"xray:NAME"` → install routes that point at em-wall's userspace TUN, which forwards matched flows into the configured SOCKS/HTTP proxy or Xray outbound.
 
 ## Repo layout
 
@@ -35,17 +48,22 @@ core/          Go library — fully testable without root
   decision/    rule evaluation engine
   dnsproxy/    DNS server + multi-upstream forwarder
   routing/     per-host route installer
+  applocator/  app-key → currently-owned utun resolver
+  proxy/       SOCKS/HTTP upstream proxy registry
+  proxytun/    userspace TUN that funnels matched flows into a proxy
+  xray/        embedded xray-core lifecycle + JSON config builder
   pfctl/       pf anchor manager
   ipc/         Unix-socket JSON-RPC (protocol.go is the wire contract)
   groups/      curated domain group definitions
+  version/     build-time version stamp
 
 daemon/        em-walld — wires core/* together, runs as LaunchDaemon
 app/           Wails + Vue 3 UI (separate Go module via go.work)
   app.go       thin IPC client; every method forwards one RPC call
   internal/installer/  in-app install / uninstall logic
-  frontend/    Vite + Vue 3 + TypeScript
+  frontend/    Vite + Vue 3 + TypeScript (Rules / Logs / Network / Proxies / Xray / Settings)
 
-assets/        source assets (app icon)
+assets/        source assets (app icon, screenshots)
 launchd/       LaunchDaemon plist template
 ```
 
