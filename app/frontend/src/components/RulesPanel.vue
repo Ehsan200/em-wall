@@ -72,10 +72,31 @@ function groupForRule(r: ipc.RuleDTO): ipc.GroupDTO | undefined {
   return undefined;
 }
 
+// "Lazy" group match: a query hits a group if it's a substring of the
+// key, display name, description, or any pattern. Same matcher is used
+// for the quick-add cards and to surface a group's rules in the list.
+function matchesGroup(g: ipc.GroupDTO, q: string): boolean {
+  if (!q) return true;
+  if (g.key.toLowerCase().includes(q)) return true;
+  if (g.displayName.toLowerCase().includes(q)) return true;
+  if (g.description.toLowerCase().includes(q)) return true;
+  return g.patterns.some(p => p.toLowerCase().includes(q));
+}
+
+const filteredGroups = computed<ipc.GroupDTO[]>(() => {
+  const q = search.value.trim().toLowerCase();
+  if (!q) return knownGroups.value;
+  return knownGroups.value.filter(g => matchesGroup(g, q));
+});
+
 const filteredRules = computed<ipc.RuleDTO[]>(() => {
   const q = search.value.trim().toLowerCase();
   if (!q) return rules.value;
-  return rules.value.filter(r => r.pattern.toLowerCase().includes(q));
+  return rules.value.filter(r => {
+    if (r.pattern.toLowerCase().includes(q)) return true;
+    const g = groupForRule(r);
+    return g ? matchesGroup(g, q) : false;
+  });
 });
 
 // Sectioned view: an array of {group | null, rules[]}, in display
@@ -576,13 +597,26 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
     <h2>Rules</h2>
     <div v-if="error" class="error">{{ error }}</div>
 
+    <!-- Search box up top: drives both the quick-add cards below and
+         the rules sections further down. Lazy substring match on group
+         name/description/patterns and rule pattern. -->
+    <div class="row search-row" style="gap: 8px; margin-bottom: 10px">
+      <input v-model="search" type="search"
+             placeholder="Search rules and groups (e.g. docker, anthropic, *.openai.com)"
+             style="flex: 1" />
+      <span class="muted" style="font-size: 11px; min-width: 140px; text-align: right">
+        {{ filteredGroups.length }} / {{ knownGroups.length }} groups ·
+        {{ filteredRules.length }} / {{ rules.length }} {{ rules.length === 1 ? 'rule' : 'rules' }}
+      </span>
+    </div>
+
     <!-- Quick add from a known service group -->
     <div class="groups-bar">
       <div class="muted" style="font-size: 11px; margin-bottom: 8px">
         Quick add — one click creates rules for every domain of a service:
       </div>
       <div class="row" style="gap: 6px; flex-wrap: wrap">
-        <button v-for="g in knownGroups" :key="g.key"
+        <button v-for="g in filteredGroups" :key="g.key"
                 class="group-card"
                 @click="openGroupForm(g)"
                 :title="g.description + '\n\n' + g.patterns.join('\n')">
@@ -590,6 +624,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
           <span class="group-name">{{ g.displayName }}</span>
           <span class="muted" style="font-size: 10px">{{ g.patterns.length }} domain{{ g.patterns.length === 1 ? '' : 's' }}</span>
         </button>
+        <span v-if="search.trim() && !filteredGroups.length" class="muted" style="font-size: 11px; padding: 6px">
+          No groups match "<code>{{ search }}</code>".
+        </span>
       </div>
     </div>
 
@@ -727,16 +764,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
           </span>
         </div>
       </div>
-    </div>
-
-    <!-- Search box: filters every section by pattern substring. -->
-    <div class="row search-row" style="gap: 8px; margin-bottom: 12px">
-      <input v-model="search" type="search"
-             placeholder="Search rules by domain (e.g. anthropic, *.openai.com)"
-             style="flex: 1" />
-      <span class="muted" style="font-size: 11px; min-width: 80px; text-align: right">
-        {{ filteredRules.length }} / {{ rules.length }} {{ rules.length === 1 ? 'rule' : 'rules' }}
-      </span>
     </div>
 
     <!-- Per-section rendering. Each known group gets its own table with
