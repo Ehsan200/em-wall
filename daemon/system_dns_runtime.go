@@ -70,11 +70,15 @@ func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
 		// REFUSE TO ACTIVATE. Leaving 127.0.0.1 set without a working
 		// upstream would brick DNS system-wide — exactly what bit us
 		// before. Surface a clear error and leave system DNS alone.
-		// If we were ALREADY in the 127.0.0.1 state from a prior bad
-		// run, recover by restoring user's DNS so DNS keeps working.
+		// If we were ALREADY in the 127.0.0.1 state (prior bad run, or
+		// LaunchDaemon started us before the network came up), recover
+		// by restoring user's DNS so DNS keeps working — but do NOT
+		// flip the persisted system_dns_active preference. The user
+		// still wants the hijack; the watcher will retry when the
+		// network is reachable.
 		if wasActive {
-			log.Printf("em-walld: stuck in 127.0.0.1 with no working upstream — auto-restoring system DNS")
-			_ = d.deactivateSystemDNS(ctx)
+			log.Printf("em-walld: no working upstream — restoring system DNS (will retry)")
+			_ = d.restoreSystemDNSBackup(ctx)
 		}
 		return fmt.Errorf("no working upstream DNS found — refusing to hijack system DNS (would break resolution for every app)")
 	}
@@ -236,6 +240,20 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 }
 
 func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
+	if err := d.restoreSystemDNSBackup(ctx); err != nil {
+		return err
+	}
+	_ = d.store.SetSetting(ctx, "system_dns_active", "false")
+	return nil
+}
+
+// restoreSystemDNSBackup applies the saved pre-hijack DNS snapshot (or
+// clears every service if no backup exists) and flushes the resolver
+// cache. It does NOT touch the system_dns_active preference — the caller
+// owns that. Use this when restoring DNS as a safety measure during a
+// failed activation, where the user's intent ("hijack on") should remain
+// recorded so the watcher can retry.
+func (d *handlerDeps) restoreSystemDNSBackup(ctx context.Context) error {
 	raw, err := d.store.GetSetting(ctx, "system_dns_backup", "")
 	if err != nil {
 		return err
@@ -257,7 +275,6 @@ func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
 			_ = d.sysDNS.SetServiceDNS(svc, nil)
 		}
 	}
-	_ = d.store.SetSetting(ctx, "system_dns_active", "false")
 	flushDNSCache()
 	return nil
 }

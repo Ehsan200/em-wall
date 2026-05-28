@@ -282,6 +282,12 @@ func main() {
 	// domain_name_server` live, so it reflects whichever network we're
 	// on now. Forwarder swap is atomic — no daemon restart, no
 	// DNS-down window for the user.
+	//
+	// Same tick also retries activation: if the user wants the hijack
+	// on but it isn't (typical: LaunchDaemon raced ahead of the network
+	// at boot, so activateSystemDNS at startup couldn't validate any
+	// upstream and safely restored DNS without flipping the pref),
+	// re-attempt now that the network has had time to come up.
 	go func() {
 		defer wg.Done()
 		t := time.NewTicker(10 * time.Second)
@@ -291,6 +297,16 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref == "true" {
+					if active, _ := deps.sysDNS.IsActive(); !active {
+						if err := deps.activateSystemDNS(ctx); err != nil {
+							log.Printf("em-walld: activation retry failed: %v", err)
+						} else {
+							log.Printf("em-walld: system DNS hijack activated on retry")
+						}
+						continue
+					}
+				}
 				if changed, err := deps.refreshUpstreamIfStale(ctx); err != nil {
 					log.Printf("em-walld: upstream refresh failed: %v", err)
 				} else if changed {
