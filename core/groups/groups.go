@@ -114,6 +114,63 @@ func KnownGroups() []Group {
 			Icon: svgBranded("M", "#ff7000", "#ffd200", "#ffffff"),
 		},
 		{
+			Key:         "grok",
+			DisplayName: "Grok / xAI",
+			Description: "Grok chat, xAI API, console",
+			Patterns: []string{
+				"*.grok.com",
+				"*.x.ai",
+				"*.xai-cdn.com",
+			},
+			Icon: svgGrok(),
+		},
+		{
+			Key:         "x",
+			DisplayName: "X (Twitter)",
+			Description: "X / Twitter web/app, link shortener, image CDN",
+			Patterns: []string{
+				"*.x.com",
+				"*.twitter.com",
+				"*.t.co",
+				"*.twimg.com",
+			},
+			Icon: svgX(),
+		},
+		{
+			Key:         "telegram",
+			DisplayName: "Telegram",
+			Description: "Telegram web/app, Telegram CDN, t.me links",
+			Patterns: []string{
+				"*.telegram.org",
+				"*.telegram.me",
+				"*.t.me",
+				"*.tdesktop.com",
+				"*.cdn-telegram.org",
+				"*.telesco.pe",
+			},
+			Icon: svgTelegram(),
+		},
+		{
+			Key:         "meta",
+			DisplayName: "Meta (Facebook / Instagram / WhatsApp)",
+			Description: "Facebook, Instagram, WhatsApp, Messenger, Meta CDNs",
+			Patterns: []string{
+				"*.facebook.com",
+				"*.facebook.net",
+				"*.fbcdn.net",
+				"*.fb.com",
+				"*.fb.gg",
+				"*.messenger.com",
+				"*.instagram.com",
+				"*.cdninstagram.com",
+				"*.whatsapp.com",
+				"*.whatsapp.net",
+				"*.wa.me",
+				"*.meta.com",
+			},
+			Icon: svgMeta(),
+		},
+		{
 			Key:         "youtube",
 			DisplayName: "YouTube",
 			Description: "YouTube web/app, video CDN, thumbnails",
@@ -339,6 +396,52 @@ func svgHomebrew() string {
 		`<rect x="20" y="38" width="18" height="2"/>` +
 		`<rect x="20" y="44" width="18" height="2"/>` +
 		`</g></svg>`
+}
+
+// svgX: black badge with the white X wordmark (post-rebrand Twitter logo).
+func svgX() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#000000"/>` +
+		`<path fill="#ffffff" d="M38.7 17h5.6L32.1 31.1 46.5 47h-11.3l-8.8-10.5L16.1 47H10.5l13.1-15.1L9.8 17h11.6l8 9.6L38.7 17zm-2 26.6h3.1L21.4 20.2H18.1l18.6 23.4z"/>` +
+		`</svg>`
+}
+
+// svgGrok: black badge with the angular xAI/Grok slash mark in white.
+func svgGrok() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#000000"/>` +
+		`<g fill="#ffffff">` +
+		`<path d="M18 46 L33 26 L37.5 31.5 L24 46 Z"/>` +
+		`<path d="M30 22 L44 22 L44 46 L38 46 L38 31 L34.5 27 Z"/>` +
+		`<rect x="38" y="40" width="6" height="6"/>` +
+		`</g></svg>`
+}
+
+// svgTelegram: light-blue badge with a white paper-plane glyph.
+func svgTelegram() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse">` +
+		`<stop offset="0" stop-color="#37bbfe"/>` +
+		`<stop offset="1" stop-color="#007dbb"/></linearGradient></defs>` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="url(#tg)"/>` +
+		// paper plane body
+		`<path fill="#ffffff" d="M14 31 L50 17 L44 47 L33 39 L28 46 L26 38 Z"/>` +
+		// inner fold (darker crease)
+		`<path fill="#c8daea" d="M26 38 L44 22 L33 39 Z"/>` +
+		`</svg>`
+}
+
+// svgMeta: gradient badge with the Meta infinity-loop mark in white.
+func svgMeta() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<defs><linearGradient id="meta" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse">` +
+		`<stop offset="0" stop-color="#0064e1"/>` +
+		`<stop offset="0.5" stop-color="#7b2cd6"/>` +
+		`<stop offset="1" stop-color="#f02849"/></linearGradient></defs>` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="url(#meta)"/>` +
+		`<path fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" ` +
+		`d="M14 40 C 14 26 22 22 28 28 C 32 32 36 38 42 38 C 50 38 52 30 50 25 C 48 21 42 21 38 26 C 32 33 28 41 22 41 C 16 41 14 36 14 40 Z"/>` +
+		`</svg>`
 }
 
 // svgAndroidStudio: dark navy badge with the green Android bugdroid head.
