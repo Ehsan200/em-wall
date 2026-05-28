@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces, Apps,
   Groups, ApplyGroup, DeleteGroupRules, SetGroupEnabled,
-  ListProxies, ListXray,
+  ListProxies, ListXray, BulkUpdateRules,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import AppIcon from './AppIcon.vue';
@@ -360,6 +360,148 @@ function toggleDraftXray(name: string) {
   const idx = draft.value.xrays.indexOf(name);
   if (idx >= 0) draft.value.xrays.splice(idx, 1);
   else draft.value.xrays.push(name);
+}
+
+// ---- Bulk selection + retarget ---------------------------------------
+//
+// The bulk toolbar lets the user retarget many rules to a new
+// (action, interface) pair in one IPC round-trip. Selection is a Set of
+// rule IDs so toggling stays O(1) regardless of how many rules are
+// loaded. We deliberately preserve selection across `refresh()` —
+// stale IDs are tolerated by the daemon (it skips not-found entries).
+//
+// "Select all visible" respects the search filter so the user can
+// type e.g. `xray:old-name` into the search, hit Select all, and
+// retarget the whole filtered set to a new xray entry in one step.
+
+const selected = ref<Set<number>>(new Set());
+
+function isSelected(id: number): boolean {
+  return selected.value.has(id);
+}
+
+function toggleSelected(id: number) {
+  const next = new Set(selected.value);
+  if (next.has(id)) next.delete(id); else next.add(id);
+  selected.value = next;
+}
+
+function clearSelection() {
+  selected.value = new Set();
+}
+
+function selectAllVisible() {
+  const next = new Set<number>();
+  for (const r of filteredRules.value) next.add(r.id);
+  selected.value = next;
+}
+
+const selectedCount = computed<number>(() => selected.value.size);
+
+function sectionSelectionState(rs: ipc.RuleDTO[]): 'all' | 'some' | 'none' {
+  if (!rs.length) return 'none';
+  let on = 0;
+  for (const r of rs) if (selected.value.has(r.id)) on++;
+  if (on === 0) return 'none';
+  if (on === rs.length) return 'all';
+  return 'some';
+}
+
+function toggleSection(rs: ipc.RuleDTO[]) {
+  const next = new Set(selected.value);
+  const state = sectionSelectionState(rs);
+  if (state === 'all') {
+    for (const r of rs) next.delete(r.id);
+  } else {
+    for (const r of rs) next.add(r.id);
+  }
+  selected.value = next;
+}
+
+// Editor panel state, mirroring `draft` minus pattern/enabled.
+type BulkState = {
+  action: 'block' | 'route';
+  binding: 'iface' | 'app' | 'proxy' | 'xray';
+  iface: string;
+  apps: string[];
+  proxies: string[];
+  xrays: string[];
+};
+const bulk = ref<BulkState | null>(null);
+
+function openBulk() {
+  bulk.value = {
+    action: 'block',
+    binding: 'iface',
+    iface: '',
+    apps: [],
+    proxies: [],
+    xrays: [],
+  };
+}
+
+function closeBulk() { bulk.value = null; }
+
+function toggleBulkApp(key: string) {
+  if (!bulk.value) return;
+  const idx = bulk.value.apps.indexOf(key);
+  if (idx >= 0) bulk.value.apps.splice(idx, 1);
+  else bulk.value.apps.push(key);
+}
+
+function toggleBulkProxy(name: string) {
+  if (!bulk.value) return;
+  const idx = bulk.value.proxies.indexOf(name);
+  if (idx >= 0) bulk.value.proxies.splice(idx, 1);
+  else bulk.value.proxies.push(name);
+}
+
+function toggleBulkXray(name: string) {
+  if (!bulk.value) return;
+  const idx = bulk.value.xrays.indexOf(name);
+  if (idx >= 0) bulk.value.xrays.splice(idx, 1);
+  else bulk.value.xrays.push(name);
+}
+
+function bulkInterfaceField(): string {
+  const b = bulk.value;
+  if (!b || b.action !== 'route') return '';
+  if (b.binding === 'app' && b.apps.length > 0) return `app:${b.apps.join(',')}`;
+  if (b.binding === 'proxy' && b.proxies.length > 0) return `proxy:${b.proxies.join(',')}`;
+  if (b.binding === 'xray' && b.xrays.length > 0) return `xray:${b.xrays.join(',')}`;
+  if (b.binding === 'iface') return b.iface;
+  return '';
+}
+
+function bulkIsValid(): boolean {
+  const b = bulk.value;
+  if (!b) return false;
+  if (b.action === 'block') return true;
+  if (b.binding === 'iface') return !!b.iface;
+  if (b.binding === 'app') return b.apps.length > 0;
+  if (b.binding === 'proxy') return b.proxies.length > 0;
+  if (b.binding === 'xray') return b.xrays.length > 0;
+  return false;
+}
+
+async function applyBulk() {
+  const b = bulk.value;
+  if (!b || !bulkIsValid() || selected.value.size === 0) return;
+  try {
+    const ids = [...selected.value];
+    const result = await BulkUpdateRules(ids, b.action, bulkInterfaceField());
+    const affected = result?.affected ?? 0;
+    error.value = '';
+    if (affected < ids.length) {
+      error.value = `Updated ${affected} of ${ids.length} rule(s); the rest were missing.`;
+    }
+    selected.value = new Set();
+    bulk.value = null;
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  }
 }
 
 // ---- Inline edit ------------------------------------------------------
@@ -888,6 +1030,104 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
       </div>
     </div>
 
+    <!-- Sticky bulk-action toolbar. Visible only when one or more rules
+         are selected. The first row is always a compact summary; the
+         expanded editor (with the action picker and segmented
+         interface/app/proxy/xray controls) is mounted on demand. -->
+    <div v-if="selectedCount > 0" class="bulk-toolbar">
+      <div class="row" style="gap: 10px; align-items: center; flex-wrap: wrap">
+        <strong>{{ selectedCount }} selected</strong>
+        <button v-if="!bulk" class="primary" @click="openBulk">Change to…</button>
+        <button @click="selectAllVisible"
+                :disabled="selectedCount === filteredRules.length"
+                title="Add every rule matching the current search to the selection">
+          Select all visible ({{ filteredRules.length }})
+        </button>
+        <button @click="clearSelection">Clear</button>
+      </div>
+      <div v-if="bulk" class="col" style="gap: 10px; margin-top: 10px">
+        <div class="row" style="gap: 8px; align-items: center">
+          <span class="muted" style="font-size: 11px; min-width: 60px">action:</span>
+          <select v-model="bulk.action" style="width: 100px">
+            <option value="block">block</option>
+            <option value="route">route</option>
+          </select>
+          <button class="primary" @click="applyBulk" :disabled="!bulkIsValid()">
+            Apply to {{ selectedCount }} rule{{ selectedCount === 1 ? '' : 's' }}
+          </button>
+          <button @click="closeBulk">Cancel</button>
+        </div>
+        <div v-if="bulk.action === 'route'" class="col" style="gap: 10px">
+          <div class="row" style="gap: 8px; align-items: center">
+            <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
+            <div class="row" style="gap: 0">
+              <button :class="['seg', {active: bulk.binding === 'iface'}]" @click="bulk.binding = 'iface'">Interface</button>
+              <button :class="['seg', {active: bulk.binding === 'app'}]" @click="bulk.binding = 'app'">App</button>
+              <button :class="['seg', {active: bulk.binding === 'proxy'}]" @click="bulk.binding = 'proxy'">Proxy</button>
+              <button :class="['seg', {active: bulk.binding === 'xray'}]" @click="bulk.binding = 'xray'">Xray</button>
+            </div>
+            <select v-if="bulk.binding === 'iface'" v-model="bulk.iface" style="flex: 1">
+              <option value="">— pick interface —</option>
+              <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
+            </select>
+            <span v-else-if="bulk.binding === 'app'" class="muted" style="font-size: 11px; flex: 1">
+              select one or more — daemon uses the first one that's running
+              <span v-if="bulk.apps.length" style="color: var(--accent); font-weight: 600">
+                · {{ bulk.apps.length }} selected
+              </span>
+            </span>
+            <span v-else-if="bulk.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
+              select one or more — daemon uses the first one that's reachable
+              <span v-if="bulk.proxies.length" style="color: var(--accent); font-weight: 600">
+                · {{ bulk.proxies.length }} selected
+              </span>
+            </span>
+            <span v-else class="muted" style="font-size: 11px; flex: 1">
+              select one or more xray outbounds — daemon uses the first that dials
+              <span v-if="bulk.xrays.length" style="color: var(--accent); font-weight: 600">
+                · {{ bulk.xrays.length }} selected
+              </span>
+            </span>
+          </div>
+          <div v-if="bulk.binding === 'app'" class="chip-grid">
+            <button v-for="a in apps" :key="a.key"
+                    :class="['app-chip', {active: bulk.apps.includes(a.key), 'not-installed': !a.installed, 'not-running': a.installed && !a.currentInterface}]"
+                    @click="toggleBulkApp(a.key)">
+              <AppIcon :app-key="a.key" :size="20" />
+              <span>{{ a.displayName }}</span>
+              <span v-if="bulk.apps.includes(a.key)" class="chip-rank">{{ bulk.apps.indexOf(a.key) + 1 }}</span>
+            </button>
+          </div>
+          <div v-if="bulk.binding === 'proxy'" class="chip-grid">
+            <button v-for="p in proxies" :key="p.id"
+                    :class="['app-chip', {active: bulk.proxies.includes(p.name)}]"
+                    @click="toggleBulkProxy(p.name)"
+                    :title="`${p.protocol}://${p.host}:${p.port}`">
+              <span>{{ p.name }}</span>
+              <span class="muted" style="font-size: 10px">{{ p.protocol }}</span>
+              <span v-if="bulk.proxies.includes(p.name)" class="chip-rank">{{ bulk.proxies.indexOf(p.name) + 1 }}</span>
+            </button>
+            <span v-if="proxies.length === 0" class="muted" style="font-size: 11px; padding: 4px">
+              No proxies configured. Add one in the Proxies tab.
+            </span>
+          </div>
+          <div v-if="bulk.binding === 'xray'" class="chip-grid">
+            <button v-for="x in xrays" :key="x.id"
+                    :class="['app-chip', {active: bulk.xrays.includes(x.name), 'not-running': !x.enabled}]"
+                    @click="toggleBulkXray(x.name)"
+                    :title="x.enabled ? `127.0.0.1:${x.socksPort}` : 'disabled — rule will fail to dial'">
+              <span>{{ x.name }}</span>
+              <span class="muted" style="font-size: 10px">xray</span>
+              <span v-if="bulk.xrays.includes(x.name)" class="chip-rank">{{ bulk.xrays.indexOf(x.name) + 1 }}</span>
+            </button>
+            <span v-if="xrays.length === 0" class="muted" style="font-size: 11px; padding: 4px">
+              No xray outbounds configured. Add one in the Xray tab.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Per-section rendering. Each known group gets its own table with
          a header row carrying the bulk actions. Ungrouped (and rules
          the user hand-edited away from a group) lands in the final
@@ -908,6 +1148,16 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
          class="rule-section">
       <!-- Section header -->
       <div class="section-header">
+        <!-- Tri-state section checkbox: ticks every rule in this
+             section when none/some are selected; clears the section
+             when all are already selected. Uses the indeterminate DOM
+             property for the "some" state. -->
+        <input type="checkbox"
+               class="section-check"
+               :checked="sectionSelectionState(sec.rules) === 'all'"
+               :indeterminate.prop="sectionSelectionState(sec.rules) === 'some'"
+               @change="toggleSection(sec.rules)"
+               :title="sectionSelectionState(sec.rules) === 'all' ? 'Deselect all rules in this section' : 'Select every rule in this section'" />
         <button class="caret-btn" @click="toggleCollapse(sec.group)"
                 :title="isCollapsed(sec.group) ? 'Expand' : 'Collapse'">
           {{ isCollapsed(sec.group) ? '▸' : '▾' }}
@@ -953,6 +1203,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
       <table v-if="!isCollapsed(sec.group)" class="section-table">
         <thead>
           <tr>
+            <th style="width: 28px"></th>
             <th>Pattern</th>
             <th>Action</th>
             <th>Interface</th>
@@ -963,7 +1214,12 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         <tbody>
           <template v-for="r in sec.rules" :key="r.id">
             <tr v-if="editing?.id !== r.id"
-                :class="{'rule-iface-down': r.action === 'route' && bindingDown(r.interface)}">
+                :class="{'rule-iface-down': r.action === 'route' && bindingDown(r.interface), 'rule-selected': isSelected(r.id)}">
+              <td style="text-align: center">
+                <input type="checkbox"
+                       :checked="isSelected(r.id)"
+                       @change="toggleSelected(r.id)" />
+              </td>
               <td><code>{{ r.pattern }}</code></td>
               <td>
                 <span :class="['tag', r.action === 'block' ? 'tag-block' : 'tag-route']">
@@ -1031,7 +1287,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             </tr>
 
             <tr v-else class="edit-row">
-              <td colspan="5">
+              <td colspan="6">
                 <div class="edit-card">
                   <div class="row" style="gap: 8px">
                     <input v-model="editing!.pattern"
@@ -1134,6 +1390,25 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
 <style scoped>
 tr.rule-iface-down td { background: rgba(255, 111, 111, 0.05); }
 tr.rule-iface-down code { opacity: 0.85; }
+tr.rule-selected td { background: rgba(110, 168, 255, 0.08); }
+tr.rule-selected.rule-iface-down td { background: rgba(255, 111, 111, 0.08); }
+
+.bulk-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.section-check {
+  margin-right: 4px;
+  cursor: pointer;
+}
 
 tr.edit-row td {
   padding: 0;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -106,6 +107,60 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		d.proxyTable.RemoveByRule(p.ID)
 		_ = d.engine.Reload(ctx)
 		return map[string]any{"ok": true}, nil
+	})
+
+	// Bulk retarget: change Action+Interface on every rule in IDs in a
+	// single round-trip. Validates the new (Action, Interface) once, then
+	// loops store.Update — same per-rule validation path as the single
+	// update handler, so a malformed combination is rejected wholesale
+	// before any row is touched. engine.Reload runs once at the end, not
+	// per rule.
+	s.Handle(ipc.MethodRulesBulkUpdate, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.RulesBulkUpdateParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if len(p.IDs) == 0 {
+			return nil, fmt.Errorf("no rule IDs given")
+		}
+		if p.Action == string(rules.ActionRoute) && strings.TrimSpace(p.Interface) == "" {
+			return nil, fmt.Errorf("route action requires a non-empty interface")
+		}
+		if p.Action == string(rules.ActionBlock) && p.Interface != "" {
+			// Block rules must have empty Interface — normalizeAction would
+			// silently clear it, but be explicit so the UI can't accidentally
+			// rely on an interface surviving a block flip.
+			p.Interface = ""
+		}
+		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
+		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
+		var touched []int64
+		for _, id := range p.IDs {
+			r, err := d.store.Get(ctx, id)
+			if err != nil {
+				if errors.Is(err, rules.ErrNotFound) {
+					continue // selection raced a delete; skip silently
+				}
+				return nil, err
+			}
+			r.Action = rules.Action(p.Action)
+			r.Interface = p.Interface
+			if err := d.store.Update(ctx, r); err != nil {
+				return nil, err
+			}
+			// Flush per-host routes + proxy mappings tied to this rule so
+			// cached IPs from the previous binding don't keep flowing the
+			// old path. Same reasoning as MethodRulesUpdate above.
+			_ = d.router.RemoveByRule(ctx, r.ID)
+			d.proxyTable.RemoveByRule(r.ID)
+			touched = append(touched, r.ID)
+		}
+		_ = d.engine.Reload(ctx)
+		return ipc.GroupsBulkResult{Affected: len(touched), RuleIDs: touched}, nil
 	})
 
 	s.Handle(ipc.MethodRulesDelete, func(ctx context.Context, raw json.RawMessage) (any, error) {

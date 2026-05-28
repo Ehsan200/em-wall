@@ -107,6 +107,19 @@ func (a *App) DeleteRule(id int64) error {
 	return a.call(ipc.MethodRulesDelete, ipc.RulesDeleteParams{ID: id}, nil)
 }
 
+// BulkUpdateRules retargets every rule in ids to the same
+// (action, iface) pair. Action is "block" or "route"; iface must be
+// empty for block and non-empty for route. The daemon validates the
+// combination once before touching any row, so a malformed call leaves
+// the rule list unchanged.
+func (a *App) BulkUpdateRules(ids []int64, action, iface string) (ipc.GroupsBulkResult, error) {
+	var out ipc.GroupsBulkResult
+	err := a.call(ipc.MethodRulesBulkUpdate, ipc.RulesBulkUpdateParams{
+		IDs: ids, Action: action, Interface: iface,
+	}, &out)
+	return out, err
+}
+
 func (a *App) GetSetting(key, def string) (string, error) {
 	var out struct {
 		Value string `json:"value"`

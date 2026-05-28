@@ -32,6 +32,7 @@ const (
 	MethodRulesList           = "rules.list"
 	MethodRulesAdd            = "rules.add"
 	MethodRulesUpdate         = "rules.update"
+	MethodRulesBulkUpdate     = "rules.bulk-update"
 	MethodRulesDelete         = "rules.delete"
 	MethodSettingsGet         = "settings.get"
 	MethodSettingsSet         = "settings.set"
@@ -105,6 +106,16 @@ type RulesUpdateParams struct {
 
 type RulesDeleteParams struct {
 	ID int64 `json:"id"`
+}
+
+// RulesBulkUpdateParams retargets every rule in IDs to the same
+// (Action, Interface) pair. Pattern and Enabled are intentionally not
+// exposed — the bulk toolbar is for changing where rules route to, not
+// for renaming or toggling them.
+type RulesBulkUpdateParams struct {
+	IDs       []int64 `json:"ids"`
+	Action    string  `json:"action"`    // "block" or "route"
+	Interface string  `json:"interface"` // empty for block, required for route
 }
 
 type SettingsGetParams struct {
