@@ -246,6 +246,79 @@ func (a *App) TestProxy(id int64) (ipc.ProxiesTestResult, error) {
 	return out, err
 }
 
+// ---- Xray ----
+//
+// Each entry is a single xray-core outbound (the user writes the JSON
+// directly). The supervisor in the daemon assembles all enabled
+// entries into one composite config and runs xray as a subprocess; a
+// rule with Interface = "xray:NAME" routes traffic through entry NAME.
+
+func (a *App) XrayStatus() (ipc.XrayStatus, error) {
+	var out ipc.XrayStatus
+	err := a.call(ipc.MethodXrayStatus, nil, &out)
+	return out, err
+}
+
+func (a *App) ListXray() ([]ipc.XrayDTO, error) {
+	var out []ipc.XrayDTO
+	err := a.call(ipc.MethodXrayList, nil, &out)
+	return out, err
+}
+
+func (a *App) AddXray(name, outbound string, enabled bool) (ipc.XrayDTO, error) {
+	var out ipc.XrayDTO
+	err := a.call(ipc.MethodXrayAdd, ipc.XrayAddParams{
+		Name: name, Outbound: outbound, Enabled: enabled,
+	}, &out)
+	return out, err
+}
+
+func (a *App) UpdateXray(id int64, name, outbound string, enabled bool) error {
+	return a.call(ipc.MethodXrayUpdate, ipc.XrayUpdateParams{
+		ID: id, Name: name, Outbound: outbound, Enabled: enabled,
+	}, nil)
+}
+
+func (a *App) DeleteXray(id int64) error {
+	return a.call(ipc.MethodXrayDelete, ipc.XrayDeleteParams{ID: id}, nil)
+}
+
+func (a *App) SetXrayEnabled(id int64, enabled bool) error {
+	return a.call(ipc.MethodXraySetEnabled, ipc.XraySetEnabledParams{ID: id, Enabled: enabled}, nil)
+}
+
+// XrayRouting returns the user's saved global routing-rules JSON
+// (a JSON array; empty string when never set).
+func (a *App) XrayRouting() (ipc.XrayRoutingResult, error) {
+	var out ipc.XrayRoutingResult
+	err := a.call(ipc.MethodXrayGetRouting, nil, &out)
+	return out, err
+}
+
+// SetXrayRouting validates and persists rules (a JSON array). Pass ""
+// or "[]" to clear. Triggers an xray reconcile/restart on success.
+func (a *App) SetXrayRouting(rules string) error {
+	return a.call(ipc.MethodXraySetRouting, ipc.XraySetRoutingParams{Rules: rules}, nil)
+}
+
+// ParseXrayLink converts a vless://, vmess://, trojan://, or ss://
+// share URI into a name + outbound JSON the user can drop into an
+// entry. Errors are surfaced verbatim to the UI.
+func (a *App) ParseXrayLink(link string) (ipc.XrayParseLinkResult, error) {
+	var out ipc.XrayParseLinkResult
+	err := a.call(ipc.MethodXrayParseLink, ipc.XrayParseLinkParams{Link: link}, &out)
+	return out, err
+}
+
+// TestXray dials Target through the entry's local SOCKS5 inbound to
+// check reachability. target is "host:port"; pass "" to use the
+// daemon default (1.1.1.1:443).
+func (a *App) TestXray(id int64, target string) (ipc.XrayTestResult, error) {
+	var out ipc.XrayTestResult
+	err := a.call(ipc.MethodXrayTest, ipc.XrayTestParams{ID: id, Target: target}, &out)
+	return out, err
+}
+
 // ---- Install / uninstall (local, no daemon needed) ----
 //
 // These methods don't go over IPC — they manipulate the host directly

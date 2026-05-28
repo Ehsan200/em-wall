@@ -55,6 +55,16 @@ const (
 	MethodProxiesUpdate       = "proxies.update"
 	MethodProxiesDelete       = "proxies.delete"
 	MethodProxiesTest         = "proxies.test"
+	MethodXrayList            = "xray.list"
+	MethodXrayAdd             = "xray.add"
+	MethodXrayUpdate          = "xray.update"
+	MethodXrayDelete          = "xray.delete"
+	MethodXraySetEnabled      = "xray.setEnabled"
+	MethodXrayStatus          = "xray.status"
+	MethodXrayGetRouting      = "xray.getRouting"
+	MethodXraySetRouting      = "xray.setRouting"
+	MethodXrayParseLink       = "xray.parseLink"
+	MethodXrayTest            = "xray.test"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -269,6 +279,102 @@ type ProxiesTestParams struct {
 type ProxiesTestResult struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
+}
+
+// XrayDTO is the public view of one stored xray outbound entry.
+// Outbound carries the raw JSON the user wrote; the UI's editor reads
+// and writes it as a string for round-tripping comments + formatting.
+// SocksPort is read-only — it's assigned by the daemon at Add time
+// and never changes for the lifetime of the entry.
+type XrayDTO struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Outbound  string `json:"outbound"`
+	SocksPort int    `json:"socksPort"`
+	Enabled   bool   `json:"enabled"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+type XrayAddParams struct {
+	Name     string `json:"name"`
+	Outbound string `json:"outbound"`
+	Enabled  bool   `json:"enabled"`
+}
+
+type XrayUpdateParams struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Outbound string `json:"outbound"`
+	Enabled  bool   `json:"enabled"`
+}
+
+type XrayDeleteParams struct {
+	ID int64 `json:"id"`
+}
+
+type XraySetEnabledParams struct {
+	ID      int64 `json:"id"`
+	Enabled bool  `json:"enabled"`
+}
+
+// XrayStatus is the snapshot the Xray panel polls — surfaces both
+// the binary's version (empty if disabled or probe failed) and
+// whether the supervisor considers itself enabled (binary on disk).
+// PortRangeStart/End are exposed so the UI can warn before the
+// allocator fills up.
+type XrayStatus struct {
+	Enabled        bool     `json:"enabled"`
+	Running        bool     `json:"running"`
+	Version        string   `json:"version"`
+	PortRangeStart int      `json:"portRangeStart"`
+	PortRangeEnd   int      `json:"portRangeEnd"`
+	LastExit       string   `json:"lastExit"`
+	RecentLogs     []string `json:"recentLogs"`
+}
+
+// XrayRoutingResult is the round-trip envelope for the global routing
+// rules editor — a single string holding a JSON array of rule objects.
+// Empty means "no user rules; only the per-entry inbound→outbound
+// pairs are emitted".
+type XrayRoutingResult struct {
+	Rules string `json:"rules"`
+}
+
+type XraySetRoutingParams struct {
+	Rules string `json:"rules"`
+}
+
+// XrayParseLinkParams carries the raw share URI the UI wants converted.
+// Supported schemes: vless://, vmess://, trojan://, ss://.
+type XrayParseLinkParams struct {
+	Link string `json:"link"`
+}
+
+// XrayParseLinkResult is what the link parser returns: a suggested
+// entry name (derived from the URI fragment, normalized) and the
+// outbound JSON block ready to drop into a new entry.
+type XrayParseLinkResult struct {
+	Name     string `json:"name"`
+	Outbound string `json:"outbound"`
+}
+
+// XrayTestParams asks the daemon to dial Target through entry ID's
+// local SOCKS5 inbound and time the connect+handshake. Target is
+// "host:port" (the default in the UI is 1.1.1.1:443). Empty Target
+// makes the daemon use 1.1.1.1:443.
+type XrayTestParams struct {
+	ID     int64  `json:"id"`
+	Target string `json:"target"`
+}
+
+// XrayTestResult mirrors ProxiesTestResult. OK=true means the
+// connect+handshake completed; Message is human-readable (success
+// path includes the round-trip duration).
+type XrayTestResult struct {
+	OK        bool   `json:"ok"`
+	Message   string `json:"message"`
+	LatencyMS int    `json:"latencyMs"`
 }
 
 type SystemDNSStatus struct {

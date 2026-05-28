@@ -4,12 +4,14 @@ import StatusBar from './components/StatusBar.vue';
 import RulesPanel from './components/RulesPanel.vue';
 import LogsPanel from './components/LogsPanel.vue';
 import NetworkPanel from './components/NetworkPanel.vue';
+import ProxiesPanel from './components/ProxiesPanel.vue';
+import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
 import { Status, InstallStatus, IsPackaged, AppVersion } from '../wailsjs/go/main/App';
 import type { ipc, installer } from '../wailsjs/go/models';
 
-type Tab = 'rules' | 'logs' | 'network' | 'settings';
+type Tab = 'rules' | 'logs' | 'network' | 'proxies' | 'xray' | 'settings';
 const tab = ref<Tab>('rules');
 const status = ref<ipc.StatusResult | null>(null);
 const error = ref<string>('');
@@ -79,12 +81,16 @@ onUnmounted(() => {
       <button :class="{active: tab==='rules'}"    @click="tab='rules'">Rules</button>
       <button :class="{active: tab==='logs'}"     @click="tab='logs'">Logs</button>
       <button :class="{active: tab==='network'}"  @click="tab='network'">Network</button>
+      <button :class="{active: tab==='proxies'}"  @click="tab='proxies'">Proxies</button>
+      <button :class="{active: tab==='xray'}"     @click="tab='xray'">Xray</button>
       <button :class="{active: tab==='settings'}" @click="tab='settings'">Settings</button>
     </div>
 
     <RulesPanel    v-if="tab==='rules'"    @changed="refresh" />
     <LogsPanel     v-else-if="tab==='logs'" />
     <NetworkPanel  v-else-if="tab==='network'" />
+    <ProxiesPanel  v-else-if="tab==='proxies'" />
+    <XrayPanel     v-else-if="tab==='xray'" />
     <SettingsPanel v-else
                    @changed="refresh"
                    @reinstalling="(v: boolean) => reinstalling = v" />

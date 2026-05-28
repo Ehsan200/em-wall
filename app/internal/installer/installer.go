@@ -44,6 +44,17 @@ const (
 	LogDir           = "/usr/local/var/log"
 	LogFile          = "/usr/local/var/log/em-wall.log"
 	LaunchctlLabel   = "com.em-wall.daemon"
+
+	// Xray-core install destinations. The binary is renamed em-wall-xray
+	// so a user-installed `xray` on $PATH isn't shadowed. The data dir
+	// holds the geoip.dat + geosite.dat that ship with the release; the
+	// daemon's generated config and inbound/outbound listening ports live
+	// under XrayRuntimeDir, separate from the DB.
+	XrayBinaryDest = "/usr/local/bin/em-wall-xray"
+	XrayDataDir    = "/usr/local/share/em-wall"
+	XrayGeoIPFile  = "/usr/local/share/em-wall/geoip.dat"
+	XrayGeoSite    = "/usr/local/share/em-wall/geosite.dat"
+	XrayRuntimeDir = "/usr/local/var/em-wall/xray"
 )
 
 // Status is a snapshot of what's currently on disk and whether the
@@ -121,6 +132,9 @@ func Install(ctx context.Context) error {
 	binPath := filepath.Join(tmp, "em-walld")
 	plistPath := filepath.Join(tmp, "com.em-wall.daemon.plist")
 	anchorPath := filepath.Join(tmp, "em-wall.pf.anchor")
+	xrayBinPath := filepath.Join(tmp, "xray")
+	geoipPath := filepath.Join(tmp, "geoip.dat")
+	geositePath := filepath.Join(tmp, "geosite.dat")
 	scriptPath := filepath.Join(tmp, "install.sh")
 
 	if err := extract("resources/em-walld", binPath, 0o755); err != nil {
@@ -132,7 +146,16 @@ func Install(ctx context.Context) error {
 	if err := extract("resources/em-wall.pf.anchor", anchorPath, 0o644); err != nil {
 		return fmt.Errorf("install: extract anchor: %w", err)
 	}
-	if err := os.WriteFile(scriptPath, []byte(installScript(binPath, plistPath, anchorPath)), 0o700); err != nil {
+	if err := extract("resources/xray", xrayBinPath, 0o755); err != nil {
+		return fmt.Errorf("install: extract xray: %w", err)
+	}
+	if err := extract("resources/geoip.dat", geoipPath, 0o644); err != nil {
+		return fmt.Errorf("install: extract geoip: %w", err)
+	}
+	if err := extract("resources/geosite.dat", geositePath, 0o644); err != nil {
+		return fmt.Errorf("install: extract geosite: %w", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(installScript(binPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath)), 0o700); err != nil {
 		return fmt.Errorf("install: write script: %w", err)
 	}
 	return runWithAdminPrivileges(ctx, scriptPath)
@@ -171,11 +194,12 @@ func Uninstall(ctx context.Context, purge bool) error {
 }
 
 // installScript builds the privileged install bash payload. Inputs
-// are paths to the temp-extracted daemon binary, plist, and pf anchor
-// stub — the script just `install`s them into their final locations,
-// patches /etc/pf.conf to load the anchor, then bootstraps the
-// LaunchDaemon. Idempotent — safe to re-run.
-func installScript(binPath, plistPath, anchorPath string) string {
+// are paths to the temp-extracted daemon binary, plist, pf anchor
+// stub, xray binary, and the two xray geo data files — the script
+// `install`s them into their final locations, patches /etc/pf.conf to
+// load the anchor, then bootstraps the LaunchDaemon. Idempotent —
+// safe to re-run.
+func installScript(binPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath string) string {
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
@@ -185,11 +209,20 @@ ANCHOR_FILE=%q
 PF_CONF=%q
 LOG_DIR=%q
 DB_DIR=%q
+XRAY_BIN_DST=%q
+XRAY_DATA_DIR=%q
+XRAY_GEOIP=%q
+XRAY_GEOSITE=%q
+XRAY_RUNTIME_DIR=%q
 
 install -m 0755 %q "$DAEMON_BIN_DST"
 
-mkdir -p "$DB_DIR" "$LOG_DIR"
-chmod 0755 "$DB_DIR" "$LOG_DIR"
+mkdir -p "$DB_DIR" "$LOG_DIR" "$XRAY_DATA_DIR" "$XRAY_RUNTIME_DIR"
+chmod 0755 "$DB_DIR" "$LOG_DIR" "$XRAY_DATA_DIR" "$XRAY_RUNTIME_DIR"
+
+install -m 0755 %q "$XRAY_BIN_DST"
+install -m 0644 %q "$XRAY_GEOIP"
+install -m 0644 %q "$XRAY_GEOSITE"
 
 mkdir -p "$(dirname "$ANCHOR_FILE")"
 [ -e "$ANCHOR_FILE" ] || install -m 0644 %q "$ANCHOR_FILE"
@@ -218,7 +251,8 @@ launchctl enable system/com.em-wall.daemon
 launchctl kickstart -k system/com.em-wall.daemon
 `,
 		DaemonBinaryDest, PlistDest, AnchorFile, PFConf, LogDir, DBDir,
-		binPath, anchorPath, plistPath,
+		XrayBinaryDest, XrayDataDir, XrayGeoIPFile, XrayGeoSite, XrayRuntimeDir,
+		binPath, xrayBinPath, geoipPath, geositePath, anchorPath, plistPath,
 	)
 }
 
@@ -235,6 +269,10 @@ launchctl kickstart -k system/com.em-wall.daemon
 // broken DNS if the deactivate IPC failed (daemon crashed, backup lost,
 // etc.).
 func uninstallScript(purge bool) string {
+	// Purge also wipes the xray runtime dir (generated configs) — those
+	// are daemon-managed and useless without the daemon. The geo data
+	// under XrayDataDir is removed unconditionally with the binary,
+	// since it's part of the vendored xray release, not user state.
 	purgeBlock := ""
 	if purge {
 		purgeBlock = fmt.Sprintf("rm -rf %q %q\n", DBDir, LogFile)
@@ -247,11 +285,14 @@ DAEMON_BIN_DST=%q
 ANCHOR_FILE=%q
 PF_CONF=%q
 SOCKET=%q
+XRAY_BIN_DST=%q
+XRAY_DATA_DIR=%q
 
 launchctl bootout system "$PLIST_DST" 2>/dev/null || true
 pfctl -a em-wall -F all 2>/dev/null || true
 
-rm -f "$PLIST_DST" "$DAEMON_BIN_DST" "$SOCKET" "$ANCHOR_FILE"
+rm -f "$PLIST_DST" "$DAEMON_BIN_DST" "$SOCKET" "$ANCHOR_FILE" "$XRAY_BIN_DST"
+rm -rf "$XRAY_DATA_DIR"
 
 if grep -qE '^(rdr-)?anchor "em-wall"' "$PF_CONF"; then
     cp "$PF_CONF" "$PF_CONF.em-wall.uninstall.$(date +%%s)"
@@ -276,6 +317,7 @@ killall -HUP mDNSResponder 2>/dev/null || true
 
 %s`,
 		PlistDest, DaemonBinaryDest, AnchorFile, PFConf, SocketPath,
+		XrayBinaryDest, XrayDataDir,
 		purgeBlock,
 	)
 }

@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces, Apps,
   Groups, ApplyGroup, DeleteGroupRules, SetGroupEnabled,
-  ListProxies,
+  ListProxies, ListXray,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import AppIcon from './AppIcon.vue';
@@ -24,12 +24,24 @@ type ProxyRow = {
   updatedAt: string;
 };
 
+// Local mirror of XrayDTO — see above for the rationale.
+type XrayRow = {
+  id: number;
+  name: string;
+  outbound: string;
+  socksPort: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const emit = defineEmits<{ (e: 'changed'): void }>();
 
 const rules = ref<ipc.RuleDTO[]>([]);
 const interfaces = ref<ipc.InterfaceDTO[]>([]);
 const apps = ref<ipc.AppDTO[]>([]);
 const proxies = ref<ProxyRow[]>([]);
+const xrays = ref<XrayRow[]>([]);
 const knownGroups = ref<ipc.GroupDTO[]>([]);
 const error = ref<string>('');
 const pendingDelete = ref<number | null>(null);
@@ -194,10 +206,11 @@ async function confirmDeleteGroup(g: ipc.GroupDTO) {
 const groupApply = ref<{
   key: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'app' | 'proxy';
+  binding: 'iface' | 'app' | 'proxy' | 'xray';
   iface: string;
   apps: string[];
   proxies: string[];
+  xrays: string[];
   enabled: boolean;
 } | null>(null);
 
@@ -209,6 +222,7 @@ function openGroupForm(g: ipc.GroupDTO) {
     iface: '',
     apps: [],
     proxies: [],
+    xrays: [],
     enabled: true,
   };
 }
@@ -229,11 +243,19 @@ function toggleGroupProxy(name: string) {
   else groupApply.value.proxies.push(name);
 }
 
+function toggleGroupXray(name: string) {
+  if (!groupApply.value) return;
+  const idx = groupApply.value.xrays.indexOf(name);
+  if (idx >= 0) groupApply.value.xrays.splice(idx, 1);
+  else groupApply.value.xrays.push(name);
+}
+
 function groupInterfaceField(): string {
   const g = groupApply.value;
   if (!g || g.action !== 'route') return '';
   if (g.binding === 'app' && g.apps.length > 0) return `app:${g.apps.join(',')}`;
   if (g.binding === 'proxy' && g.proxies.length > 0) return `proxy:${g.proxies.join(',')}`;
+  if (g.binding === 'xray' && g.xrays.length > 0) return `xray:${g.xrays.join(',')}`;
   if (g.binding === 'iface') return g.iface;
   return '';
 }
@@ -244,6 +266,7 @@ function groupApplyValid(): boolean {
   if (g.action === 'block') return true;
   if (g.binding === 'iface') return !!g.iface;
   if (g.binding === 'proxy') return g.proxies.length > 0;
+  if (g.binding === 'xray') return g.xrays.length > 0;
   return g.apps.length > 0;
 }
 
@@ -281,10 +304,11 @@ const draft = ref({
   pattern: '',
   action: 'block' as 'block' | 'route',
   // Only meaningful when action === 'route':
-  binding: 'iface' as 'iface' | 'app' | 'proxy',
+  binding: 'iface' as 'iface' | 'app' | 'proxy' | 'xray',
   iface: '',
   apps: [] as string[],
   proxies: [] as string[],
+  xrays: [] as string[],
   enabled: true,
 });
 
@@ -295,6 +319,9 @@ function draftInterfaceField(): string {
   }
   if (draft.value.binding === 'proxy' && draft.value.proxies.length > 0) {
     return `proxy:${draft.value.proxies.join(',')}`;
+  }
+  if (draft.value.binding === 'xray' && draft.value.xrays.length > 0) {
+    return `xray:${draft.value.xrays.join(',')}`;
   }
   if (draft.value.binding === 'iface') return draft.value.iface;
   return '';
@@ -307,6 +334,7 @@ function draftIsValid(): boolean {
   if (draft.value.binding === 'iface') return !!draft.value.iface;
   if (draft.value.binding === 'app') return draft.value.apps.length > 0;
   if (draft.value.binding === 'proxy') return draft.value.proxies.length > 0;
+  if (draft.value.binding === 'xray') return draft.value.xrays.length > 0;
   return false;
 }
 
@@ -328,32 +356,43 @@ function toggleDraftProxy(name: string) {
   }
 }
 
+function toggleDraftXray(name: string) {
+  const idx = draft.value.xrays.indexOf(name);
+  if (idx >= 0) draft.value.xrays.splice(idx, 1);
+  else draft.value.xrays.push(name);
+}
+
 // ---- Inline edit ------------------------------------------------------
 
 type EditState = {
   id: number;
   pattern: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'app' | 'proxy';
+  binding: 'iface' | 'app' | 'proxy' | 'xray';
   iface: string;
   apps: string[];
   proxies: string[];
+  xrays: string[];
   enabled: boolean;
 };
 
 const editing = ref<EditState | null>(null);
 
 function beginEdit(r: ipc.RuleDTO) {
-  let binding: 'iface' | 'app' | 'proxy' = 'iface';
+  let binding: 'iface' | 'app' | 'proxy' | 'xray' = 'iface';
   let iface = '';
   let appKeys: string[] = [];
   let proxyNames: string[] = [];
+  let xrayNames: string[] = [];
   if (r.interface.startsWith('app:')) {
     binding = 'app';
     appKeys = r.interface.substring(4).split(',').map(s => s.trim()).filter(Boolean);
   } else if (r.interface.startsWith('proxy:')) {
     binding = 'proxy';
     proxyNames = r.interface.substring(6).split(',').map(s => s.trim()).filter(Boolean);
+  } else if (r.interface.startsWith('xray:')) {
+    binding = 'xray';
+    xrayNames = r.interface.substring(5).split(',').map(s => s.trim()).filter(Boolean);
   } else if (r.interface) {
     binding = 'iface';
     iface = r.interface;
@@ -372,6 +411,7 @@ function beginEdit(r: ipc.RuleDTO) {
     iface,
     apps: appKeys,
     proxies: proxyNames,
+    xrays: xrayNames,
     enabled: r.enabled,
   };
 }
@@ -383,6 +423,7 @@ function editingInterfaceField(): string {
   if (!e || e.action !== 'route') return '';
   if (e.binding === 'app' && e.apps.length > 0) return `app:${e.apps.join(',')}`;
   if (e.binding === 'proxy' && e.proxies.length > 0) return `proxy:${e.proxies.join(',')}`;
+  if (e.binding === 'xray' && e.xrays.length > 0) return `xray:${e.xrays.join(',')}`;
   if (e.binding === 'iface') return e.iface;
   return '';
 }
@@ -394,6 +435,7 @@ function editingIsValid(): boolean {
   if (e.binding === 'iface') return !!e.iface;
   if (e.binding === 'app') return e.apps.length > 0;
   if (e.binding === 'proxy') return e.proxies.length > 0;
+  if (e.binding === 'xray') return e.xrays.length > 0;
   return false;
 }
 
@@ -409,6 +451,13 @@ function toggleEditingProxy(name: string) {
   const idx = editing.value.proxies.indexOf(name);
   if (idx >= 0) editing.value.proxies.splice(idx, 1);
   else editing.value.proxies.push(name);
+}
+
+function toggleEditingXray(name: string) {
+  if (!editing.value) return;
+  const idx = editing.value.xrays.indexOf(name);
+  if (idx >= 0) editing.value.xrays.splice(idx, 1);
+  else editing.value.xrays.push(name);
 }
 
 async function saveEdit() {
@@ -430,6 +479,7 @@ async function refresh() {
     interfaces.value = (await Interfaces()) || [];
     apps.value = (await Apps()) || [];
     proxies.value = ((await ListProxies()) || []) as unknown as ProxyRow[];
+    xrays.value = ((await ListXray()) || []) as unknown as XrayRow[];
     if (knownGroups.value.length === 0) {
       knownGroups.value = (await Groups()) || [];
     }
@@ -449,6 +499,7 @@ async function add() {
     draft.value.iface = '';
     draft.value.apps = [];
     draft.value.proxies = [];
+    draft.value.xrays = [];
     await refresh();
     emit('changed');
   } catch (e: any) {
@@ -511,6 +562,7 @@ function ifaceLabel(i: ipc.InterfaceDTO): string {
 //   'utunN'       → fixed interface
 //   'app:KEY'     → bound to an app (resolved live)
 //   'proxy:NAME'  → routed through an upstream HTTP/SOCKS5 proxy
+//   'xray:NAME'   → routed through an embedded xray-core outbound
 function ruleIsApp(field: string): boolean { return field.startsWith('app:'); }
 function ruleAppKey(field: string): string { return field.replace(/^app:/, ''); }
 
@@ -524,6 +576,29 @@ function ruleIsProxy(field: string): boolean { return field.startsWith('proxy:')
 // "proxy:work,home" → ["work","home"]
 function ruleProxyKeys(field: string): string[] {
   return field.replace(/^proxy:/, '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function ruleIsXray(field: string): boolean { return field.startsWith('xray:'); }
+
+// "xray:a,b" → ["a","b"]
+function ruleXrayNames(field: string): string[] {
+  return field.replace(/^xray:/, '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function xrayByName(name: string): XrayRow | undefined {
+  return xrays.value.find(x => x.name === name);
+}
+
+function xrayStatusBadge(name: string): string {
+  const x = xrayByName(name);
+  if (!x) return '?';
+  return x.enabled ? 'on' : 'off';
+}
+
+function xrayStatusLabel(name: string): string {
+  const x = xrayByName(name);
+  if (!x) return `${name} — xray entry no longer exists`;
+  return x.enabled ? `xray entry "${name}" enabled` : `xray entry "${name}" disabled`;
 }
 
 function proxyByName(name: string): ProxyRow | undefined {
@@ -580,6 +655,13 @@ function bindingDown(field: string): boolean {
   if (ruleIsProxy(field)) {
     const names = ruleProxyKeys(field);
     return !names.some(n => !!proxyByName(n));
+  }
+  if (ruleIsXray(field)) {
+    const names = ruleXrayNames(field);
+    return !names.some(n => {
+      const x = xrayByName(n);
+      return !!x && x.enabled;
+    });
   }
   return !interfaces.value.some(i => i.name === field);
 }
@@ -659,6 +741,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <button :class="['seg', {active: groupApply.binding === 'iface'}]" @click="groupApply.binding = 'iface'">Interface</button>
             <button :class="['seg', {active: groupApply.binding === 'app'}]" @click="groupApply.binding = 'app'">App</button>
             <button :class="['seg', {active: groupApply.binding === 'proxy'}]" @click="groupApply.binding = 'proxy'">Proxy</button>
+            <button :class="['seg', {active: groupApply.binding === 'xray'}]" @click="groupApply.binding = 'xray'">Xray</button>
           </div>
           <select v-if="groupApply.binding === 'iface'" v-model="groupApply.iface" style="flex: 1">
             <option value="">— pick interface —</option>
@@ -670,10 +753,16 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ groupApply.apps.length }} selected
             </span>
           </span>
-          <span v-else class="muted" style="font-size: 11px; flex: 1">
+          <span v-else-if="groupApply.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
             select one or more — daemon uses the first one that's reachable
             <span v-if="groupApply.proxies.length" style="color: var(--accent); font-weight: 600">
               · {{ groupApply.proxies.length }} selected
+            </span>
+          </span>
+          <span v-else class="muted" style="font-size: 11px; flex: 1">
+            select one or more xray outbounds — daemon uses the first that dials
+            <span v-if="groupApply.xrays.length" style="color: var(--accent); font-weight: 600">
+              · {{ groupApply.xrays.length }} selected
             </span>
           </span>
         </div>
@@ -696,7 +785,20 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <span v-if="groupApply.proxies.includes(p.name)" class="chip-rank">{{ groupApply.proxies.indexOf(p.name) + 1 }}</span>
           </button>
           <span v-if="proxies.length === 0" class="muted" style="font-size: 11px; padding: 4px">
-            No proxies configured. Add one in Settings → Proxies.
+            No proxies configured. Add one in the Proxies tab.
+          </span>
+        </div>
+        <div v-if="groupApply.binding === 'xray'" class="chip-grid">
+          <button v-for="x in xrays" :key="x.id"
+                  :class="['app-chip', {active: groupApply.xrays.includes(x.name), 'not-running': !x.enabled}]"
+                  @click="toggleGroupXray(x.name)"
+                  :title="x.enabled ? `127.0.0.1:${x.socksPort}` : 'disabled — rule will fail to dial'">
+            <span>{{ x.name }}</span>
+            <span class="muted" style="font-size: 10px">xray</span>
+            <span v-if="groupApply.xrays.includes(x.name)" class="chip-rank">{{ groupApply.xrays.indexOf(x.name) + 1 }}</span>
+          </button>
+          <span v-if="xrays.length === 0" class="muted" style="font-size: 11px; padding: 4px">
+            No xray outbounds configured. Add one in the Xray tab.
           </span>
         </div>
       </div>
@@ -722,6 +824,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <button :class="['seg', {active: draft.binding === 'iface'}]" @click="draft.binding = 'iface'">Interface</button>
             <button :class="['seg', {active: draft.binding === 'app'}]" @click="draft.binding = 'app'">App</button>
             <button :class="['seg', {active: draft.binding === 'proxy'}]" @click="draft.binding = 'proxy'">Proxy</button>
+            <button :class="['seg', {active: draft.binding === 'xray'}]" @click="draft.binding = 'xray'">Xray</button>
           </div>
           <select v-if="draft.binding === 'iface'" v-model="draft.iface" style="flex: 1">
             <option value="">— pick interface —</option>
@@ -733,10 +836,16 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ draft.apps.length }} selected
             </span>
           </span>
-          <span v-else class="muted" style="font-size: 11px; flex: 1">
+          <span v-else-if="draft.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
             select one or more — daemon uses the first one that's reachable
             <span v-if="draft.proxies.length" style="color: var(--accent); font-weight: 600">
               · {{ draft.proxies.length }} selected
+            </span>
+          </span>
+          <span v-else class="muted" style="font-size: 11px; flex: 1">
+            select one or more xray outbounds — daemon uses the first that dials
+            <span v-if="draft.xrays.length" style="color: var(--accent); font-weight: 600">
+              · {{ draft.xrays.length }} selected
             </span>
           </span>
         </div>
@@ -760,7 +869,20 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <span v-if="draft.proxies.includes(p.name)" class="chip-rank">{{ draft.proxies.indexOf(p.name) + 1 }}</span>
           </button>
           <span v-if="proxies.length === 0" class="muted" style="font-size: 11px; padding: 4px">
-            No proxies configured. Add one in Settings → Proxies.
+            No proxies configured. Add one in the Proxies tab.
+          </span>
+        </div>
+        <div v-if="draft.binding === 'xray'" class="chip-grid">
+          <button v-for="x in xrays" :key="x.id"
+                  :class="['app-chip', {active: draft.xrays.includes(x.name), 'not-running': !x.enabled}]"
+                  @click="toggleDraftXray(x.name)"
+                  :title="x.enabled ? `127.0.0.1:${x.socksPort}` : 'disabled — rule will fail to dial'">
+            <span>{{ x.name }}</span>
+            <span class="muted" style="font-size: 10px">xray</span>
+            <span v-if="draft.xrays.includes(x.name)" class="chip-rank">{{ draft.xrays.indexOf(x.name) + 1 }}</span>
+          </button>
+          <span v-if="xrays.length === 0" class="muted" style="font-size: 11px; padding: 4px">
+            No xray outbounds configured. Add one in the Xray tab.
           </span>
         </div>
       </div>
@@ -851,9 +973,11 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                       class="tag tag-block" style="margin-left: 6px"
                       :title="ruleIsApp(r.interface) ? 'App not running — queries return NXDOMAIN until it connects'
                             : ruleIsProxy(r.interface) ? 'Proxy missing — referenced proxy no longer exists'
+                            : ruleIsXray(r.interface) ? 'No referenced xray entry is enabled — queries return NXDOMAIN'
                             : 'Configured interface is not up — queries return NXDOMAIN until it comes back'">
                   ⚠ {{ ruleIsApp(r.interface) ? 'app down'
                        : ruleIsProxy(r.interface) ? 'proxy missing'
+                       : ruleIsXray(r.interface) ? 'xray off'
                        : 'iface down' }}
                 </span>
               </td>
@@ -875,6 +999,15 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                     <span>{{ n }}</span>
                     <span class="muted">{{ proxyStatusBadge(n) }}</span>
                     <span v-if="i < ruleProxyKeys(r.interface).length - 1" class="muted">·</span>
+                  </span>
+                </div>
+                <div v-else-if="r.action === 'route' && ruleIsXray(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
+                  <span v-for="(n, i) in ruleXrayNames(r.interface)" :key="n"
+                        class="row" style="gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 12px; font-size: 11px"
+                        :title="xrayStatusLabel(n)">
+                    <span>xray:{{ n }}</span>
+                    <span class="muted">{{ xrayStatusBadge(n) }}</span>
+                    <span v-if="i < ruleXrayNames(r.interface).length - 1" class="muted">·</span>
                   </span>
                 </div>
                 <code v-else-if="r.action === 'route'" style="font-size: 12px">{{ r.interface }}</code>
@@ -924,6 +1057,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                         <button :class="['seg', {active: editing!.binding === 'iface'}]" @click="editing!.binding = 'iface'">Interface</button>
                         <button :class="['seg', {active: editing!.binding === 'app'}]" @click="editing!.binding = 'app'">App</button>
                         <button :class="['seg', {active: editing!.binding === 'proxy'}]" @click="editing!.binding = 'proxy'">Proxy</button>
+                        <button :class="['seg', {active: editing!.binding === 'xray'}]" @click="editing!.binding = 'xray'">Xray</button>
                       </div>
                       <select v-if="editing!.binding === 'iface'" v-model="editing!.iface" style="flex: 1">
                         <option value="">— pick interface —</option>
@@ -937,10 +1071,16 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                           · {{ editing!.apps.length }} selected
                         </span>
                       </span>
-                      <span v-else class="muted" style="font-size: 11px; flex: 1">
+                      <span v-else-if="editing!.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
                         select one or more — daemon uses the first one that's reachable
                         <span v-if="editing!.proxies.length" style="color: var(--accent); font-weight: 600">
                           · {{ editing!.proxies.length }} selected
+                        </span>
+                      </span>
+                      <span v-else class="muted" style="font-size: 11px; flex: 1">
+                        select one or more xray outbounds — daemon uses the first that dials
+                        <span v-if="editing!.xrays.length" style="color: var(--accent); font-weight: 600">
+                          · {{ editing!.xrays.length }} selected
                         </span>
                       </span>
                     </div>
@@ -964,7 +1104,20 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                         <span v-if="editing!.proxies.includes(p.name)" class="chip-rank">{{ editing!.proxies.indexOf(p.name) + 1 }}</span>
                       </button>
                       <span v-if="proxies.length === 0" class="muted" style="font-size: 11px; padding: 4px">
-                        No proxies configured. Add one in Settings → Proxies.
+                        No proxies configured. Add one in the Proxies tab.
+                      </span>
+                    </div>
+                    <div v-if="editing!.binding === 'xray'" class="chip-grid">
+                      <button v-for="x in xrays" :key="x.id"
+                              :class="['app-chip', {active: editing!.xrays.includes(x.name), 'not-running': !x.enabled}]"
+                              @click="toggleEditingXray(x.name)"
+                              :title="x.enabled ? `127.0.0.1:${x.socksPort}` : 'disabled'">
+                        <span>{{ x.name }}</span>
+                        <span class="muted" style="font-size: 10px">xray</span>
+                        <span v-if="editing!.xrays.includes(x.name)" class="chip-rank">{{ editing!.xrays.indexOf(x.name) + 1 }}</span>
+                      </button>
+                      <span v-if="xrays.length === 0" class="muted" style="font-size: 11px; padding: 4px">
+                        No xray outbounds configured. Add one in the Xray tab.
                       </span>
                     </div>
                   </div>

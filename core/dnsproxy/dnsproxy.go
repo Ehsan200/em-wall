@@ -17,6 +17,7 @@ import (
 
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/proxy"
+	"github.com/ehsan/em-wall/core/xray"
 )
 
 // Forwarder asks an upstream DNS server. Production uses MultiUpstream;
@@ -217,7 +218,12 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 
 	case decision.OutcomeRoute:
-		iface, release, ok := s.resolveIface(d.Interface, name, d.RuleID, clientIP, w, req)
+		// Translate xray:NAME into its internal proxy:_xray_NAME form
+		// so all the proxy-routing plumbing below (resolveIface,
+		// recordProxyMapping) sees a single shape. d.Interface stays
+		// the user-facing label and is used in logs verbatim.
+		effIface := translateXrayInterface(d.Interface)
+		iface, release, ok := s.resolveIface(effIface, name, d.RuleID, clientIP, w, req)
 		if !ok {
 			return // resolveIface already wrote a response and logged
 		}
@@ -228,7 +234,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		// Without this, app-bound failures looked like fixed-iface
 		// failures in the Logs tab.
 		logIface := iface
-		if strings.HasPrefix(d.Interface, "app:") || proxy.IsProxyInterface(d.Interface) {
+		if strings.HasPrefix(d.Interface, "app:") || proxy.IsProxyInterface(d.Interface) || xray.IsXrayInterface(d.Interface) {
 			logIface = d.Interface + " → " + iface
 		}
 		if s.cfg.Interfaces != nil && !s.cfg.Interfaces.IsUp(iface) {
@@ -256,8 +262,13 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		// when the client subsequently connects. installRoutesFor
 		// already pinned the IP to our utun; now we annotate that
 		// pin with (proxyNames, hostname).
-		if proxy.IsProxyInterface(d.Interface) && s.cfg.Proxies != nil {
-			s.recordProxyMapping(resp, name, d.Interface, d.RuleID)
+		// recordProxyMapping reads the proxy names out of the stored
+		// interface, so pass effIface (which has xray:NAME already
+		// rewritten to its internal proxy form) — otherwise xray-
+		// routed answers would land in the table with the raw xray:
+		// names and the netstack handler couldn't dial them.
+		if (proxy.IsProxyInterface(d.Interface) || xray.IsXrayInterface(d.Interface)) && s.cfg.Proxies != nil {
+			s.recordProxyMapping(resp, name, effIface, d.RuleID)
 		}
 		_ = w.WriteMsg(resp)
 		s.log(name, "route", logIface, d.RuleID, clientIP)
@@ -389,6 +400,27 @@ func parseAppKeys(stored string) []string {
 		}
 	}
 	return out
+}
+
+// translateXrayInterface rewrites a stored "xray:NAME[,NAME2]" field
+// into the equivalent "proxy:_xray_NAME[,_xray_NAME2]" so the rest of
+// the routing layer doesn't need to know about xray. Non-xray inputs
+// are returned unchanged.
+//
+// The supervisor keeps a hidden proxy.Proxy row named _xray_NAME
+// (Host=127.0.0.1, Port=entry SocksPort, Protocol=socks5) for every
+// xray entry, so once rewritten the existing proxy plumbing dials
+// the right local SOCKS5 inbound.
+func translateXrayInterface(stored string) string {
+	if !xray.IsXrayInterface(stored) {
+		return stored
+	}
+	names := xray.ParseInterface(stored)
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = xray.InternalProxyName(n)
+	}
+	return proxy.InterfacePrefix + strings.Join(parts, ",")
 }
 
 func (s *Server) writeNX(w dns.ResponseWriter, req *dns.Msg, name string) {

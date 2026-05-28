@@ -19,6 +19,9 @@ app/em-wall
 app/build/*
 app/frontend/dist/
 app/frontend/wailsjs/
+# Build artefacts under resources/ are NOT checked in (Makefile
+# populates them). The vendored xray binary + geoip/geosite + LICENSE
+# next to them ARE checked in — see resources/.gitkeep.
 app/internal/installer/resources/em-walld
 app/internal/installer/resources/com.em-wall.daemon.plist
 app/internal/installer/resources/em-wall.pf.anchor

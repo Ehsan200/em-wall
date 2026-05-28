@@ -6,17 +6,13 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,13 +22,12 @@ import (
 	"github.com/ehsan/em-wall/core/applocator"
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/dnsproxy"
-	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/pfctl"
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/routing"
 	"github.com/ehsan/em-wall/core/rules"
-	"github.com/ehsan/em-wall/core/version"
+	"github.com/ehsan/em-wall/core/xray"
 )
 
 // lsofProvider adapts core/routing's exported LsofUtunOwners to the
@@ -57,6 +52,10 @@ func main() {
 		upstream       = flag.String("upstream", strings.Join(publicFallbackDNS, ","), "comma-separated upstream DNS servers")
 		noAutoActivate = flag.Bool("no-auto-activate", false, "do not touch system DNS on startup (for tests / dev)")
 		proxyTestTgt   = flag.String("proxy-test-target", defaultProxyTestTarget, "host:port dialed through a proxy by proxies.test to check reachability")
+		xrayBinary     = flag.String("xray-binary", "/usr/local/bin/em-wall-xray", "path to the xray-core binary the supervisor runs")
+		xrayDataDir    = flag.String("xray-data-dir", "/usr/local/share/em-wall", "directory containing xray's geoip.dat + geosite.dat (XRAY_LOCATION_ASSET)")
+		xrayRuntimeDir = flag.String("xray-runtime-dir", "/usr/local/var/em-wall/xray", "directory where the supervisor writes the generated xray config")
+		xrayLogDir     = flag.String("xray-log-dir", "/usr/local/var/log", "directory where xray writes its access/error logs; empty disables xray logging")
 	)
 	flag.Parse()
 
@@ -81,6 +80,22 @@ func main() {
 		log.Fatalf("em-walld: open proxy store: %v", err)
 	}
 	defer proxyStore.Close()
+
+	xrayStore, err := xray.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("em-walld: open xray store: %v", err)
+	}
+	defer xrayStore.Close()
+
+	// Supervisor probes the binary; in dev (binary not installed) it
+	// constructs disabled and Reconcile is a no-op for the subprocess
+	// but still keeps hidden proxy rows in sync.
+	xraySup := newXraySupervisor(*xrayBinary, *xrayDataDir, *xrayRuntimeDir, *xrayLogDir,
+		xrayStore, proxyStore, log.Default())
+	if err := xraySup.Reconcile(context.Background()); err != nil {
+		log.Printf("em-walld: initial xray reconcile failed (continuing): %v", err)
+	}
+	defer xraySup.Stop()
 
 	// IP→proxy mapping populated by the DNS layer, consumed by the
 	// netstack TCP handler. minTTL keeps a mapping alive long enough
@@ -132,6 +147,8 @@ func main() {
 		store:         store,
 		proxyStore:    proxyStore,
 		proxyTable:    proxyTable,
+		xrayStore:     xrayStore,
+		xraySup:       xraySup,
 		engine:        engine,
 		router:        router,
 		pf:            pf,
@@ -235,6 +252,26 @@ func main() {
 		}
 	}()
 
+	// Xray log-cap watcher: every minute, check whether xray's access/
+	// error log files have crossed the cap; restart xray to truncate
+	// them if so. Restart also runs unconditionally on every config
+	// change via Reconcile, so this is the only path that triggers a
+	// restart purely for log-size reasons.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				xraySup.RotateLogsIfTooLarge()
+			}
+		}
+	}()
+
 	// Upstream watcher: every 10s, validate that the current upstream
 	// still answers. When the user switches Wi-Fi, sleeps/wakes the
 	// laptop, or toggles a VPN, the DHCP-supplied resolver we picked at
@@ -326,6 +363,8 @@ type handlerDeps struct {
 	store      *rules.Store
 	proxyStore *proxy.Store
 	proxyTable *proxy.Table
+	xrayStore  *xray.Store
+	xraySup    *xraySupervisor
 	engine     *decision.Engine
 	router     *routing.Manager
 	pf         *pfctl.Manager
@@ -427,6 +466,27 @@ func parseProxyTestTarget(s string) (host string, port int) {
 	return dh, n
 }
 
+// parseTestTarget is the per-call counterpart used by xray.test: a
+// user-supplied "host:port" with sensible fallback when the field is
+// blank. Returns an error (not a fallback) on a malformed non-empty
+// value so the UI can surface "invalid target: ..." instead of
+// silently dialing the wrong place.
+func parseTestTarget(s, fallbackHost string, fallbackPort int) (host string, port int, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fallbackHost, fallbackPort, nil
+	}
+	h, p, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", 0, err
+	}
+	n, perr := strconv.Atoi(p)
+	if perr != nil || n < 1 || n > 65535 || h == "" {
+		return "", 0, fmt.Errorf("port out of range or host empty")
+	}
+	return h, n, nil
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "—"
@@ -434,923 +494,4 @@ func orDash(s string) string {
 	return s
 }
 
-func registerHandlers(s *ipc.Server, d *handlerDeps) {
-	s.Handle(ipc.MethodStatus, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		list, _ := d.store.List(ctx)
-		blockEnc, _ := d.store.GetSetting(ctx, "block_encrypted_dns", "true")
-		return ipc.StatusResult{
-			Version:           version.Version,
-			Uptime:            time.Since(d.startedAt).Round(time.Second).String(),
-			BlockEncryptedDNS: blockEnc == "true",
-			UpstreamDNS:       d.upstream,
-			ListenAddr:        d.listenAddr,
-			RuleCount:         len(list),
-		}, nil
-	})
 
-	s.Handle(ipc.MethodRulesList, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		list, err := d.store.List(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ipc.RuleDTO, len(list))
-		for i, r := range list {
-			out[i] = ruleToDTO(r)
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodRulesAdd, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.RulesAddParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
-		r := rules.Rule{
-			Pattern:   p.Pattern,
-			Action:    rules.Action(p.Action),
-			Interface: p.Interface,
-			Enabled:   p.Enabled,
-		}
-		added, err := d.store.Add(ctx, r)
-		if err != nil {
-			return nil, err
-		}
-		_ = d.engine.Reload(ctx)
-		return ruleToDTO(added), nil
-	})
-
-	s.Handle(ipc.MethodRulesUpdate, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.RulesUpdateParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
-		r := rules.Rule{
-			ID:        p.ID,
-			Pattern:   p.Pattern,
-			Action:    rules.Action(p.Action),
-			Interface: p.Interface,
-			Enabled:   p.Enabled,
-		}
-		if err := d.store.Update(ctx, r); err != nil {
-			return nil, err
-		}
-		// Flush per-host routes installed for this rule. The next DNS
-		// query will reinstall them via the new binding (or not, if
-		// the rule is now disabled / now points elsewhere). Without
-		// this, switching a rule from utun4 to app:tailscale would
-		// leave the original utun4 routes in the OS table — letting
-		// browser-cached IPs reach the destination via the wrong path.
-		_ = d.router.RemoveByRule(ctx, p.ID)
-		// Same reasoning for proxy mappings: drop any IP→proxy entries
-		// this rule installed so a now-stale binding doesn't keep
-		// dispatching cached IPs through the old proxy.
-		d.proxyTable.RemoveByRule(p.ID)
-		_ = d.engine.Reload(ctx)
-		return map[string]any{"ok": true}, nil
-	})
-
-	s.Handle(ipc.MethodRulesDelete, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.RulesDeleteParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		_ = d.router.RemoveByRule(ctx, p.ID)
-		d.proxyTable.RemoveByRule(p.ID)
-		if err := d.store.Delete(ctx, p.ID); err != nil {
-			return nil, err
-		}
-		_ = d.engine.Reload(ctx)
-		return map[string]any{"ok": true}, nil
-	})
-
-	s.Handle(ipc.MethodSettingsGet, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.SettingsGetParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		v, err := d.store.GetSetting(ctx, p.Key, p.Default)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"value": v}, nil
-	})
-
-	s.Handle(ipc.MethodSettingsSet, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.SettingsSetParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		if err := d.store.SetSetting(ctx, p.Key, p.Value); err != nil {
-			return nil, err
-		}
-		// Side-effect: keep pf in sync with the toggle.
-		if p.Key == "block_encrypted_dns" {
-			if err := d.pf.Sync(ctx, p.Value == "true"); err != nil {
-				return nil, fmt.Errorf("pf sync: %w", err)
-			}
-		}
-		return map[string]any{"ok": true}, nil
-	})
-
-	s.Handle(ipc.MethodLogsRecent, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.LogsRecentParams
-		_ = json.Unmarshal(raw, &p)
-		list, err := d.store.RecentLogs(ctx, p.Limit, p.Filter)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ipc.LogDTO, len(list))
-		for i, e := range list {
-			out[i] = ipc.LogDTO{
-				ID:        e.ID,
-				Timestamp: e.Timestamp.Format(time.RFC3339),
-				QueryName: e.QueryName,
-				Action:    e.Action,
-				RuleID:    e.RuleID,
-				Interface: e.Interface,
-				ClientIP:  e.ClientIP,
-			}
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodRoutesActive, func(_ context.Context, _ json.RawMessage) (any, error) {
-		active := d.router.Active()
-		out := make([]ipc.ActiveRouteDTO, len(active))
-		for i, a := range active {
-			out[i] = ipc.ActiveRouteDTO{
-				Host:      a.Host,
-				Interface: a.Interface,
-				ExpiresAt: a.ExpiresAt.Format(time.RFC3339),
-				RuleID:    a.RuleID,
-			}
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodInterfacesList, func(_ context.Context, _ json.RawMessage) (any, error) {
-		list, err := routing.EnumerateInterfaces()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ipc.InterfaceDTO, len(list))
-		for i, ifc := range list {
-			out[i] = ipc.InterfaceDTO{
-				Name:  ifc.Name,
-				Index: ifc.Index,
-				MTU:   ifc.MTU,
-				Flags: ifc.Flags,
-				Owner: ifc.Owner,
-			}
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodSystemRoutesList, func(_ context.Context, _ json.RawMessage) (any, error) {
-		list, err := routing.ListSystemRoutes()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ipc.SystemRouteDTO, len(list))
-		for i, r := range list {
-			out[i] = ipc.SystemRouteDTO{
-				Family:      r.Family,
-				Destination: r.Destination,
-				Gateway:     r.Gateway,
-				Flags:       r.Flags,
-				Interface:   r.Interface,
-			}
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodAppsList, func(_ context.Context, _ json.RawMessage) (any, error) {
-		registry := d.apps.Apps()
-		out := make([]ipc.AppDTO, 0, len(registry))
-		for _, a := range registry {
-			path := a.InstalledPath()
-			if path == "" {
-				path = a.BundlePath // fall back to primary so UI has SOMETHING to show
-			}
-			out = append(out, ipc.AppDTO{
-				Key:          a.Key,
-				DisplayName:  a.DisplayName,
-				BundleID:     a.BundleID,
-				BundlePath:   path,
-				Installed:    a.IsInstalled(),
-				CurrentIface: d.apps.Current(a.Key),
-			})
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodAppsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.AppsIconParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		a := applocator.FindByKey(p.Key)
-		if a == nil {
-			return nil, fmt.Errorf("unknown app: %s", p.Key)
-		}
-		icon := applocator.LoadIcon(*a)
-		return ipc.AppIconDTO{
-			Key:       a.Key,
-			MIME:      icon.MIME,
-			DataB64:   base64.StdEncoding.EncodeToString(icon.Data),
-			Installed: icon.Installed,
-		}, nil
-	})
-
-	s.Handle(ipc.MethodGroupsList, func(_ context.Context, _ json.RawMessage) (any, error) {
-		registry := groups.KnownGroups()
-		out := make([]ipc.GroupDTO, 0, len(registry))
-		for _, g := range registry {
-			out = append(out, ipc.GroupDTO{
-				Key:         g.Key,
-				DisplayName: g.DisplayName,
-				Description: g.Description,
-				Patterns:    g.Patterns,
-			})
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodGroupsApply, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.GroupsApplyParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
-		}
-		// Validate the action / interface combination once up front so
-		// we don't half-create the group on a bad request.
-		probe := rules.Rule{
-			Pattern: g.Patterns[0], Action: rules.Action(p.Action),
-			Interface: p.Interface, Enabled: p.Enabled,
-		}
-		if _, err := d.store.Add(ctx, probe); err != nil {
-			// Rollback the probe insertion if it actually went through
-			// (validation passed but it was a real Add). Either way we
-			// return the error so the UI can show it.
-			if probe.ID > 0 {
-				_ = d.store.Delete(ctx, probe.ID)
-			}
-			// If the only error is duplicate-pattern, don't bail — that
-			// pattern will just be skipped below.
-			if err.Error() != rules.ErrDuplicate.Error() {
-				return nil, err
-			}
-		}
-		// Now insert the rest, tracking created vs skipped.
-		out := ipc.GroupsApplyResult{}
-		if probe.ID > 0 {
-			out.Created = append(out.Created, ruleToDTO(probe))
-		} else if probe.ID == 0 {
-			out.Skipped = append(out.Skipped, g.Patterns[0])
-		}
-		for _, pattern := range g.Patterns[1:] {
-			r := rules.Rule{
-				Pattern: pattern, Action: rules.Action(p.Action),
-				Interface: p.Interface, Enabled: p.Enabled,
-			}
-			added, err := d.store.Add(ctx, r)
-			if err != nil {
-				if err.Error() == rules.ErrDuplicate.Error() {
-					out.Skipped = append(out.Skipped, pattern)
-					continue
-				}
-				return out, err
-			}
-			out.Created = append(out.Created, ruleToDTO(added))
-		}
-		_ = d.engine.Reload(ctx)
-		return out, nil
-	})
-
-	// Bulk delete every rule that came from a group's pattern list.
-	// Match is normalized-equality of pattern (groups.go patterns are
-	// canonical lowercase). Rules the user hand-edited won't match
-	// anymore — that's the intended behavior, edits opt out of group
-	// membership.
-	s.Handle(ipc.MethodGroupsDeleteRules, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.GroupsDeleteRulesParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
-		}
-		ids, err := d.matchingRuleIDs(ctx, g.Patterns)
-		if err != nil {
-			return nil, err
-		}
-		var deleted []int64
-		for _, id := range ids {
-			_ = d.router.RemoveByRule(ctx, id)
-			d.proxyTable.RemoveByRule(id)
-			if err := d.store.Delete(ctx, id); err != nil {
-				continue
-			}
-			deleted = append(deleted, id)
-		}
-		_ = d.engine.Reload(ctx)
-		return ipc.GroupsBulkResult{Affected: len(deleted), RuleIDs: deleted}, nil
-	})
-
-	// Bulk enable/disable. Same matching rule as delete. We re-use
-	// store.Update so per-rule normalization runs (e.g. action/interface
-	// validation), but the only field that's actually changing is
-	// enabled. Disabled rules also get their per-host routes flushed —
-	// otherwise traffic could keep using cached pinned routes after
-	// the rule "stops" mattering.
-	s.Handle(ipc.MethodGroupsSetEnabled, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.GroupsSetEnabledParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
-		}
-		all, err := d.store.List(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var touched []int64
-		for _, r := range all {
-			if !ruleBelongsToGroup(r.Pattern, g.Patterns) {
-				continue
-			}
-			if r.Enabled == p.Enabled {
-				continue // already in the desired state
-			}
-			r.Enabled = p.Enabled
-			if err := d.store.Update(ctx, r); err != nil {
-				continue
-			}
-			if !p.Enabled {
-				_ = d.router.RemoveByRule(ctx, r.ID)
-				d.proxyTable.RemoveByRule(r.ID)
-			}
-			touched = append(touched, r.ID)
-		}
-		_ = d.engine.Reload(ctx)
-		return ipc.GroupsBulkResult{Affected: len(touched), RuleIDs: touched}, nil
-	})
-
-	s.Handle(ipc.MethodGroupsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.GroupsIconParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
-		}
-		icon := groups.LoadIcon(*g)
-		return ipc.GroupIconDTO{
-			Key:     g.Key,
-			MIME:    icon.MIME,
-			DataB64: base64.StdEncoding.EncodeToString(icon.Data),
-		}, nil
-	})
-
-	s.Handle(ipc.MethodReload, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if err := d.engine.Reload(ctx); err != nil {
-			return nil, err
-		}
-		return map[string]any{"ok": true}, nil
-	})
-
-	s.Handle(ipc.MethodSystemDNSStatus, func(_ context.Context, _ json.RawMessage) (any, error) {
-		return d.systemDNSStatus(), nil
-	})
-
-	s.Handle(ipc.MethodSystemDNSActivate, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if err := d.activateSystemDNS(ctx); err != nil {
-			return nil, err
-		}
-		return d.systemDNSStatus(), nil
-	})
-
-	s.Handle(ipc.MethodSystemDNSDeactivate, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if err := d.deactivateSystemDNS(ctx); err != nil {
-			return nil, err
-		}
-		return d.systemDNSStatus(), nil
-	})
-
-	s.Handle(ipc.MethodProxiesList, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		list, err := d.proxyStore.List(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]ipc.ProxyDTO, len(list))
-		for i, p := range list {
-			out[i] = proxyToDTO(p)
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodProxiesAdd, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.ProxiesAddParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		added, err := d.proxyStore.Add(ctx, proxy.Proxy{
-			Name:     p.Name,
-			Protocol: proxy.Protocol(p.Protocol),
-			Host:     p.Host,
-			Port:     p.Port,
-			Username: p.Username,
-			Password: p.Password,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return proxyToDTO(added), nil
-	})
-
-	s.Handle(ipc.MethodProxiesUpdate, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.ProxiesUpdateParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		if err := d.proxyStore.Update(ctx, proxy.Proxy{
-			ID:       p.ID,
-			Name:     p.Name,
-			Protocol: proxy.Protocol(p.Protocol),
-			Host:     p.Host,
-			Port:     p.Port,
-			Username: p.Username,
-			Password: p.Password,
-		}); err != nil {
-			return nil, err
-		}
-		return map[string]any{"ok": true}, nil
-	})
-
-	s.Handle(ipc.MethodProxiesDelete, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.ProxiesDeleteParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		// Refuse to delete a proxy that's still referenced by any
-		// rule's Interface field, otherwise that rule would silently
-		// break at the next DNS query.
-		stored, err := d.proxyStore.Get(ctx, p.ID)
-		if err != nil {
-			return nil, err
-		}
-		refs, err := d.rulesReferencingProxy(ctx, stored.Name)
-		if err != nil {
-			return nil, err
-		}
-		if len(refs) > 0 {
-			return nil, fmt.Errorf("proxy %q is referenced by %d rule(s); remove or edit those rules first", stored.Name, len(refs))
-		}
-		if err := d.proxyStore.Delete(ctx, p.ID); err != nil {
-			return nil, err
-		}
-		return map[string]any{"ok": true}, nil
-	})
-
-	// Live reachability check: open a connection through the proxy to a
-	// well-known always-on TCP endpoint. Success means we reached the
-	// proxy, completed its auth/handshake, and it connected onward. We
-	// dial a raw IP (no hostname) so the probe doesn't depend on
-	// proxy-side DNS — it's a pure reachability check of the proxy.
-	s.Handle(ipc.MethodProxiesTest, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.ProxiesTestParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		stored, err := d.proxyStore.Get(ctx, p.ID)
-		if err != nil {
-			return nil, err
-		}
-		dialer, err := proxy.NewDialer(stored)
-		if err != nil {
-			return ipc.ProxiesTestResult{OK: false, Message: err.Error()}, nil
-		}
-		// An IP-literal target dials by IP (no proxy-side DNS); a DNS
-		// name is passed as the hostname so the proxy resolves it.
-		var hostname string
-		ip := net.ParseIP(d.proxyTestHost)
-		if ip == nil {
-			hostname = d.proxyTestHost
-		}
-		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		start := time.Now()
-		conn, err := dialer.Dial(tctx, hostname, ip, d.proxyTestPort)
-		if err != nil {
-			return ipc.ProxiesTestResult{
-				OK:      false,
-				Message: fmt.Sprintf("connect via %s://%s:%d failed: %v", stored.Protocol, stored.Host, stored.Port, err),
-			}, nil
-		}
-		_ = conn.Close()
-		return ipc.ProxiesTestResult{
-			OK:      true,
-			Message: fmt.Sprintf("reached %s through proxy in %s", net.JoinHostPort(d.proxyTestHost, strconv.Itoa(d.proxyTestPort)), time.Since(start).Round(time.Millisecond)),
-		}, nil
-	})
-}
-
-// validateProxyRefs checks that every proxy name referenced by a
-// rule's Interface field actually exists in the proxy store. Returns
-// nil for non-proxy interfaces (utunN, app:KEY, empty), or a wrapped
-// error naming the missing proxies.
-func (d *handlerDeps) validateProxyRefs(ctx context.Context, iface string) error {
-	if !proxy.IsProxyInterface(iface) {
-		return nil
-	}
-	names := proxy.ParseInterface(iface)
-	if len(names) == 0 {
-		return fmt.Errorf("interface %q references no proxy names", iface)
-	}
-	missing, err := d.proxyStore.NamesExist(ctx, names)
-	if err != nil {
-		return err
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("unknown proxy reference(s): %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
-// rulesReferencingProxy returns the IDs of rules whose Interface
-// field includes name in a "proxy:NAME[,...]" list.
-func (d *handlerDeps) rulesReferencingProxy(ctx context.Context, name string) ([]int64, error) {
-	all, err := d.store.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var ids []int64
-	for _, r := range all {
-		if !proxy.IsProxyInterface(r.Interface) {
-			continue
-		}
-		if slices.Contains(proxy.ParseInterface(r.Interface), name) {
-			ids = append(ids, r.ID)
-		}
-	}
-	return ids, nil
-}
-
-// systemDNSStatus snapshots the current per-service DNS, what scutil
-// sees, what we're currently using as upstream, and whether we're
-// active.
-func (d *handlerDeps) systemDNSStatus() ipc.SystemDNSStatus {
-	active, _ := d.sysDNS.IsActive()
-	resolvers, _ := d.sysDNS.DetectResolvers()
-	per, _ := d.sysDNS.CaptureAll()
-	d.mu.Lock()
-	upstream := splitCSV(d.upstream)
-	d.mu.Unlock()
-	return ipc.SystemDNSStatus{
-		Active:            active,
-		Upstream:          upstream,
-		DetectedResolvers: resolvers,
-		PerService:        per,
-	}
-}
-
-func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
-	wasActive, _ := d.sysDNS.IsActive()
-
-	snap, err := d.sysDNS.CaptureAll()
-	if err != nil {
-		return fmt.Errorf("capture: %w", err)
-	}
-
-	// Sanitize snapshot for backup: a service whose DNS is *only* a
-	// loopback (i.e. ourselves) should be treated as DHCP-supplied so
-	// that Deactivate restores it to Empty rather than 127.0.0.1.
-	clean := sanitizeSnapshot(snap)
-
-	// If we're already active and have a saved backup, keep it — we
-	// don't want to overwrite the original pre-activation state with
-	// our own 127.0.0.1 entries.
-	if !wasActive {
-		snapJSON, err := json.Marshal(clean)
-		if err != nil {
-			return fmt.Errorf("marshal snapshot: %w", err)
-		}
-		if err := d.store.SetSetting(ctx, "system_dns_backup", string(snapJSON)); err != nil {
-			return fmt.Errorf("save backup: %w", err)
-		}
-	}
-
-	// Pick upstream — every candidate is validated with a live query,
-	// so what comes back is a list of resolvers we KNOW respond.
-	upstream := d.chooseUpstream(ctx, clean)
-	if len(upstream) == 0 {
-		// Last-ditch: try public fallback, but still validate.
-		if working := ValidateResolvers(ctx, []string{"1.1.1.1:53", "8.8.8.8:53"}); len(working) > 0 {
-			upstream = working
-		}
-	}
-	if len(upstream) == 0 {
-		// REFUSE TO ACTIVATE. Leaving 127.0.0.1 set without a working
-		// upstream would brick DNS system-wide — exactly what bit us
-		// before. Surface a clear error and leave system DNS alone.
-		// If we were ALREADY in the 127.0.0.1 state from a prior bad
-		// run, recover by restoring user's DNS so DNS keeps working.
-		if wasActive {
-			log.Printf("em-walld: stuck in 127.0.0.1 with no working upstream — auto-restoring system DNS")
-			_ = d.deactivateSystemDNS(ctx)
-		}
-		return fmt.Errorf("no working upstream DNS found — refusing to hijack system DNS (would break resolution for every app)")
-	}
-	if err := d.store.SetSetting(ctx, "upstream_dns", joinCSV(upstream)); err != nil {
-		return fmt.Errorf("save upstream: %w", err)
-	}
-
-	// Swap forwarder before flipping system DNS so the very first
-	// query through us has a working upstream.
-	d.dnsServer.SetForwarder(dnsproxy.NewMultiUpstream(upstream, 3*time.Second))
-	d.mu.Lock()
-	d.upstream = joinCSV(upstream)
-	d.mu.Unlock()
-
-	if err := d.sysDNS.ApplyAll([]string{"127.0.0.1"}); err != nil {
-		return fmt.Errorf("apply 127.0.0.1: %w", err)
-	}
-	_ = d.store.SetSetting(ctx, "system_dns_active", "true")
-	flushDNSCache()
-	return nil
-}
-
-// chooseUpstream collects every plausible upstream resolver, then
-// validates each with a real query and returns only those that
-// actually answered.
-//
-// Sources, in priority order (lower index wins ties after validation):
-//  1. Live per-service manual values from snap (excluding loopback).
-//  2. Saved pre-activation backup.
-//  3. AllDHCPDNS — every non-tunnel hardware port. This is the line
-//     that fixes the "VPN owns default route → ignore Wi-Fi DHCP" bug.
-//  4. scutil --dns (excluding loopback).
-//
-// Returns nil if nothing validates. Caller MUST decide whether to use
-// a public fallback or surface an error.
-func (d *handlerDeps) chooseUpstream(ctx context.Context, snap map[string][]string) []string {
-	seen := map[string]bool{}
-	var candidates []string
-	add := func(ips ...string) {
-		for _, ip := range ips {
-			if ip == "" || isLoopback(stripPort(ip)) {
-				continue
-			}
-			withPort := WithPort53([]string{ip})[0]
-			if seen[withPort] {
-				continue
-			}
-			seen[withPort] = true
-			candidates = append(candidates, withPort)
-		}
-	}
-
-	for _, ips := range snap {
-		add(ips...)
-	}
-	if raw, _ := d.store.GetSetting(ctx, "system_dns_backup", ""); raw != "" {
-		var backup map[string][]string
-		if err := json.Unmarshal([]byte(raw), &backup); err == nil {
-			for _, ips := range backup {
-				add(ips...)
-			}
-		}
-	}
-	if dhcp, err := d.sysDNS.AllDHCPDNS(); err == nil {
-		add(dhcp...)
-	}
-	if det, err := d.sysDNS.DetectResolvers(); err == nil {
-		add(det...)
-	}
-
-	if len(candidates) == 0 {
-		return nil
-	}
-	working := ValidateResolvers(ctx, candidates)
-	return working
-}
-
-func stripPort(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return host
-}
-
-// sanitizeSnapshot drops loopback entries. A service whose only entry
-// was 127.0.0.1 ends up with nil (DHCP-supplied) so restore is correct.
-func sanitizeSnapshot(snap map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(snap))
-	for svc, ips := range snap {
-		var clean []string
-		for _, ip := range ips {
-			if !isLoopback(ip) {
-				clean = append(clean, ip)
-			}
-		}
-		out[svc] = clean
-	}
-	return out
-}
-
-// refreshUpstreamIfStale validates the current upstream(s) with a real
-// query. If at least one still answers, no-op. Otherwise it re-picks
-// via chooseUpstream and swaps the forwarder atomically. Called by
-// the network watcher on a 10s tick — also safe to call on demand.
-//
-// Returns changed=true only when the upstream was actually swapped.
-// The intent is "DNS keeps working when the user changes network":
-// chooseUpstream reads AllDHCPDNS / scutil / per-service backup, all
-// of which reflect the current network state, so the new upstream is
-// whatever's reachable on whichever Wi-Fi/Ethernet/VPN the user moved
-// to. We don't touch system DNS — 127.0.0.1 stays in every service's
-// resolver list, the daemon just forwards somewhere different now.
-func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) {
-	d.mu.Lock()
-	current := splitCSV(d.upstream)
-	d.mu.Unlock()
-
-	// Cheap health check: if any current upstream still answers, leave
-	// it alone. ValidateResolvers runs them in parallel with a 1.5s
-	// timeout each, so this finishes well within the 10s tick.
-	if len(current) > 0 {
-		if working := ValidateResolvers(ctx, current); len(working) > 0 {
-			return false, nil
-		}
-	}
-
-	// Current upstream is dead — typically because the user moved
-	// networks. Re-pick from sources that read fresh state.
-	snap, err := d.sysDNS.CaptureAll()
-	if err != nil {
-		return false, fmt.Errorf("capture: %w", err)
-	}
-	clean := sanitizeSnapshot(snap)
-	upstream := d.chooseUpstream(ctx, clean)
-	if len(upstream) == 0 {
-		// Last-ditch public fallback — still validated.
-		if working := ValidateResolvers(ctx, []string{"1.1.1.1:53", "8.8.8.8:53"}); len(working) > 0 {
-			upstream = working
-		}
-	}
-	if len(upstream) == 0 {
-		return false, fmt.Errorf("no working upstream DNS on current network")
-	}
-	if joinCSV(upstream) == joinCSV(current) {
-		// New pick happens to match what we already had (e.g. validation
-		// flapped). Don't churn the forwarder.
-		return false, nil
-	}
-
-	if err := d.store.SetSetting(ctx, "upstream_dns", joinCSV(upstream)); err != nil {
-		return false, fmt.Errorf("save upstream: %w", err)
-	}
-	d.dnsServer.SetForwarder(dnsproxy.NewMultiUpstream(upstream, 3*time.Second))
-	d.mu.Lock()
-	d.upstream = joinCSV(upstream)
-	d.mu.Unlock()
-	return true, nil
-}
-
-func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
-	raw, err := d.store.GetSetting(ctx, "system_dns_backup", "")
-	if err != nil {
-		return err
-	}
-	if raw != "" {
-		var snap map[string][]string
-		if err := json.Unmarshal([]byte(raw), &snap); err != nil {
-			return fmt.Errorf("parse backup: %w", err)
-		}
-		if err := d.sysDNS.RestoreAll(snap); err != nil {
-			return fmt.Errorf("restore: %w", err)
-		}
-	} else {
-		services, err := d.sysDNS.ListServices()
-		if err != nil {
-			return err
-		}
-		for _, svc := range services {
-			_ = d.sysDNS.SetServiceDNS(svc, nil)
-		}
-	}
-	_ = d.store.SetSetting(ctx, "system_dns_active", "false")
-	flushDNSCache()
-	return nil
-}
-
-// flushDNSCache tells macOS to discard its resolver cache after a
-// system DNS change so stale pre-change answers don't keep being served.
-func flushDNSCache() {
-	exec.Command("dscacheutil", "-flushcache").Run()
-	exec.Command("killall", "-HUP", "mDNSResponder").Run()
-}
-
-// normalizeGroupPattern lowercases and trims a pattern so comparisons
-// don't depend on user-typed whitespace or trailing dots.
-func normalizeGroupPattern(s string) string {
-	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(s, ".")))
-}
-
-// ruleCoveredByGroupPattern reports whether rulePat sits inside the
-// scope of groupPat. Mirrors core/rules.Match's wildcard semantics so
-// the same rules that *would* be hit by a group's wildcard at query
-// time are also the ones treated as group members for delete-all /
-// enable-all bulk actions.
-//
-//	group "*.openai.com" covers rules: openai.com, *.openai.com,
-//	                                    api.openai.com, *.api.openai.com
-//	group "openai.com"   covers only:  openai.com (exact match)
-//
-// This is what the user expects: "chatgpt.com" should be considered
-// part of the OpenAI group because OpenAI lists "*.chatgpt.com".
-func ruleCoveredByGroupPattern(rulePat, groupPat string) bool {
-	rp := normalizeGroupPattern(rulePat)
-	gp := normalizeGroupPattern(groupPat)
-	if rp == "" || gp == "" {
-		return false
-	}
-	if rp == gp {
-		return true
-	}
-	if !strings.HasPrefix(gp, "*.") {
-		return false // exact-only group pattern
-	}
-	suffix := gp[2:]
-	body := rp
-	if strings.HasPrefix(rp, "*.") {
-		body = rp[2:]
-	}
-	return body == suffix || strings.HasSuffix(body, "."+suffix)
-}
-
-// ruleBelongsToGroup is the union over a group's pattern list.
-func ruleBelongsToGroup(rulePat string, groupPats []string) bool {
-	for _, gp := range groupPats {
-		if ruleCoveredByGroupPattern(rulePat, gp) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchingRuleIDs returns IDs of rules covered by any of patterns. Used
-// by the bulk delete handler. Order is unspecified.
-func (d *handlerDeps) matchingRuleIDs(ctx context.Context, patterns []string) ([]int64, error) {
-	all, err := d.store.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var ids []int64
-	for _, r := range all {
-		if ruleBelongsToGroup(r.Pattern, patterns) {
-			ids = append(ids, r.ID)
-		}
-	}
-	return ids, nil
-}
-
-func ruleToDTO(r rules.Rule) ipc.RuleDTO {
-	return ipc.RuleDTO{
-		ID:        r.ID,
-		Pattern:   r.Pattern,
-		Action:    string(r.Action),
-		Interface: r.Interface,
-		Enabled:   r.Enabled,
-		CreatedAt: r.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: r.UpdatedAt.Format(time.RFC3339),
-	}
-}
-
-func proxyToDTO(p proxy.Proxy) ipc.ProxyDTO {
-	return ipc.ProxyDTO{
-		ID:          p.ID,
-		Name:        p.Name,
-		Protocol:    string(p.Protocol),
-		Host:        p.Host,
-		Port:        p.Port,
-		Username:    p.Username,
-		HasPassword: p.Password != "",
-		CreatedAt:   p.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:   p.UpdatedAt.Format(time.RFC3339),
-	}
-}

@@ -130,6 +130,145 @@ func TestStore_Logs(t *testing.T) {
 	}
 }
 
+func TestStore_RenameInterfaceRef(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Mix of rules: single-name proxy/xray, multi-name, a non-matching
+	// app: prefix (must be untouched), and a literal interface name
+	// (must be untouched). Pattern uniqueness is the only constraint
+	// the store enforces here, so each gets a distinct pattern.
+	seed := []Rule{
+		{Pattern: "a.example.com", Action: ActionRoute, Interface: "proxy:work", Enabled: true},
+		{Pattern: "b.example.com", Action: ActionRoute, Interface: "proxy:work,home", Enabled: true},
+		{Pattern: "c.example.com", Action: ActionRoute, Interface: "proxy:home,work", Enabled: true},
+		{Pattern: "d.example.com", Action: ActionRoute, Interface: "proxy:home", Enabled: true},
+		{Pattern: "e.example.com", Action: ActionRoute, Interface: "xray:work", Enabled: true},
+		{Pattern: "f.example.com", Action: ActionRoute, Interface: "app:work", Enabled: true},
+		{Pattern: "g.example.com", Action: ActionRoute, Interface: "utun3", Enabled: true},
+	}
+	for i, r := range seed {
+		if _, err := s.Add(ctx, r); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	n, err := s.RenameInterfaceRef(ctx, "proxy:", "work", "office")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	// Exactly the three proxy:* rules containing "work" must be updated.
+	if n != 3 {
+		t.Errorf("rename returned %d, want 3", n)
+	}
+
+	want := map[string]string{
+		"a.example.com": "proxy:office",
+		"b.example.com": "proxy:office,home",
+		"c.example.com": "proxy:home,office",
+		"d.example.com": "proxy:home",
+		"e.example.com": "xray:work", // xray prefix not touched
+		"f.example.com": "app:work",  // app prefix not touched
+		"g.example.com": "utun3",     // literal iface not touched
+	}
+	all, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range all {
+		if got := r.Interface; got != want[r.Pattern] {
+			t.Errorf("rule %q: interface = %q, want %q", r.Pattern, got, want[r.Pattern])
+		}
+	}
+}
+
+func TestStore_RenameInterfaceRef_DedupeOnCollision(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// "proxy:a,b" with rename a→b must collapse to "proxy:b" (the
+	// duplicate is dropped — not "proxy:b,b") so the multi-name
+	// fallback list stays meaningful.
+	if _, err := s.Add(ctx, Rule{
+		Pattern: "x.example.com", Action: ActionRoute,
+		Interface: "proxy:a,b", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.RenameInterfaceRef(ctx, "proxy:", "a", "b")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rename returned %d, want 1", n)
+	}
+	all, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[0].Interface; got != "proxy:b" {
+		t.Errorf("interface = %q, want %q", got, "proxy:b")
+	}
+}
+
+func TestStore_RenameInterfaceRef_Xray(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, Rule{
+		Pattern: "x.example.com", Action: ActionRoute,
+		Interface: "xray:Riyahi,Backup", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Case-insensitive match (xray.normalizeName lowercases) — input
+	// "Riyahi" should still resolve to a hit for oldName "riyahi".
+	n, err := s.RenameInterfaceRef(ctx, "xray:", "riyahi", "riyahi-d20")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rename returned %d, want 1", n)
+	}
+	all, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[0].Interface; got != "xray:riyahi-d20,backup" {
+		t.Errorf("interface = %q, want %q", got, "xray:riyahi-d20,backup")
+	}
+}
+
+func TestStore_RenameInterfaceRef_NoOp(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.Add(ctx, Rule{
+		Pattern: "x.example.com", Action: ActionRoute,
+		Interface: "proxy:work", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ prefix, old, new string }{
+		{"", "work", "office"},      // empty prefix
+		{"proxy:", "", "office"},    // empty old
+		{"proxy:", "work", ""},      // empty new
+		{"proxy:", "work", "work"},  // identical
+		{"proxy:", "absent", "new"}, // no rule references it
+	}
+	for _, c := range cases {
+		n, err := s.RenameInterfaceRef(ctx, c.prefix, c.old, c.new)
+		if err != nil {
+			t.Errorf("prefix=%q old=%q new=%q: err = %v", c.prefix, c.old, c.new, err)
+		}
+		if n != 0 {
+			t.Errorf("prefix=%q old=%q new=%q: n = %d, want 0", c.prefix, c.old, c.new, n)
+		}
+	}
+}
+
 func TestStore_LogsFilter(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

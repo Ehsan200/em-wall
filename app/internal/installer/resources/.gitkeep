@@ -1,4 +1,12 @@
-# resources/ holds the daemon binary, plist, and pf anchor that get
-# embedded into the Wails app at build time. The Makefile target
-# `make app-bundle` populates this directory before invoking
-# `wails build`. None of these files are checked in.
+# resources/ holds files embedded into the Wails app at build time.
+#
+# Build artefacts (not checked in — see .gitignore):
+#   em-walld                          — built by `make daemon`
+#   com.em-wall.daemon.plist          — copied from launchd/ by `make app-resources`
+#   em-wall.pf.anchor                 — stub written by `make app-resources`
+#
+# Vendored xray-core release (CHECKED IN, replace + bump version constant
+# to upgrade — see core/xray/version.go):
+#   xray                              — Xray-macos-arm64-v8a (v26.3.27)
+#   geoip.dat, geosite.dat            — Xray-core routing data
+#   xray-LICENSE                      — MPL-2.0, kept alongside the binary

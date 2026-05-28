@@ -163,6 +163,90 @@ func (s *Store) List(ctx context.Context) ([]Rule, error) {
 	return out, err
 }
 
+// RenameInterfaceRef rewrites every Rule whose Interface field is of
+// the form "PREFIX:NAME[,NAME...]" so each occurrence of oldName in the
+// comma-separated list becomes newName. Used when the user renames an
+// outbound (proxy, xray) so existing rules don't silently break.
+//
+// Returns the number of rule rows updated. No-op (returns 0 with no
+// error) when prefix is empty, oldName == newName, or no rule matches.
+// Names are compared case-insensitively after trimming whitespace, to
+// match the normalisation proxy/xray stores apply on insert. Duplicate
+// resulting names are collapsed so a rule like "proxy:a,b" renamed
+// (a→b) becomes "proxy:b", not "proxy:b,b".
+func (s *Store) RenameInterfaceRef(ctx context.Context, prefix, oldName, newName string) (int64, error) {
+	prefix = strings.TrimSpace(prefix)
+	o := strings.ToLower(strings.TrimSpace(oldName))
+	n := strings.ToLower(strings.TrimSpace(newName))
+	if prefix == "" || o == "" || n == "" || o == n {
+		return 0, nil
+	}
+
+	var rows []Rule
+	if err := s.db.WithContext(ctx).
+		Where("interface LIKE ?", prefix+"%").
+		Find(&rows).Error; err != nil {
+		return 0, fmt.Errorf("list rules for rename: %w", err)
+	}
+
+	var updated int64
+	now := time.Now().UTC()
+	for _, r := range rows {
+		newIface, changed := rewriteMultiNameInterface(r.Interface, prefix, o, n)
+		if !changed {
+			continue
+		}
+		res := s.db.WithContext(ctx).Model(&Rule{}).
+			Where("id = ?", r.ID).
+			Updates(map[string]any{
+				"interface":  newIface,
+				"updated_at": now,
+			})
+		if res.Error != nil {
+			return updated, fmt.Errorf("update rule %d: %w", r.ID, res.Error)
+		}
+		updated += res.RowsAffected
+	}
+	return updated, nil
+}
+
+// rewriteMultiNameInterface returns the rewritten Interface field plus
+// a boolean indicating whether anything changed. The input must start
+// with prefix; names in the comma list are compared case-insensitively
+// after trim. Duplicate resulting names are dropped (keeping first
+// occurrence) so a rename that collides with an already-listed name
+// collapses cleanly.
+func rewriteMultiNameInterface(iface, prefix, oldName, newName string) (string, bool) {
+	if !strings.HasPrefix(iface, prefix) {
+		return iface, false
+	}
+	body := strings.TrimPrefix(iface, prefix)
+	parts := strings.Split(body, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	changed := false
+	for _, p := range parts {
+		name := strings.ToLower(strings.TrimSpace(p))
+		if name == "" {
+			continue
+		}
+		if name == oldName {
+			name = newName
+			changed = true
+		}
+		if seen[name] {
+			changed = true
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if !changed {
+		return iface, false
+	}
+	return prefix + strings.Join(out, ","), true
+}
+
 // Setting helpers (keyed key/value bag).
 
 func (s *Store) GetSetting(ctx context.Context, key, def string) (string, error) {

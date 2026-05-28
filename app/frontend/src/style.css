@@ -44,7 +44,7 @@ button.primary:hover { filter: brightness(1.1); }
 button.danger  { color: var(--danger); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-input, select {
+input, select, textarea {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -53,7 +53,7 @@ input, select {
   font-size: 13px;
   outline: none;
 }
-input:focus, select:focus { border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 
 table {
   width: 100%;
