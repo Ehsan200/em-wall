@@ -29,6 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macos-latest ships with every Xcode version + all iOS/tvOS/watchOS
+      # simulators preinstalled, leaving only a few GB free. hdiutil needs
+      # scratch space for an uncompressed UDRW staging volume before producing
+      # the final UDZO .dmg, and was hitting ENOSPC mid-copy. Reclaim ~30+ GB
+      # by deleting tooling we don't use in this build.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /Applications/Xcode_*.app
+          sudo rm -rf ~/Library/Developer/CoreSimulator
+          sudo rm -rf /Library/Developer/CoreSimulator
+          sudo rm -rf "$ANDROID_HOME"
+          df -h /
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
