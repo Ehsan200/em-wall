@@ -124,26 +124,15 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	_, _, _ = proxy.Splice(conn, upstream)
 }
 
-// handleUDP services one UDP flow netstack accepted on the utun. It
-// opens a SOCKS5 UDP association for the rule's proxy and relays
-// datagrams both ways until either side errors or the flow goes idle.
-// HTTP proxies can't carry UDP, so flows bound only to HTTP proxies
-// are dropped.
-//
-// QUIC (UDP/443) is dropped unconditionally: most proxy upstream
-// transports (VLESS+XHTTP, VMess+gRPC, …) can't reliably tunnel QUIC
-// datagrams, and a half-working tunnel makes Chrome/Safari wait out
-// the QUIC handshake before surfacing ERR_QUIC_PROTOCOL_ERROR and
-// trying HTTPS. Refusing the flow up front skips the wait — the
-// browser detects QUIC is unavailable in one RTT and falls back to
-// HTTP/2-over-TCP through the same proxy, which DOES work.
+// handleUDP services one UDP flow netstack accepted on the utun: open a
+// SOCKS5 UDP association for the rule's proxy and relay datagrams until a
+// side errors or the flow goes idle. The drop is gated on UDP capability,
+// not the port — associateUDP only succeeds for a SOCKS5 upstream (plain
+// proxy or xray entry), so HTTP-only bindings yield no session and fall
+// back to TCP. QUIC (UDP/443) is relayed too rather than dropped up front,
+// which the old blanket drop broke for QUIC-first backends like signaler-pa.
 func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	defer conn.Close()
-
-	if local.Port == 443 {
-		pf.logger.Printf("proxytun/udp: dropping QUIC flow to %s:%d (forcing TCP HTTPS fallback)", local.IP, local.Port)
-		return
-	}
 
 	entry, ok := pf.table.Lookup(local.IP)
 	if !ok {
