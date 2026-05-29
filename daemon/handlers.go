@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"slices"
 	"strconv"
@@ -194,6 +195,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
+		// Validate BEFORE persisting so bad input never reaches the store.
+		// Empty is allowed (clears back to the built-in default list).
+		if p.Key == "fallback_dns" {
+			if _, bad := parseDNSServers(p.Value); bad != "" {
+				return nil, fmt.Errorf("invalid DNS server %q — use IPv4/IPv6 addresses (optionally host:port), separated by commas or newlines", bad)
+			}
+		}
 		if err := d.store.SetSetting(ctx, p.Key, p.Value); err != nil {
 			return nil, err
 		}
@@ -201,6 +209,16 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if p.Key == "block_encrypted_dns" {
 			if err := d.pf.Sync(ctx, p.Value == "true"); err != nil {
 				return nil, fmt.Errorf("pf sync: %w", err)
+			}
+		}
+		// Side-effect: recompute the live upstream so an edited fallback
+		// list takes effect immediately instead of only on the next
+		// activate / network change. Best-effort — the value is already
+		// saved and valid, so a transient re-pick failure (e.g. no network
+		// right now) must not fail the save; the watcher will converge.
+		if p.Key == "fallback_dns" {
+			if _, err := d.repickUpstream(ctx); err != nil {
+				log.Printf("em-walld: fallback_dns saved but upstream re-pick failed: %v", err)
 			}
 		}
 		return map[string]any{"ok": true}, nil

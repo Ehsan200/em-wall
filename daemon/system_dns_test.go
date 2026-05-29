@@ -315,3 +315,35 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestParseDNSServers(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    []string
+		wantBad string
+	}{
+		{"empty", "", nil, ""},
+		{"whitespace only", "  \n\t ", nil, ""},
+		{"single bare ipv4", "8.8.8.8", []string{"8.8.8.8:53"}, ""},
+		{"explicit port kept", "8.8.8.8:5353", []string{"8.8.8.8:5353"}, ""},
+		{"commas and newlines mixed", "1.1.1.1, 8.8.8.8\n9.9.9.9", []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}, ""},
+		{"semicolons and spaces", "1.1.1.1 ; 8.8.4.4", []string{"1.1.1.1:53", "8.8.4.4:53"}, ""},
+		{"dedup", "8.8.8.8\n8.8.8.8:53\n8.8.8.8", []string{"8.8.8.8:53"}, ""},
+		{"bare ipv6 gets bracketed :53", "2001:4860:4860::8888", []string{"[2001:4860:4860::8888]:53"}, ""},
+		{"ipv6 with port", "[2606:4700:4700::1111]:53", []string{"[2606:4700:4700::1111]:53"}, ""},
+		{"invalid hostname rejected", "8.8.8.8, dns.google", nil, "dns.google"},
+		{"garbage rejected", "not-an-ip", nil, "not-an-ip"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, bad := parseDNSServers(c.in)
+			if bad != c.wantBad {
+				t.Fatalf("invalid token = %q, want %q", bad, c.wantBad)
+			}
+			if !equalSlice(got, c.want) {
+				t.Errorf("servers = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

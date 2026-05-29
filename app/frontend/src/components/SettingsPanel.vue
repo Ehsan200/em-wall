@@ -24,6 +24,15 @@ const busy = ref<boolean>(false);
 const lastRefresh = ref<Date | null>(null);
 let timer: number | undefined;
 
+// ---- Fallback DNS ----
+// User-defined resolvers appended (lowest priority) to the daemon's
+// upstream list. Used only when every network-local resolver soft-fails
+// a name — empty means the built-in default (1.1.1.1, 8.8.8.8).
+const fallbackDns = ref<string>('');
+const fallbackBusy = ref<boolean>(false);
+const fallbackError = ref<string>('');
+const fallbackSaved = ref<boolean>(false);
+
 // ---- Uninstall flow state ----
 const installStatus = ref<installer.Status | null>(null);
 const uninstallExpanded = ref<boolean>(false);
@@ -146,8 +155,28 @@ async function doUninstall() {
 async function loadSettings() {
   try {
     blockEncrypted.value = (await GetSetting('block_encrypted_dns', 'true')) === 'true';
+    fallbackDns.value = await GetSetting('fallback_dns', '');
   } catch (e: any) {
     error.value = e?.message || String(e);
+  }
+}
+
+async function saveFallbackDns() {
+  fallbackBusy.value = true;
+  fallbackError.value = '';
+  fallbackSaved.value = false;
+  try {
+    await SetSetting('fallback_dns', fallbackDns.value);
+    // Re-read the canonical stored value (the daemon stores it verbatim;
+    // this also confirms the write round-tripped) and refresh status so
+    // the new Upstream list shows up.
+    fallbackDns.value = await GetSetting('fallback_dns', '');
+    fallbackSaved.value = true;
+    await refreshStatus();
+  } catch (e: any) {
+    fallbackError.value = e?.message || String(e);
+  } finally {
+    fallbackBusy.value = false;
   }
 }
 
@@ -276,6 +305,43 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           <button :disabled="busy || !sysStatus?.active" @click="deactivate">
             {{ busy ? '…' : 'Deactivate' }}
           </button>
+        </div>
+      </div>
+
+      <!-- Fallback DNS servers -->
+      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+        <div class="col" style="gap: 4px">
+          <strong>Fallback DNS servers</strong>
+          <span class="muted" style="font-size: 12px; line-height: 1.5">
+            Extra resolvers tried <em>only</em> when every network-local
+            resolver (DHCP / VPN-pushed / your ISP) fails to resolve a name —
+            SERVFAIL or timeout. The daemon ranks answers, so a local resolver
+            that knows a name always wins; these are a safety net for names it
+            can't resolve (e.g. a VPN whose DNS chokes on certain
+            <code>.ir</code> CDN hosts).
+          </span>
+          <span class="muted" style="font-size: 11px; line-height: 1.5">
+            One per line, or comma-separated. IPv4/IPv6, optional
+            <code>:port</code> (default 53). Leave empty to use the built-in
+            default (<code>1.1.1.1</code>, <code>8.8.8.8</code>).
+          </span>
+        </div>
+        <textarea
+          v-model="fallbackDns"
+          @input="fallbackSaved = false; fallbackError = ''"
+          spellcheck="false"
+          rows="3"
+          placeholder="1.1.1.1&#10;8.8.8.8"
+          style="width: 100%; font-family: var(--mono, monospace); font-size: 12px; padding: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; resize: vertical"
+        ></textarea>
+        <div class="row" style="gap: 10px; align-items: center">
+          <button class="primary" :disabled="fallbackBusy" @click="saveFallbackDns">
+            {{ fallbackBusy ? 'Saving…' : 'Save' }}
+          </button>
+          <span v-if="fallbackSaved" class="muted" style="font-size: 11px; color: var(--success)">
+            ✓ Saved — applied to the live upstream.
+          </span>
+          <span v-if="fallbackError" class="error" style="margin: 0">{{ fallbackError }}</span>
         </div>
       </div>
 

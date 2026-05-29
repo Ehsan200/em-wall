@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/ehsan/em-wall/core/dnsproxy"
@@ -61,8 +62,8 @@ func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
 	// so what comes back is a list of resolvers we KNOW respond.
 	upstream := d.chooseUpstream(ctx, clean)
 	if len(upstream) == 0 {
-		// Last-ditch: try public fallback, but still validate.
-		if working := ValidateResolvers(ctx, []string{"1.1.1.1:53", "8.8.8.8:53"}); len(working) > 0 {
+		// Last-ditch: try the fallback resolvers, but still validate.
+		if working := ValidateResolvers(ctx, d.fallbackDNS(ctx)); len(working) > 0 {
 			upstream = working
 		}
 	}
@@ -111,9 +112,10 @@ func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
 //  3. AllDHCPDNS — every non-tunnel hardware port. This is the line
 //     that fixes the "VPN owns default route → ignore Wi-Fi DHCP" bug.
 //  4. scutil --dns (excluding loopback).
+//  5. publicFallbackDNS — always appended LAST so it only ever acts as a
+//     per-name safety net behind the network-local resolvers (see below).
 //
-// Returns nil if nothing validates. Caller MUST decide whether to use
-// a public fallback or surface an error.
+// Returns nil only if nothing validates at all (no usable network).
 func (d *handlerDeps) chooseUpstream(ctx context.Context, snap map[string][]string) []string {
 	seen := map[string]bool{}
 	var candidates []string
@@ -148,6 +150,19 @@ func (d *handlerDeps) chooseUpstream(ctx context.Context, snap map[string][]stri
 	if det, err := d.sysDNS.DetectResolvers(); err == nil {
 		add(det...)
 	}
+
+	// Always offer the public resolvers as LOWEST-priority candidates,
+	// appended after every network-local one. MultiUpstream.Forward stops
+	// at the first positive reply, so for any name a local resolver can
+	// answer these are never even queried — privacy and latency are
+	// preserved, and a public NXDOMAIN can't outrank a local positive for
+	// an in-country split-DNS .ir name. They only get consulted when EVERY
+	// local resolver soft-fails a name (SERVFAIL / timeout) — e.g. a
+	// VPN-pushed resolver that can't resolve certain .ir CDN hosts — which
+	// is exactly the gap that left those names returning SERVFAIL with no
+	// recovery path. Validation below drops them on a network where they
+	// can't be reached, so we never list a resolver that's actually dead.
+	add(d.fallbackDNS(ctx)...)
 
 	if len(candidates) == 0 {
 		return nil
@@ -208,6 +223,22 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 
 	// Current upstream is dead — typically because the user moved
 	// networks. Re-pick from sources that read fresh state.
+	return d.repickUpstream(ctx)
+}
+
+// repickUpstream unconditionally re-runs chooseUpstream against the
+// current network state and swaps the live forwarder + persisted
+// upstream_dns to the result. Unlike refreshUpstreamIfStale it does NOT
+// first check whether the current upstream still works — callers use it
+// to force a recompute after something that changes the *chosen* list
+// rather than its reachability (e.g. the user edits the fallback-DNS
+// setting). Returns changed=false (no error) when the recomputed list is
+// identical to what's already live, so it's cheap to call speculatively.
+func (d *handlerDeps) repickUpstream(ctx context.Context) (bool, error) {
+	d.mu.Lock()
+	current := splitCSV(d.upstream)
+	d.mu.Unlock()
+
 	snap, err := d.sysDNS.CaptureAll()
 	if err != nil {
 		return false, fmt.Errorf("capture: %w", err)
@@ -215,8 +246,8 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 	clean := sanitizeSnapshot(snap)
 	upstream := d.chooseUpstream(ctx, clean)
 	if len(upstream) == 0 {
-		// Last-ditch public fallback — still validated.
-		if working := ValidateResolvers(ctx, []string{"1.1.1.1:53", "8.8.8.8:53"}); len(working) > 0 {
+		// Last-ditch fallback — still validated.
+		if working := ValidateResolvers(ctx, d.fallbackDNS(ctx)); len(working) > 0 {
 			upstream = working
 		}
 	}
@@ -225,7 +256,8 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 	}
 	if joinCSV(upstream) == joinCSV(current) {
 		// New pick happens to match what we already had (e.g. validation
-		// flapped). Don't churn the forwarder.
+		// flapped, or the edited fallback was unreachable). Don't churn
+		// the forwarder.
 		return false, nil
 	}
 
@@ -237,6 +269,50 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 	d.upstream = joinCSV(upstream)
 	d.mu.Unlock()
 	return true, nil
+}
+
+// fallbackDNS returns the resolvers to append as lowest-priority upstream
+// candidates: the user-configured list (settings key "fallback_dns") when
+// set and valid, otherwise the built-in publicFallbackDNS. The stored
+// value is validated at write time (MethodSettingsSet), so the re-parse
+// here should always succeed; the publicFallbackDNS path is a defensive
+// floor in case the row is somehow malformed.
+func (d *handlerDeps) fallbackDNS(ctx context.Context) []string {
+	raw, _ := d.store.GetSetting(ctx, "fallback_dns", "")
+	if servers, bad := parseDNSServers(raw); bad == "" && len(servers) > 0 {
+		return servers
+	}
+	return publicFallbackDNS
+}
+
+// parseDNSServers splits a user-entered fallback-DNS string into validated
+// "host:53" entries. Accepts commas, semicolons, and any whitespace
+// (including newlines) as separators so the UI can offer a multi-line box.
+// Each token must be an IPv4/IPv6 literal, optionally with an explicit
+// :port. Returns the normalized, de-duplicated list; if any non-empty
+// token is not a valid address it returns (nil, thatToken) so callers can
+// reject the input with a precise message. Empty input → (nil, "").
+func parseDNSServers(s string) (servers []string, invalid string) {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	seen := map[string]bool{}
+	for _, f := range fields {
+		host := f
+		if h, _, err := net.SplitHostPort(f); err == nil {
+			host = h
+		}
+		if net.ParseIP(host) == nil {
+			return nil, f
+		}
+		withPort := WithPort53([]string{f})[0]
+		if seen[withPort] {
+			continue
+		}
+		seen[withPort] = true
+		servers = append(servers, withPort)
+	}
+	return servers, ""
 }
 
 func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
