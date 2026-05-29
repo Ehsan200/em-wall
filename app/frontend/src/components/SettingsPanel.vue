@@ -1,11 +1,18 @@
 <script lang="ts" setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import {
   GetSetting, SetSetting,
   SystemDNSStatus, ActivateSystemDNS, DeactivateSystemDNS,
   InstallStatus, Install, Uninstall, WaitForDaemon,
 } from '../../wailsjs/go/main/App';
 import type { ipc, installer } from '../../wailsjs/go/models';
+
+// focusReinstallSeq is bumped by the parent when the user clicks the
+// version-mismatch banner's "Reinstall daemon" button. Each bump scrolls
+// the Reinstall card into view and flashes it so the CTA is obvious.
+const props = defineProps<{
+  focusReinstallSeq?: number
+}>();
 
 const emit = defineEmits<{
   (e: 'changed'): void
@@ -81,6 +88,27 @@ const reinstallSucceeded = ref<boolean>(false);
 const reinstallSecondsLeft = ref<number>(0);
 
 const REINSTALL_MAX_WAIT_MS = 15000;
+
+// Template ref + one-shot flash for deep-linking from the compatibility
+// banner (see focusReinstallSeq prop).
+const reinstallCard = ref<HTMLElement | null>(null);
+const reinstallFlash = ref<boolean>(false);
+let flashTimer: number | undefined;
+
+async function flashReinstall() {
+  await nextTick(); // ensure the card is in the DOM before scrolling
+  reinstallCard.value?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Re-arm the CSS animation: drop the class, let it paint, re-add.
+  reinstallFlash.value = false;
+  await nextTick();
+  reinstallFlash.value = true;
+  if (flashTimer) window.clearTimeout(flashTimer);
+  flashTimer = window.setTimeout(() => { reinstallFlash.value = false; }, 1900);
+}
+
+// Fires on later clicks (component already mounted). The very first click
+// also switches tab → mounts this component, where onMounted handles it.
+watch(() => props.focusReinstallSeq, (seq) => { if (seq) flashReinstall(); });
 
 async function reinstallDaemon() {
   reinstallBusy.value = true;
@@ -237,12 +265,18 @@ onMounted(() => {
   loadSettings();
   refreshStatus();
   loadInstallStatus();
+  // If we were mounted *because* the user clicked the banner (tab switch),
+  // the prop is already set, so the watch above won't fire — handle it here.
+  if (props.focusReinstallSeq) flashReinstall();
   timer = window.setInterval(() => {
     refreshStatus();
     loadInstallStatus();
   }, 1500);
 });
-onUnmounted(() => { if (timer) window.clearInterval(timer); });
+onUnmounted(() => {
+  if (timer) window.clearInterval(timer);
+  if (flashTimer) window.clearTimeout(flashTimer);
+});
 </script>
 
 <template>
@@ -367,7 +401,8 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
       </div>
 
       <!-- Reinstall daemon (recovery) -->
-      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+      <div ref="reinstallCard" :class="{ 'reinstall-flash': reinstallFlash }"
+           class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px">
           <div class="col" style="gap: 4px; flex: 1">
             <strong>Reinstall daemon</strong>

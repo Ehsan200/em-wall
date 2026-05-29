@@ -26,7 +26,40 @@ const packaged = ref<boolean>(true);
 // end. SettingsPanel is the only emitter — it sets true before
 // calling Install() and clears it after WaitForDaemon returns.
 const reinstalling = ref<boolean>(false);
+// Bumped each time the user clicks "Reinstall" in the compatibility
+// banner. SettingsPanel watches it to scroll the Reinstall card into
+// view and flash it — a counter (not a boolean) so repeated clicks
+// re-trigger without needing a reset handshake.
+const focusReinstallSeq = ref<number>(0);
 let timer: number | undefined;
+
+// The "dev" sentinel is what an unversioned build reports (core/version
+// default, used by `wails dev` / `make run-*`). Never flag compatibility
+// against it.
+const DEV_VERSION = 'dev';
+const daemonVersion = computed(() => status.value?.version || '');
+
+// The daemon binary and this app are built from the same core/version in
+// a single `make app-bundle`, so a version mismatch means the on-disk
+// daemon is stale — the app was updated but the daemon was never
+// reinstalled. Such a daemon may be missing IPC methods this app calls
+// (surfacing as "unknown method" errors deeper in the UI). We compare
+// exact strings, and skip the check whenever either side is "dev" (the
+// normal dev loop, or a dev build deliberately pointed at an installed
+// daemon). status is non-null only when the daemon answered Status(), so
+// this is implicitly false while the install gate is up.
+const daemonIncompatible = computed(() => {
+  const app = appVersion.value;
+  const dae = daemonVersion.value;
+  if (!app || !dae) return false;
+  if (app === DEV_VERSION || dae === DEV_VERSION) return false;
+  return app !== dae;
+});
+
+function goToReinstall() {
+  tab.value = 'settings';
+  focusReinstallSeq.value++;
+}
 
 // Show the install gate when:
 //  - this is a packaged build (so install can actually do anything), AND
@@ -71,7 +104,21 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <StatusBar :status="status" :error="error" :appVersion="appVersion" />
+  <StatusBar :status="status" :error="error" :appVersion="appVersion"
+             :incompatible="daemonIncompatible" :daemonVersion="daemonVersion" />
+
+  <div v-if="daemonIncompatible && !reinstalling" class="compat-banner">
+    <div class="col" style="gap: 2px">
+      <strong>Daemon version mismatch — reinstall required</strong>
+      <span style="font-size: 12px; opacity: 0.9">
+        The installed daemon is <code>v{{ daemonVersion }}</code> but this app is
+        <code>v{{ appVersion }}</code>. They must match — a daemon out of step with
+        the app may not understand its requests, so some features will fail until
+        you reinstall it from this app.
+      </span>
+    </div>
+    <button class="primary" @click="goToReinstall">Reinstall daemon</button>
+  </div>
 
   <template v-if="showInstallGate">
     <InstallPanel :status="install" :packaged="packaged" @installed="onInstalled" />
@@ -92,6 +139,7 @@ onUnmounted(() => {
     <ProxiesPanel  v-else-if="tab==='proxies'" />
     <XrayPanel     v-else-if="tab==='xray'" />
     <SettingsPanel v-else
+                   :focusReinstallSeq="focusReinstallSeq"
                    @changed="refresh"
                    @reinstalling="(v: boolean) => reinstalling = v" />
   </template>

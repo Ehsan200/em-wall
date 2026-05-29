@@ -5,6 +5,8 @@ defineProps<{
   status: ipc.StatusResult | null;
   error: string;
   appVersion: string;
+  incompatible?: boolean;
+  daemonVersion?: string;
 }>();
 </script>
 
@@ -21,7 +23,11 @@ defineProps<{
       </div>
       <div><span class="label">Rules</span> {{ status.ruleCount }}</div>
       <div><span class="label">Uptime</span> {{ status.uptime }}</div>
-      <div style="margin-left:auto" class="muted">v{{ appVersion || status.version }}</div>
+      <div v-if="incompatible" style="margin-left:auto" class="tag tag-block"
+           :title="`daemon v${daemonVersion} ≠ app v${appVersion} — reinstall the daemon`">
+        ⚠ daemon v{{ daemonVersion }} ≠ app v{{ appVersion }}
+      </div>
+      <div v-else style="margin-left:auto" class="muted">v{{ appVersion || status.version }}</div>
     </template>
     <template v-else>
       <div><span class="tag tag-block">daemon unreachable</span> <span class="muted">{{ error || 'connecting…' }}</span></div>

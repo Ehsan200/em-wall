@@ -172,3 +172,29 @@ th {
 }
 .toggle input:checked + .track { background: var(--accent); }
 .toggle input:checked + .track::after { transform: translateX(14px); }
+
+/* Daemon/app version-mismatch banner — shown above the tabs when the
+   installed daemon is older than this app. */
+.compat-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 10px 16px 0;
+  padding: 12px 16px;
+  background: rgba(255, 200, 87, 0.12);
+  border: 1px solid rgba(255, 200, 87, 0.4);
+  border-radius: 8px;
+  color: var(--warn);
+}
+.compat-banner code { color: var(--text); }
+.compat-banner button.primary { flex: none; white-space: nowrap; }
+
+/* One-shot flash applied to the Reinstall card when the user arrives
+   from the compatibility banner, so the CTA they clicked is obvious. */
+@keyframes reinstall-flash {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 200, 87, 0.0); border-color: var(--border); }
+  20%  { box-shadow: 0 0 0 3px rgba(255, 200, 87, 0.45); border-color: var(--warn); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 200, 87, 0.0); border-color: var(--border); }
+}
+.reinstall-flash { animation: reinstall-flash 1.8s ease-out; }
