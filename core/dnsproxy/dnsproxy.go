@@ -598,22 +598,31 @@ func NewMultiUpstream(servers []string, timeout time.Duration) *MultiUpstream {
 	}
 }
 
-// Forward sends msg to each upstream in turn and returns the best answer.
-// A definitive reply (NOERROR or NXDOMAIN) is returned as soon as an
-// upstream gives one. SERVFAIL/REFUSED and transport errors are treated as
-// SOFT failures: we move on to the next upstream, and if every upstream
-// soft-fails we retry the whole list once. Those failures are usually
-// transient — a cold recursive cache or a slow path to the authoritative
-// servers (e.g. a CDN on distant nameservers) — and an upstream resolver's
-// own cache would normally hide them. Without this, the first upstream's
-// momentary SERVFAIL was returned verbatim, so one flaky resolver (or one
-// unlucky moment) surfaced to the client as a hard failure even when a
-// retry or the second upstream would have answered.
+// Forward sends msg to each upstream and returns the BEST answer by
+// outcome rank — not the first reply. A NOERROR-with-answers from any
+// upstream beats an NXDOMAIN/NODATA from another, which beats
+// SERVFAIL/REFUSED/transport errors.
+//
+// Ranking (rather than first-reply-wins) is what makes split / tampered
+// DNS resolve correctly. A foreign public resolver returns NXDOMAIN for a
+// geo-split or country-code name — e.g. an .ir host whose authoritative
+// servers only answer in-country, or an on-path box that injects NXDOMAIN —
+// while the ISP/local resolver (also in our upstream list) resolves it. The
+// old code treated the first NXDOMAIN as definitive and stopped, so the
+// client got "no answer" even though a resolver that knew the name was one
+// entry away. Ranking lets that resolver win regardless of upstream order.
+//
+// We stop the moment any upstream gives a positive (has-answers) reply.
+// SERVFAIL/REFUSED and transport errors are SOFT: if we never get better
+// than a soft failure we retry the whole list once (cold recursive cache or
+// a slow path to distant authoritative servers — usually transient). A
+// definitive negative (NXDOMAIN/NODATA) is returned without a second pass.
 func (m *MultiUpstream) Forward(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	var best *dns.Msg
+	bestRank := rankNone
 	var lastErr error
 
-	attempt := func() {
+	attempt := func() (gotPositive bool) {
 		for _, srv := range m.Servers {
 			resp, err := m.exchange(ctx, srv, msg)
 			if err != nil {
@@ -623,20 +632,25 @@ func (m *MultiUpstream) Forward(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 			if resp == nil {
 				continue
 			}
-			if resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError {
-				best = resp // definitive — stop here
-				return
-			}
-			if best == nil {
-				best = resp // keep the soft failure as a fallback
+			if r := rankResponse(resp); r > bestRank {
+				best, bestRank = resp, r
+				if r == rankPositive {
+					return true // a real answer — nothing outranks it
+				}
 			}
 		}
+		return false
 	}
 
-	attempt()
-	if best == nil || (best.Rcode != dns.RcodeSuccess && best.Rcode != dns.RcodeNameError) {
-		// Everything errored or soft-failed; give it one more pass.
-		attempt()
+	if attempt() {
+		return best, nil
+	}
+	// Retry only when we have nothing better than a soft failure; a
+	// definitive NXDOMAIN/NODATA won't improve by asking again.
+	if bestRank <= rankSoftFail {
+		if attempt() {
+			return best, nil
+		}
 	}
 	if best != nil {
 		return best, nil
@@ -645,6 +659,30 @@ func (m *MultiUpstream) Forward(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		lastErr = fmt.Errorf("dnsproxy: no upstream answered")
 	}
 	return nil, lastErr
+}
+
+// Response outcome ranks, worst to best, used by Forward to choose the most
+// useful reply across upstreams instead of the first one to arrive.
+const (
+	rankNone     = iota // no usable response (transport error / nil)
+	rankSoftFail        // SERVFAIL / REFUSED / other server error
+	rankNXDomain        // authoritative "name does not exist"
+	rankNoData          // NOERROR with no answers ("exists, no such record")
+	rankPositive        // NOERROR with >=1 answer record
+)
+
+func rankResponse(resp *dns.Msg) int {
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		if len(resp.Answer) > 0 {
+			return rankPositive
+		}
+		return rankNoData
+	case dns.RcodeNameError:
+		return rankNXDomain
+	default:
+		return rankSoftFail
+	}
 }
 
 // exchange queries srv over UDP, retrying over TCP if the reply was

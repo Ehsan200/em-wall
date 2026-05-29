@@ -29,6 +29,12 @@ func servfailHandler(w dns.ResponseWriter, r *dns.Msg) {
 	_ = w.WriteMsg(m)
 }
 
+func nxdomainHandler(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeNameError)
+	_ = w.WriteMsg(m)
+}
+
 func aHandler(ip string) dns.HandlerFunc {
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
@@ -59,19 +65,19 @@ func answerIP(resp *dns.Msg) string {
 func TestMultiUpstream_FailsOverPastServfail(t *testing.T) {
 	bad, stopBad := startMockResolver(t, servfailHandler)
 	defer stopBad()
-	good, stopGood := startMockResolver(t, aHandler("1.2.3.4"))
+	good, stopGood := startMockResolver(t, aHandler("192.0.2.1"))
 	defer stopGood()
 
 	mu := NewMultiUpstream([]string{bad, good}, 2*time.Second)
-	resp, err := mu.Forward(context.Background(), aQuery("example.com"))
+	resp, err := mu.Forward(context.Background(), aQuery("service.test"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	if got := answerIP(resp); got != "1.2.3.4" {
-		t.Errorf("answer = %q, want 1.2.3.4", got)
+	if got := answerIP(resp); got != "192.0.2.1" {
+		t.Errorf("answer = %q, want 192.0.2.1", got)
 	}
 }
 
@@ -84,17 +90,17 @@ func TestMultiUpstream_RetriesTransientServfail(t *testing.T) {
 			servfailHandler(w, r)
 			return
 		}
-		aHandler("5.6.7.8")(w, r)
+		aHandler("192.0.2.2")(w, r)
 	})
 	defer stop()
 
 	mu := NewMultiUpstream([]string{flaky}, 2*time.Second)
-	resp, err := mu.Forward(context.Background(), aQuery("example.com"))
+	resp, err := mu.Forward(context.Background(), aQuery("service.test"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := answerIP(resp); got != "5.6.7.8" {
-		t.Errorf("answer = %q, want 5.6.7.8 (retry should have recovered)", got)
+	if got := answerIP(resp); got != "192.0.2.2" {
+		t.Errorf("answer = %q, want 192.0.2.2 (retry should have recovered)", got)
 	}
 }
 
@@ -107,11 +113,52 @@ func TestMultiUpstream_AllServfailReturnsServfail(t *testing.T) {
 	defer stop2()
 
 	mu := NewMultiUpstream([]string{s1, s2}, 2*time.Second)
-	resp, err := mu.Forward(context.Background(), aQuery("example.com"))
+	resp, err := mu.Forward(context.Background(), aQuery("service.test"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if resp.Rcode != dns.RcodeServerFailure {
 		t.Errorf("rcode = %s, want SERVFAIL", dns.RcodeToString[resp.Rcode])
+	}
+}
+
+// A public resolver may NXDOMAIN a geo-split / on-path-tampered name (e.g. a
+// country-code host that only resolves in-region) while another upstream
+// resolves it. The real answer must win even when the NXDOMAIN upstream is
+// listed FIRST — NXDOMAIN with no answer section though the name exists.
+// Before the rank-based fix, the first NXDOMAIN was treated as definitive.
+func TestMultiUpstream_PositiveBeatsNXDomain(t *testing.T) {
+	nx, stopNX := startMockResolver(t, nxdomainHandler)
+	defer stopNX()
+	good, stopGood := startMockResolver(t, aHandler("192.0.2.9"))
+	defer stopGood()
+
+	mu := NewMultiUpstream([]string{nx, good}, 2*time.Second)
+	resp, err := mu.Forward(context.Background(), aQuery("geo-split.test"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if got := answerIP(resp); got != "192.0.2.9" {
+		t.Errorf("answer = %q, want 192.0.2.9 (a real answer must beat NXDOMAIN)", got)
+	}
+}
+
+// When every upstream agrees the name does not exist, return NXDOMAIN.
+func TestMultiUpstream_AllNXDomainReturnsNXDomain(t *testing.T) {
+	s1, stop1 := startMockResolver(t, nxdomainHandler)
+	defer stop1()
+	s2, stop2 := startMockResolver(t, nxdomainHandler)
+	defer stop2()
+
+	mu := NewMultiUpstream([]string{s1, s2}, 2*time.Second)
+	resp, err := mu.Forward(context.Background(), aQuery("nonexistent.invalid"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
 	}
 }
