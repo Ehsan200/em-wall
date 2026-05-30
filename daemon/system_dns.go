@@ -15,8 +15,11 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,13 +40,17 @@ func (execRunner) Run(name string, args ...string) ([]byte, error) {
 // SystemDNS owns the wiring between macOS network services and the daemon.
 type SystemDNS struct {
 	r Runner
+	// resolverDir is where per-domain split-DNS shadow files are written
+	// (/etc/resolver in production). Overridable so tests don't touch the
+	// real system path or need root.
+	resolverDir string
 }
 
 func NewSystemDNS(r Runner) *SystemDNS {
 	if r == nil {
 		r = execRunner{}
 	}
-	return &SystemDNS{r: r}
+	return &SystemDNS{r: r, resolverDir: "/etc/resolver"}
 }
 
 // ListServices returns enabled network service names as they appear in
@@ -365,6 +372,468 @@ func WithPort53(ips []string) []string {
 		out[i] = net.JoinHostPort(ip, "53")
 	}
 	return out
+}
+
+// --- State/global DNS layer (SCDynamicStore via scutil) ------------------
+//
+// networksetup writes the *Setup* (persistent preferences) layer. When a
+// full-tunnel VPN (Cisco AnyConnect / Secure Client with tunnel-all-dns) is
+// connected it makes its utun the primary service and configd publishes
+// State:/Network/Global/DNS pointing at the VPN resolver — and that global
+// primary outranks anything in the per-service Setup layer. So to win
+// resolver #1 while the tunnel is up we ALSO assert 127.0.0.1 at the State/
+// global layer here.
+//
+// We shell out to `scutil` with a here-doc (open / d.init / d.add / set)
+// routed through Runner rather than linking SystemConfiguration via cgo, so
+// unit tests stay root-free and the daemon keeps a single Runner seam for
+// every system mutation. AnyConnect re-clobbers global DNS on (re)connect,
+// so the daemon's network watcher re-asserts this on its tick.
+const globalDNSKey = "State:/Network/Global/DNS"
+
+// globalDNSSetScript builds the scutil here-doc that overrides the global
+// primary resolver list. servers are bare IPs (port stripped — the State
+// layer carries addresses, not host:port).
+func globalDNSSetScript(servers []string) string {
+	var b strings.Builder
+	b.WriteString("open\n")
+	b.WriteString("d.init\n")
+	b.WriteString("d.add ServerAddresses *")
+	for _, ip := range servers {
+		b.WriteString(" ")
+		b.WriteString(stripPort(ip))
+	}
+	b.WriteString("\n")
+	b.WriteString("set " + globalDNSKey + "\n")
+	b.WriteString("quit\n")
+	return "/usr/sbin/scutil <<'EOF'\n" + b.String() + "EOF\n"
+}
+
+func globalDNSRemoveScript() string {
+	return "/usr/sbin/scutil <<'EOF'\nopen\nremove " + globalDNSKey + "\nquit\nEOF\n"
+}
+
+func globalDNSShowScript() string {
+	return "/usr/sbin/scutil <<'EOF'\nshow " + globalDNSKey + "\nquit\nEOF\n"
+}
+
+// SetGlobalDNS asserts servers as the global primary resolver list at the
+// State layer. Empty servers is treated as RemoveGlobalDNS so we never
+// publish an empty (DNS-dead) global override.
+func (s *SystemDNS) SetGlobalDNS(servers []string) error {
+	if len(servers) == 0 {
+		return s.RemoveGlobalDNS()
+	}
+	out, err := s.r.Run("sh", "-c", globalDNSSetScript(servers))
+	if err != nil {
+		return fmt.Errorf("scutil set global DNS: %w (%s)", err, string(out))
+	}
+	return nil
+}
+
+// RemoveGlobalDNS deletes our State-layer override so configd recomputes the
+// global primary from the live network state (the per-service Setup layer or
+// the VPN's published resolver). Idempotent: removing a key that isn't there
+// is not an error we care about.
+func (s *SystemDNS) RemoveGlobalDNS() error {
+	out, err := s.r.Run("sh", "-c", globalDNSRemoveScript())
+	if err != nil {
+		return fmt.Errorf("scutil remove global DNS: %w (%s)", err, string(out))
+	}
+	return nil
+}
+
+// GlobalDNS returns the current State:/Network/Global/DNS ServerAddresses, in
+// order (resolver #1 first). Returns nil when the key is absent.
+func (s *SystemDNS) GlobalDNS() ([]string, error) {
+	out, err := s.r.Run("sh", "-c", globalDNSShowScript())
+	if err != nil {
+		return nil, fmt.Errorf("scutil show global DNS: %w (%s)", err, string(out))
+	}
+	return parseGlobalDNS(string(out)), nil
+}
+
+// parseGlobalDNS extracts the ordered ServerAddresses array from the output
+// of `scutil` `show State:/Network/Global/DNS`. "No such key" → nil.
+func parseGlobalDNS(out string) []string {
+	if strings.Contains(out, "No such key") {
+		return nil
+	}
+	entryRe := regexp.MustCompile(`^\s*\d+\s*:\s*(\S+)`)
+	var servers []string
+	inArray := false
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := sc.Text()
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ServerAddresses") && strings.Contains(trimmed, "<array>") {
+			inArray = true
+			continue
+		}
+		if !inArray {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "}") {
+			break
+		}
+		if m := entryRe.FindStringSubmatch(line); m != nil {
+			servers = append(servers, m[1])
+		}
+	}
+	return servers
+}
+
+// GlobalPrimaryIsLoopback reports whether the global primary resolver (#1) is
+// 127.0.0.1 — i.e. em-wall is currently winning resolver priority. Used by
+// the watcher to decide whether to re-assert after the VPN clobbers it.
+func (s *SystemDNS) GlobalPrimaryIsLoopback() (bool, error) {
+	servers, err := s.GlobalDNS()
+	if err != nil {
+		return false, err
+	}
+	return len(servers) > 0 && isLoopback(stripPort(servers[0])), nil
+}
+
+// resolverView summarizes `scutil --dns` from em-wall's perspective: who
+// actually answers a generic name, and which domains the VPN has scoped away
+// from us. Setting State:/Network/Global/DNS only controls the *default*
+// resolver; a full-tunnel VPN like AnyConnect additionally installs
+// Supplemental resolvers scoped to specific domains (e.g. corp.example.com)
+// that win for those names regardless of the global primary — so those names
+// bypass em-wall entirely. This view exposes that gap honestly instead of the
+// State-key check claiming a clean win.
+type resolverView struct {
+	DefaultServers    []string // nameservers of the catch-all default resolver, highest priority first
+	DefaultIsLoopback bool     // the default resolver is 127.0.0.1 → em-wall is in the path for generic names
+	VPNScopedDomains  []string // every domain a non-loopback tunnel resolver is scoped to (the VPN's split-DNS set)
+	BypassDomains     []string // VPN-scoped domains a loopback resolver does NOT yet out-order → still skip em-wall
+	ShadowedDomains   []string // VPN-scoped domains our loopback shadow out-orders → now captured
+	MinVPNOrder       int      // lowest scutil `order` among VPN-scoped resolvers (0 if none) — our shadow must beat it
+}
+
+// ResolverView parses `scutil --dns` into a resolverView. See parseResolverView.
+func (s *SystemDNS) ResolverView() (resolverView, error) {
+	out, err := s.r.Run("scutil", "--dns")
+	if err != nil {
+		return resolverView{}, fmt.Errorf("scutil --dns: %w (%s)", err, string(out))
+	}
+	return parseResolverView(string(out)), nil
+}
+
+// parseResolverView interprets the main "DNS configuration" section of
+// `scutil --dns` (resolvers are listed highest-priority first; the
+// "(for scoped queries)" section is per-interface scoping we ignore here).
+//
+//   - The DEFAULT resolver is the first block with no domain restriction and
+//     not mDNS — that's what answers an arbitrary public name. If its first
+//     nameserver is loopback, em-wall is winning the default path.
+//   - BYPASS domains are domain-scoped blocks bound to a tunnel interface
+//     whose resolver isn't us — those names (the VPN's split-DNS) reach the
+//     VPN directly, never passing through em-wall's rule engine.
+func parseResolverView(out string) resolverView {
+	if i := strings.Index(out, "DNS configuration (for scoped queries)"); i >= 0 {
+		out = out[:i]
+	}
+	nsRe := regexp.MustCompile(`nameserver\[\d+\]\s*:\s*(\S+)`)
+	domRe := regexp.MustCompile(`domain(?:\[\d+\])?\s*:\s*(\S+)`)
+	ifRe := regexp.MustCompile(`if_index\s*:\s*\d+\s*\((\S+)\)`)
+	orderRe := regexp.MustCompile(`order\s*:\s*(\d+)`)
+
+	const noOrder = int(^uint(0) >> 1) // max int — "no order line" sorts last
+
+	type block struct {
+		servers []string
+		domains []string
+		iface   string
+		mdns    bool
+		order   int
+	}
+	var blocks []block
+	var cur *block
+	flush := func() {
+		if cur != nil {
+			blocks = append(blocks, *cur)
+			cur = nil
+		}
+	}
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := sc.Text()
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "resolver #"):
+			flush()
+			cur = &block{order: noOrder}
+		case cur == nil:
+			// before the first resolver block — skip
+		case strings.HasPrefix(t, "nameserver["):
+			if m := nsRe.FindStringSubmatch(line); m != nil {
+				cur.servers = append(cur.servers, m[1])
+			}
+		case strings.HasPrefix(t, "domain") || strings.HasPrefix(t, "search domain"):
+			if m := domRe.FindStringSubmatch(line); m != nil {
+				cur.domains = append(cur.domains, m[1])
+			}
+		case strings.HasPrefix(t, "if_index"):
+			if m := ifRe.FindStringSubmatch(line); m != nil {
+				cur.iface = m[1]
+			}
+		case strings.HasPrefix(t, "order"):
+			if m := orderRe.FindStringSubmatch(line); m != nil {
+				if n, err := strconv.Atoi(m[1]); err == nil {
+					cur.order = n
+				}
+			}
+		case strings.HasPrefix(t, "options") && strings.Contains(t, "mdns"):
+			cur.mdns = true
+		}
+	}
+	flush()
+
+	var view resolverView
+	// Default resolver: first non-domain, non-mDNS block (listing order == priority).
+	for _, b := range blocks {
+		if b.mdns || len(b.domains) != 0 || len(b.servers) == 0 {
+			continue
+		}
+		view.DefaultServers = b.servers
+		view.DefaultIsLoopback = isLoopback(stripPort(b.servers[0]))
+		break
+	}
+	// Per domain, track the best (lowest) order of a loopback resolver scoped
+	// to it (our shadow) vs a VPN tunnel resolver. Whoever has the lower order
+	// actually answers that domain — that's what decides captured vs bypass.
+	type dom struct{ vpnOrder, loopOrder int }
+	doms := map[string]*dom{}
+	var vpnSeen []string
+	seen := map[string]bool{}
+	get := func(d string) *dom {
+		if doms[d] == nil {
+			doms[d] = &dom{vpnOrder: noOrder, loopOrder: noOrder}
+		}
+		return doms[d]
+	}
+	for _, b := range blocks {
+		if b.mdns || len(b.domains) == 0 {
+			continue
+		}
+		lb := len(b.servers) > 0 && isLoopback(stripPort(b.servers[0]))
+		for _, d := range b.domains {
+			di := get(d)
+			if lb {
+				if b.order < di.loopOrder {
+					di.loopOrder = b.order
+				}
+			} else if isTunnelIface(b.iface) {
+				if b.order < di.vpnOrder {
+					di.vpnOrder = b.order
+				}
+				if !seen[d] {
+					seen[d] = true
+					vpnSeen = append(vpnSeen, d)
+				}
+			}
+		}
+	}
+	view.MinVPNOrder = noOrder
+	for _, d := range vpnSeen {
+		di := doms[d]
+		view.VPNScopedDomains = append(view.VPNScopedDomains, d)
+		// Captured only when our loopback shadow actually out-orders the VPN.
+		if di.loopOrder < di.vpnOrder {
+			view.ShadowedDomains = append(view.ShadowedDomains, d)
+		} else {
+			view.BypassDomains = append(view.BypassDomains, d)
+		}
+		if di.vpnOrder < view.MinVPNOrder {
+			view.MinVPNOrder = di.vpnOrder
+		}
+	}
+	if view.MinVPNOrder == noOrder {
+		view.MinVPNOrder = 0 // no VPN-scoped resolver seen
+	}
+	return view
+}
+
+// --- Split-DNS shadowing (per-domain /etc/resolver files) ------------------
+//
+// A full-tunnel VPN installs Supplemental resolvers scoped to its internal
+// domains (e.g. corp.example), and macOS routes those names to the resolver
+// with the lowest `order` for the longest matching domain — so they bypass
+// em-wall even when 127.0.0.1 is the global primary. To capture them we write
+// a per-domain /etc/resolver/<domain> file pointing at 127.0.0.1 with a
+// `search_order` LOWER than the VPN's, so we win the tie for those exact
+// names. em-wall then sees the query, applies rules, and forwards "allow" to
+// the VPN's resolver (chooseUpstream ranks the tunnel resolver first), so
+// internal names still resolve.
+//
+// Why /etc/resolver and not SCDynamicStore: scutil writes SupplementalMatch
+// Orders as CFStrings, which configd ignores — it then assigns our shadow a
+// HIGHER (losing) order. /etc/resolver's `search_order` is parsed by libresolv
+// as a real number and honored, so we can deterministically out-order the VPN.
+//
+// resolverFileMarker tags files we created so we only ever remove/overwrite
+// our own — never a user's hand-written /etc/resolver entry.
+const resolverFileMarker = "# em-wall: split-DNS shadow (managed; safe to delete)"
+
+// defaultSupplementalOrder is used when the VPN's order can't be determined.
+// Lower beats higher; only compared against resolvers for the SAME domain.
+const defaultSupplementalOrder = 100
+
+// validDNSLabelDomain reports whether s is a safe domain to use as a resolver
+// filename — letters/digits/dot/hyphen only. Domains come from parsing scutil
+// output, but we validate defensively against path traversal / junk.
+var validDNSLabelDomain = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+
+// SetSupplementalResolver makes em-wall the resolver for each domain by writing
+// /etc/resolver/<domain> → 127.0.0.1 with search_order `order` (so it must be
+// below the VPN's order to win). Stale shadow files for domains no longer in
+// the set are removed. A pre-existing file we didn't create is left untouched.
+// An empty/all-invalid set tears every shadow down.
+func (s *SystemDNS) SetSupplementalResolver(domains []string, order int) error {
+	if order < 1 {
+		order = defaultSupplementalOrder
+	}
+	want := map[string]bool{}
+	var clean []string
+	for _, d := range domains {
+		d = strings.TrimSuffix(strings.TrimSpace(d), ".")
+		if d == "" || want[d] || !validDNSLabelDomain.MatchString(d) {
+			continue
+		}
+		want[d] = true
+		clean = append(clean, d)
+	}
+	// Remove our stale shadow files (ours, but no longer wanted).
+	if err := s.pruneResolverFiles(want); err != nil {
+		return err
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(s.resolverDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", s.resolverDir, err)
+	}
+	content := fmt.Sprintf("%s\nnameserver 127.0.0.1\nsearch_order %d\n", resolverFileMarker, order)
+	var firstErr error
+	for _, d := range clean {
+		path := filepath.Join(s.resolverDir, d)
+		// Never clobber a file we didn't create.
+		if existing, err := os.ReadFile(path); err == nil && !isOurResolverFile(existing) {
+			continue
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("write %s: %w", path, err)
+		}
+	}
+	return firstErr
+}
+
+// RemoveSupplementalResolver deletes every shadow file em-wall created.
+// Idempotent and leaves user-authored /etc/resolver files alone.
+func (s *SystemDNS) RemoveSupplementalResolver() error {
+	return s.pruneResolverFiles(nil)
+}
+
+// pruneResolverFiles removes each em-wall-managed file in resolverDir whose
+// domain is not in keep. A nil/empty keep removes all of ours.
+func (s *SystemDNS) pruneResolverFiles(keep map[string]bool) error {
+	entries, err := os.ReadDir(s.resolverDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", s.resolverDir, err)
+	}
+	var firstErr error
+	for _, e := range entries {
+		if e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		path := filepath.Join(s.resolverDir, e.Name())
+		body, err := os.ReadFile(path)
+		if err != nil || !isOurResolverFile(body) {
+			continue // unreadable or not ours — leave it
+		}
+		if err := os.Remove(path); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("remove %s: %w", path, err)
+		}
+	}
+	return firstErr
+}
+
+func isOurResolverFile(body []byte) bool {
+	return strings.HasPrefix(string(body), resolverFileMarker)
+}
+
+// TunnelResolvers returns the resolvers bound to a tunnel interface
+// (utun/ipsec/…) in `scutil --dns`. This is the VPN's own resolver — the one
+// that can answer internal/corporate names — isolated from non-tunnel DHCP
+// DNS (AllDHCPDNS) and public resolvers, so the daemon can make it the
+// deterministic fall-through upstream while AnyConnect is connected.
+//
+// exclude lists interface names to ignore — em-wall opens its OWN utun for
+// proxy routing, and although that tunnel pushes no DNS, excluding it makes
+// sure the daemon can never mistake its own interface for a VPN's resolver.
+func (s *SystemDNS) TunnelResolvers(exclude ...string) ([]string, error) {
+	out, err := s.r.Run("scutil", "--dns")
+	if err != nil {
+		return nil, fmt.Errorf("scutil --dns: %w (%s)", err, string(out))
+	}
+	skip := make(map[string]bool, len(exclude))
+	for _, e := range exclude {
+		if e != "" {
+			skip[e] = true
+		}
+	}
+	return parseTunnelResolvers(string(out), skip), nil
+}
+
+// parseTunnelResolvers walks the resolver blocks of `scutil --dns` output and
+// collects, de-duplicated and in order, every nameserver that sits in a block
+// whose if_index names a tunnel interface that isn't in skip. Loopback
+// entries are skipped.
+func parseTunnelResolvers(out string, skip map[string]bool) []string {
+	nsRe := regexp.MustCompile(`nameserver\[\d+\]\s*:\s*(\S+)`)
+	ifRe := regexp.MustCompile(`if_index\s*:\s*\d+\s*\((\S+)\)`)
+
+	var blockServers []string
+	blockIface := ""
+	seen := map[string]bool{}
+	var out2 []string
+
+	flush := func() {
+		if isTunnelIface(blockIface) && !skip[blockIface] {
+			for _, ip := range blockServers {
+				if isLoopback(ip) || seen[ip] {
+					continue
+				}
+				seen[ip] = true
+				out2 = append(out2, ip)
+			}
+		}
+		blockServers = nil
+		blockIface = ""
+	}
+
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := sc.Text()
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "resolver #") {
+			flush()
+			continue
+		}
+		if m := nsRe.FindStringSubmatch(line); m != nil {
+			blockServers = append(blockServers, m[1])
+			continue
+		}
+		if m := ifRe.FindStringSubmatch(line); m != nil {
+			blockIface = m[1]
+		}
+	}
+	flush()
+	return out2
 }
 
 func isLoopback(ip string) bool {

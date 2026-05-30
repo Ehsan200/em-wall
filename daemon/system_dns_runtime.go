@@ -7,12 +7,112 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/ehsan/em-wall/core/dnsproxy"
 	"github.com/ehsan/em-wall/core/ipc"
 )
+
+// settingVPNDNSPriority gates the "win DNS priority against a full-tunnel
+// VPN" behaviour: asserting 127.0.0.1 at the State/global layer and making
+// the VPN's own resolver the primary fall-through upstream. Default OFF —
+// the plain per-service hijack is enough without a VPN, and the State-layer
+// override is a heavier, AnyConnect-specific hammer the user opts into.
+const settingVPNDNSPriority = "vpn_dns_priority"
+
+// vpnDNSPriority reports whether the user enabled VPN DNS-priority mode.
+func (d *handlerDeps) vpnDNSPriority(ctx context.Context) bool {
+	v, _ := d.store.GetSetting(ctx, settingVPNDNSPriority, "false")
+	return v == "true"
+}
+
+// assertGlobalDNSOverride is the ONE place that writes the State-layer
+// 127.0.0.1 global-primary override, and it refuses to do so unless BOTH:
+//   - the user opted into VPN DNS-priority mode, and
+//   - the per-service system DNS hijack is actually active.
+//
+// This is the daemon-level guarantee that we never make ourselves resolver #1
+// while the hijack is off. Without the hijack we aren't in the query path at
+// all, so a 127.0.0.1 global primary would point every lookup at a daemon
+// that isn't claiming queries — the exact "broken DNS" failure the hijack is
+// careful to avoid. Routing every assertion (activate, watcher reassert, the
+// settings toggle) through here means no caller can bypass the check.
+//
+// Returns set=true only when it actually wrote the override.
+func (d *handlerDeps) assertGlobalDNSOverride(ctx context.Context) (set bool, err error) {
+	if !d.vpnDNSPriority(ctx) {
+		return false, nil
+	}
+	active, err := d.sysDNS.IsActive()
+	if err != nil {
+		return false, err
+	}
+	if !active {
+		return false, nil
+	}
+	if err := d.sysDNS.SetGlobalDNS([]string{"127.0.0.1"}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// reconcileSplitDNSShadow installs (or removes) the per-domain Supplemental
+// resolvers that capture a VPN's split-DNS domains for em-wall. Subject to the
+// same guarantee as the global override: it only ever shadows domains to
+// 127.0.0.1 when the user opted in AND the hijack is active. The desired set
+// is the VPN's tunnel-scoped domains read live from scutil --dns (it changes
+// per session); feature-off or hijack-off collapses the desired set to empty,
+// which removes the shadow.
+//
+// Idempotent and cheap to call every tick: it compares the desired set against
+// the last-applied set (d.splitShadow) and only shells out to scutil on a
+// change. Returns changed=true only when it actually wrote or cleared.
+func (d *handlerDeps) reconcileSplitDNSShadow(ctx context.Context) (bool, error) {
+	var desired []string
+	order := 0
+	if d.vpnDNSPriority(ctx) {
+		if active, _ := d.sysDNS.IsActive(); active {
+			view, err := d.sysDNS.ResolverView()
+			if err != nil {
+				return false, err
+			}
+			desired = view.VPNScopedDomains
+			// Beat the VPN: one below its lowest order for these domains.
+			if view.MinVPNOrder > 1 {
+				order = view.MinVPNOrder - 1
+			}
+		}
+	}
+
+	// Key on the domain set AND the chosen order so a per-session order change
+	// (VPN reconnects at a different order) re-applies even if domains match.
+	key := fmt.Sprintf("%d|%s", order, joinCSV(sortedCopy(desired)))
+	d.mu.Lock()
+	unchanged := key == d.splitShadow
+	d.mu.Unlock()
+	if unchanged {
+		return false, nil
+	}
+
+	if err := d.sysDNS.SetSupplementalResolver(desired, order); err != nil {
+		return false, err
+	}
+	d.mu.Lock()
+	d.splitShadow = key
+	d.mu.Unlock()
+	flushDNSCache()
+	return true, nil
+}
+
+// sortedCopy returns a sorted copy of s without mutating the input, used to
+// canonicalize the shadow domain set for stable equality comparison.
+func sortedCopy(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
+}
 
 // systemDNSStatus snapshots the current per-service DNS, what scutil
 // sees, what we're currently using as upstream, and whether we're
@@ -21,14 +121,27 @@ func (d *handlerDeps) systemDNSStatus() ipc.SystemDNSStatus {
 	active, _ := d.sysDNS.IsActive()
 	resolvers, _ := d.sysDNS.DetectResolvers()
 	per, _ := d.sysDNS.CaptureAll()
+	tunnel, _ := d.sysDNS.TunnelResolvers(d.proxyTun)
+	global, _ := d.sysDNS.GlobalDNS()
+	view, _ := d.sysDNS.ResolverView()
 	d.mu.Lock()
 	upstream := splitCSV(d.upstream)
 	d.mu.Unlock()
 	return ipc.SystemDNSStatus{
-		Active:            active,
-		Upstream:          upstream,
-		DetectedResolvers: resolvers,
-		PerService:        per,
+		Active:             active,
+		Upstream:           upstream,
+		DetectedResolvers:  resolvers,
+		PerService:         per,
+		VPNPriorityEnabled: d.vpnDNSPriority(context.Background()),
+		VPNDetected:        len(tunnel) > 0,
+		TunnelDNS:          tunnel,
+		GlobalPrimary:      global,
+		// WinningPrimary comes from the live `scutil --dns` default resolver,
+		// not the State key — the State key can read 127.0.0.1 while a VPN's
+		// Supplemental resolvers still steal specific domains (BypassDomains).
+		WinningPrimary:  view.DefaultIsLoopback,
+		BypassDomains:   view.BypassDomains,
+		ShadowedDomains: view.ShadowedDomains,
 	}
 }
 
@@ -97,6 +210,22 @@ func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
 	if err := d.sysDNS.ApplyAll([]string{"127.0.0.1"}); err != nil {
 		return fmt.Errorf("apply 127.0.0.1: %w", err)
 	}
+	// Also assert 127.0.0.1 at the State/global layer so we win resolver #1
+	// even when a full-tunnel VPN publishes its own global primary that
+	// outranks the per-service Setup layer above. Gated by
+	// assertGlobalDNSOverride (opt-in AND hijack active — true here, we just
+	// ApplyAll'd 127.0.0.1). Best-effort: the Setup layer alone is enough
+	// without a VPN, so a scutil hiccup here must not fail an otherwise-good
+	// activation. The watcher re-asserts on its tick.
+	if _, err := d.assertGlobalDNSOverride(ctx); err != nil {
+		log.Printf("em-walld: set global DNS override failed (continuing): %v", err)
+	}
+	// Capture the VPN's split-DNS domains too, so internal names hit em-wall
+	// instead of going straight to the VPN resolver. Best-effort and gated
+	// inside the helper (opt-in + active). The watcher reconciles per session.
+	if _, err := d.reconcileSplitDNSShadow(ctx); err != nil {
+		log.Printf("em-walld: split-DNS shadow failed (continuing): %v", err)
+	}
 	_ = d.store.SetSetting(ctx, "system_dns_active", "true")
 	flushDNSCache()
 	return nil
@@ -107,6 +236,13 @@ func (d *handlerDeps) activateSystemDNS(ctx context.Context) error {
 // actually answered.
 //
 // Sources, in priority order (lower index wins ties after validation):
+//  0. TunnelResolvers — the resolver bound to a utun/ipsec interface, i.e.
+//     the VPN's own DNS. Placed FIRST so that while AnyConnect (or any
+//     full-tunnel VPN) is connected, "allow" fall-through deterministically
+//     reaches the VPN resolver and internal/corporate + split-horizon names
+//     resolve correctly. MultiUpstream.Forward returns on the first POSITIVE
+//     reply in order, so a public resolver can't shadow an internal name
+//     with NXDOMAIN or a wrong split-horizon answer.
 //  1. Live per-service manual values from snap (excluding loopback).
 //  2. Saved pre-activation backup.
 //  3. AllDHCPDNS — every non-tunnel hardware port. This is the line
@@ -133,6 +269,15 @@ func (d *handlerDeps) chooseUpstream(ctx context.Context, snap map[string][]stri
 		}
 	}
 
+	// VPN DNS-priority mode (opt-in): put the VPN's tunnel-bound resolver
+	// first so "allow" fall-through deterministically reaches it. Off by
+	// default — without it the tunnel resolver still enters the candidate
+	// pool below via DetectResolvers, just not forced to the front.
+	if d.vpnDNSPriority(ctx) {
+		if tun, err := d.sysDNS.TunnelResolvers(d.proxyTun); err == nil {
+			add(tun...)
+		}
+	}
 	for _, ips := range snap {
 		add(ips...)
 	}
@@ -212,6 +357,19 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 	current := splitCSV(d.upstream)
 	d.mu.Unlock()
 
+	// VPN-session re-detection (opt-in): the tunnel resolver's IP is dynamic
+	// per AnyConnect session, so a still-reachable old upstream isn't enough
+	// — if a tunnel resolver is present and it isn't already our primary, we
+	// must repick so internal/split-horizon names keep resolving against the
+	// current VPN DNS. Cheap: one validated query for the tunnel IP.
+	if d.vpnDNSPriority(ctx) {
+		if tun := d.tunnelPrimary(ctx); tun != "" {
+			if len(current) == 0 || current[0] != tun {
+				return d.repickUpstream(ctx)
+			}
+		}
+	}
+
 	// Cheap health check: if any current upstream still answers, leave
 	// it alone. ValidateResolvers runs them in parallel with a 1.5s
 	// timeout each, so this finishes well within the 10s tick.
@@ -224,6 +382,48 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 	// Current upstream is dead — typically because the user moved
 	// networks. Re-pick from sources that read fresh state.
 	return d.repickUpstream(ctx)
+}
+
+// tunnelPrimary returns the first VPN tunnel resolver (utun/ipsec-bound,
+// :53-suffixed) that answers a live query, or "" when no tunnel resolver is
+// present or none validates. This is the resolver chooseUpstream places at
+// the head of the upstream list, so comparing it against current[0] tells the
+// watcher whether the VPN's per-session DNS has changed out from under us.
+func (d *handlerDeps) tunnelPrimary(ctx context.Context) string {
+	tun, err := d.sysDNS.TunnelResolvers(d.proxyTun)
+	if err != nil || len(tun) == 0 {
+		return ""
+	}
+	if working := ValidateResolvers(ctx, WithPort53(tun)); len(working) > 0 {
+		return working[0]
+	}
+	return ""
+}
+
+// reassertGlobalDNSIfNeeded re-writes the State-layer 127.0.0.1 override when
+// the global primary resolver has drifted off it — the AnyConnect (re)connect
+// case, where the VPN re-publishes State:/Network/Global/DNS pointing at its
+// own resolver and silently demotes us. Idempotent and only writes on drift,
+// so it's safe to call every watcher tick with no tight spin. Returns true
+// when it actually re-asserted.
+func (d *handlerDeps) reassertGlobalDNSIfNeeded(ctx context.Context) (bool, error) {
+	winning, err := d.sysDNS.GlobalPrimaryIsLoopback()
+	if err != nil {
+		return false, err
+	}
+	if winning {
+		return false, nil
+	}
+	// assertGlobalDNSOverride re-checks opt-in AND hijack-active, so even if a
+	// caller invokes us while the hijack is off we won't write the override.
+	set, err := d.assertGlobalDNSOverride(ctx)
+	if err != nil {
+		return false, err
+	}
+	if set {
+		flushDNSCache()
+	}
+	return set, nil
 }
 
 // repickUpstream unconditionally re-runs chooseUpstream against the
@@ -330,6 +530,21 @@ func (d *handlerDeps) deactivateSystemDNS(ctx context.Context) error {
 // failed activation, where the user's intent ("hijack on") should remain
 // recorded so the watcher can retry.
 func (d *handlerDeps) restoreSystemDNSBackup(ctx context.Context) error {
+	// Drop the State-layer overrides FIRST so nothing is left pointing at a
+	// dead 127.0.0.1 once the daemon stops answering — both the global primary
+	// and the split-DNS shadow. Best-effort: a scutil failure here must not
+	// block restoring the per-service Setup layer below, which is the part the
+	// safety-sweep depends on.
+	if err := d.sysDNS.RemoveGlobalDNS(); err != nil {
+		log.Printf("em-walld: remove global DNS override failed (continuing): %v", err)
+	}
+	if err := d.sysDNS.RemoveSupplementalResolver(); err != nil {
+		log.Printf("em-walld: remove split-DNS shadow failed (continuing): %v", err)
+	}
+	d.mu.Lock()
+	d.splitShadow = ""
+	d.mu.Unlock()
+
 	raw, err := d.store.GetSetting(ctx, "system_dns_backup", "")
 	if err != nil {
 		return err

@@ -25,6 +25,10 @@ const emit = defineEmits<{
 }>();
 
 const blockEncrypted = ref<boolean>(false);
+// VPN DNS-priority mode: assert 127.0.0.1 as the State-layer global primary
+// resolver (to outrank a full-tunnel VPN like Cisco AnyConnect) and forward
+// fall-through queries to the VPN's own resolver. Off by default.
+const vpnDnsPriority = ref<boolean>(false);
 const sysStatus = ref<ipc.SystemDNSStatus | null>(null);
 const error = ref<string>('');
 const busy = ref<boolean>(false);
@@ -183,6 +187,7 @@ async function doUninstall() {
 async function loadSettings() {
   try {
     blockEncrypted.value = (await GetSetting('block_encrypted_dns', 'true')) === 'true';
+    vpnDnsPriority.value = (await GetSetting('vpn_dns_priority', 'false')) === 'true';
     fallbackDns.value = await GetSetting('fallback_dns', '');
   } catch (e: any) {
     error.value = e?.message || String(e);
@@ -228,6 +233,25 @@ async function toggleEncrypted() {
   } catch (e: any) {
     error.value = e?.message || String(e);
     blockEncrypted.value = !blockEncrypted.value;
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function toggleVpnDnsPriority() {
+  busy.value = true;
+  try {
+    vpnDnsPriority.value = !vpnDnsPriority.value;
+    await SetSetting('vpn_dns_priority', String(vpnDnsPriority.value));
+    error.value = '';
+    // The daemon applies/removes the State-layer override and re-picks the
+    // upstream as a side-effect, so pull fresh status to reflect the new
+    // winning-primary / upstream state.
+    await refreshStatus();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+    vpnDnsPriority.value = !vpnDnsPriority.value;
   } finally {
     busy.value = false;
   }
@@ -307,12 +331,12 @@ onUnmounted(() => {
           activation and restored on deactivate.
         </span>
         <span class="muted" style="font-size: 11px; color: var(--warn)">
-          ⚠ Limitation: VPN apps that push their own DNS via NetworkExtension
-          (v2box, Tailscale, etc.) bypass this hijack while connected — those
-          queries never reach the daemon, so <strong>no rules apply and no log
-          entries appear for them</strong>. If your Logs tab is empty (or
-          missing entries for domains you visited), set the VPN app's DNS
-          upstream to <code>127.0.0.1</code> in the VPN's own settings.
+          ⚠ Full-tunnel VPNs (Cisco AnyConnect, etc.) override the system
+          resolver and bypass this hijack — turn on
+          <strong>Win DNS priority over full-tunnel VPN</strong> below to stay
+          in the path. Apps that query their own resolver directly, not via the
+          system (some VPN clients), still bypass it — <strong>no rules apply
+          and nothing is logged</strong> for those.
         </span>
 
         <div v-if="sysStatus" class="col" style="gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border)">
@@ -339,6 +363,66 @@ onUnmounted(() => {
           <button :disabled="busy || !sysStatus?.active" @click="deactivate">
             {{ busy ? '…' : 'Deactivate' }}
           </button>
+        </div>
+      </div>
+
+      <!-- VPN DNS priority (full-tunnel coexistence) -->
+      <div class="col" style="gap: 8px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+        <label class="row" style="justify-content: space-between">
+          <div class="col" style="gap: 4px">
+            <strong>Win DNS priority over full-tunnel VPN</strong>
+            <span class="muted" style="font-size: 12px; line-height: 1.5">
+              Forces <code>127.0.0.1</code> to be resolver #1 even when a
+              full-tunnel VPN sets its own. Fall-through (<em>allow</em>)
+              queries still go to the VPN's resolver, so internal names keep
+              working. Tested with Cisco Secure Client / AnyConnect, but works
+              for any full-tunnel VPN (utun/ipsec).
+            </span>
+            <span class="muted" style="font-size: 11px; line-height: 1.5">
+              Leave off unless you use one. Re-asserts automatically when the
+              VPN reconnects.
+            </span>
+          </div>
+          <label class="toggle" @click.prevent="toggleVpnDnsPriority">
+            <input type="checkbox" :checked="vpnDnsPriority" :disabled="busy" />
+            <span class="track"></span>
+          </label>
+        </label>
+
+        <div v-if="sysStatus" class="col" style="gap: 6px; margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--border)">
+          <div class="row" style="gap: 12px">
+            <span class="label muted" style="min-width: 140px">VPN resolver detected</span>
+            <span :class="sysStatus.vpnDetected ? '' : 'muted'"
+                  :style="sysStatus.vpnDetected ? 'color: var(--success)' : ''">
+              {{ sysStatus.vpnDetected ? 'yes' : 'no' }}
+            </span>
+            <code v-if="sysStatus.tunnelDns && sysStatus.tunnelDns.length">{{ sysStatus.tunnelDns.join('  •  ') }}</code>
+          </div>
+          <div v-if="vpnDnsPriority && sysStatus.active" class="row" style="gap: 12px">
+            <span class="label muted" style="min-width: 140px">Default resolver is us</span>
+            <span :class="sysStatus.winningPrimary ? '' : 'muted'"
+                  :style="sysStatus.winningPrimary ? 'color: var(--success)' : 'color: var(--warn)'">
+              {{ sysStatus.winningPrimary ? 'yes — winning' : 'no — VPN owns it' }}
+            </span>
+            <code v-if="sysStatus.globalPrimary && sysStatus.globalPrimary.length">{{ sysStatus.globalPrimary.join('  •  ') }}</code>
+          </div>
+          <div v-if="vpnDnsPriority && sysStatus.active && sysStatus.shadowedDomains && sysStatus.shadowedDomains.length"
+               class="row" style="gap: 12px">
+            <span class="label muted" style="min-width: 140px">VPN domains captured</span>
+            <code style="color: var(--success)">{{ sysStatus.shadowedDomains.join('  •  ') }}</code>
+          </div>
+          <span v-if="vpnDnsPriority && sysStatus.active && sysStatus.bypassDomains && sysStatus.bypassDomains.length"
+                class="muted" style="font-size: 11px; color: var(--warn)">
+            ⚠ Not yet captured — these VPN domains still reach the VPN resolver
+            directly (no rules, no log):
+            <code>{{ sysStatus.bypassDomains.join('  •  ') }}</code>.
+            They should be shadowed within a few seconds; public names always go
+            through em-wall.
+          </span>
+          <span v-if="vpnDnsPriority && !sysStatus.active" class="muted" style="font-size: 11px; color: var(--warn)">
+            ⚠ No effect until the system DNS hijack above is active — without it
+            we aren't the resolver at all.
+          </span>
         </div>
       </div>
 

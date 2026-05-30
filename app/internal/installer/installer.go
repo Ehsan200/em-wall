@@ -312,6 +312,38 @@ networksetup -listallnetworkservices | tail -n +2 | while IFS= read -r svc; do
     fi
 done
 
+# Safety sweep (State layer): the daemon also asserts 127.0.0.1 as the global
+# primary resolver via State:/Network/Global/DNS to win against a full-tunnel
+# VPN. If that override is still in place (deactivate IPC didn't run), remove
+# it so configd recomputes the real primary instead of aiming every lookup at
+# a now-dead loopback.
+GLOBAL_DNS=$(scutil <<'EOF' 2>/dev/null
+show State:/Network/Global/DNS
+quit
+EOF
+)
+if echo "$GLOBAL_DNS" | grep -A5 'ServerAddresses' | grep -q '127\.0\.0\.1'; then
+    echo "em-wall: removing global DNS override (was 127.0.0.1)"
+    scutil <<'EOF' 2>/dev/null || true
+open
+remove State:/Network/Global/DNS
+quit
+EOF
+fi
+
+# Safety sweep: remove em-wall's split-DNS shadow files from /etc/resolver
+# (each pins a VPN internal domain to 127.0.0.1). Only files carrying our
+# marker are touched, so any user-authored /etc/resolver entry is left alone.
+if [ -d /etc/resolver ]; then
+    for f in /etc/resolver/*; do
+        [ -f "$f" ] || continue
+        if head -1 "$f" 2>/dev/null | grep -q 'em-wall: split-DNS shadow'; then
+            echo "em-wall: removing resolver shadow $f"
+            rm -f "$f" || true
+        fi
+    done
+fi
+
 dscacheutil -flushcache 2>/dev/null || true
 killall -HUP mDNSResponder 2>/dev/null || true
 

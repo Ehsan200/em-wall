@@ -221,6 +221,42 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				log.Printf("em-walld: fallback_dns saved but upstream re-pick failed: %v", err)
 			}
 		}
+		// Side-effect: toggling VPN DNS-priority mode takes effect now, not
+		// only on the next activate/network change. Turning ON asserts the
+		// State-layer 127.0.0.1 override (so we outrank the VPN's global
+		// primary) when the hijack is active; turning OFF removes it so
+		// nothing is left pointing at the override. Either way we re-pick the
+		// upstream so the VPN resolver moves to / off the front of the list.
+		// Best-effort: the value is already saved, so a transient failure
+		// here must not fail the save — the watcher converges on its tick.
+		if p.Key == settingVPNDNSPriority {
+			if p.Value == "true" {
+				// assertGlobalDNSOverride writes 127.0.0.1 as the global primary
+				// ONLY if the hijack is active — turning the toggle on while the
+				// hijack is off correctly does nothing until the user activates.
+				if set, err := d.assertGlobalDNSOverride(ctx); err != nil {
+					log.Printf("em-walld: vpn_dns_priority on, set global DNS failed: %v", err)
+				} else if set {
+					flushDNSCache()
+				}
+			} else {
+				// Turning off: drop any override unconditionally (idempotent —
+				// removing a key that isn't there is harmless).
+				if err := d.sysDNS.RemoveGlobalDNS(); err != nil {
+					log.Printf("em-walld: vpn_dns_priority off, remove global DNS failed: %v", err)
+				}
+				flushDNSCache()
+			}
+			// Apply or tear down the split-DNS shadow to match the new setting
+			// (reconcile reads vpn_dns_priority, already persisted above, and
+			// the live hijack-active state).
+			if _, err := d.reconcileSplitDNSShadow(ctx); err != nil {
+				log.Printf("em-walld: vpn_dns_priority toggle, split-DNS shadow reconcile failed: %v", err)
+			}
+			if _, err := d.repickUpstream(ctx); err != nil {
+				log.Printf("em-walld: vpn_dns_priority saved but upstream re-pick failed: %v", err)
+			}
+		}
 		return map[string]any{"ok": true}, nil
 	})
 

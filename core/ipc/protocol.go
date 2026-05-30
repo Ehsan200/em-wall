@@ -393,4 +393,15 @@ type SystemDNSStatus struct {
 	Upstream          []string            `json:"upstream"`          // current daemon upstream
 	DetectedResolvers []string            `json:"detectedResolvers"` // what scutil sees (excl. loopback)
 	PerService        map[string][]string `json:"perService"`        // current per-service DNS
+
+	// VPN / global-primary visibility. These surface whether em-wall is
+	// actually winning resolver priority while a full-tunnel VPN (Cisco
+	// AnyConnect / Secure Client) is connected — see daemon/system_dns.go.
+	VPNPriorityEnabled bool     `json:"vpnPriorityEnabled"` // user opted into VPN DNS-priority mode (vpn_dns_priority)
+	VPNDetected        bool     `json:"vpnDetected"`        // a tunnel-bound (utun/ipsec) resolver exists in scutil --dns
+	TunnelDNS          []string `json:"tunnelDns"`          // the VPN's own resolver(s), used as primary fall-through upstream
+	GlobalPrimary      []string `json:"globalPrimary"`      // State:/Network/Global/DNS ServerAddresses, resolver #1 first
+	WinningPrimary     bool     `json:"winningPrimary"`     // the live default resolver (scutil --dns) is 127.0.0.1 — em-wall in the path for generic names
+	BypassDomains      []string `json:"bypassDomains"`      // VPN split-DNS domains NOT yet captured — they skip em-wall (no rules, no log)
+	ShadowedDomains    []string `json:"shadowedDomains"`    // VPN split-DNS domains em-wall has shadowed to 127.0.0.1 — now captured
 }

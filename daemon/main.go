@@ -157,6 +157,7 @@ func main() {
 		apps:          apps,
 		listenAddr:    *listenAddr,
 		upstream:      joinCSV(upstreams),
+		proxyTun:      proxyTunName,
 		startedAt:     time.Now(),
 		proxyTestHost: proxyTestHost,
 		proxyTestPort: proxyTestPort,
@@ -306,6 +307,25 @@ func main() {
 						}
 						continue
 					}
+					// AnyConnect re-clobbers State:/Network/Global/DNS on every
+					// (re)connect, demoting us below the VPN resolver. Reclaim
+					// resolver #1 within one tick. Idempotent — only writes on
+					// drift. Opt-in via vpn_dns_priority.
+					if deps.vpnDNSPriority(ctx) {
+						if reasserted, err := deps.reassertGlobalDNSIfNeeded(ctx); err != nil {
+							log.Printf("em-walld: global DNS reassert failed: %v", err)
+						} else if reasserted {
+							log.Printf("em-walld: re-asserted 127.0.0.1 as global primary DNS")
+						}
+						// Re-shadow the VPN's split-DNS domains — the set changes
+						// per session (and AnyConnect re-pushes on reconnect), so
+						// this keeps internal names captured by em-wall.
+						if changed, err := deps.reconcileSplitDNSShadow(ctx); err != nil {
+							log.Printf("em-walld: split-DNS shadow reconcile failed: %v", err)
+						} else if changed {
+							log.Printf("em-walld: split-DNS shadow updated")
+						}
+					}
 				}
 				if changed, err := deps.refreshUpstreamIfStale(ctx); err != nil {
 					log.Printf("em-walld: upstream refresh failed: %v", err)
@@ -389,7 +409,15 @@ type handlerDeps struct {
 	apps       *applocator.Resolver
 	listenAddr string
 	upstream   string
-	startedAt  time.Time
+	// proxyTun is the daemon's own utun (proxy routing). Excluded from VPN
+	// tunnel-resolver detection so we never treat our own interface as a
+	// VPN. Empty when the proxy tunnel didn't open (dev / non-root).
+	proxyTun string
+	// splitShadow is the last-applied set of split-DNS shadow domains (sorted,
+	// CSV-joined) guarded by mu — lets reconcileSplitDNSShadow skip the scutil
+	// write when the VPN's domain set hasn't changed since the previous tick.
+	splitShadow string
+	startedAt   time.Time
 
 	// Reachability-probe target for proxies.test, parsed from the
 	// -proxy-test-target flag. host may be an IP literal or a DNS name.
@@ -509,5 +537,3 @@ func orDash(s string) string {
 	}
 	return s
 }
-
-
