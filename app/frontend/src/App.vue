@@ -8,8 +8,9 @@ import ProxiesPanel from './components/ProxiesPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
-import { Status, InstallStatus, IsPackaged, AppVersion } from '../wailsjs/go/main/App';
-import type { ipc, installer } from '../wailsjs/go/models';
+import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate } from '../wailsjs/go/main/App';
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
+import type { ipc, installer, main } from '../wailsjs/go/models';
 
 type Tab = 'rules' | 'logs' | 'network' | 'proxies' | 'xray' | 'settings';
 const tab = ref<Tab>('rules');
@@ -26,6 +27,8 @@ const packaged = ref<boolean>(true);
 // end. SettingsPanel is the only emitter — it sets true before
 // calling Install() and clears it after WaitForDaemon returns.
 const reinstalling = ref<boolean>(false);
+const updateInfo = ref<main.UpdateInfo | null>(null);
+const updateDismissed = ref(false);
 // Bumped each time the user clicks "Reinstall" in the compatibility
 // banner. SettingsPanel watches it to scroll the Reinstall card into
 // view and flash it — a counter (not a boolean) so repeated clicks
@@ -97,6 +100,9 @@ onMounted(async () => {
   try { appVersion.value = await AppVersion(); } catch { appVersion.value = ''; }
   await refresh();
   timer = window.setInterval(refresh, 2000);
+  // Check for updates once on startup; runs in background so it never
+  // delays the initial UI render.
+  CheckForUpdate().then(info => { if (info.hasUpdate) updateInfo.value = info; }).catch(() => {});
 });
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
@@ -118,6 +124,16 @@ onUnmounted(() => {
       </span>
     </div>
     <button class="primary" @click="goToReinstall">Reinstall daemon</button>
+  </div>
+
+  <div v-if="updateInfo && !updateDismissed" class="update-banner">
+    <span>
+      Update available: <strong>{{ updateInfo.version }}</strong>
+    </span>
+    <div class="row" style="gap: 8px">
+      <button class="primary" @click="BrowserOpenURL(updateInfo!.url)">View release</button>
+      <button @click="updateDismissed = true">Dismiss</button>
+    </div>
   </div>
 
   <template v-if="showInstallGate">

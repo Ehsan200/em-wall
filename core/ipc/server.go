@@ -100,7 +100,16 @@ func (s *Server) Shutdown() {
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	r := bufio.NewReader(conn)
+	var encMu sync.Mutex
 	enc := json.NewEncoder(conn)
+
+	// Each request is dispatched in its own goroutine so slow handlers
+	// (e.g. proxies.test with a 10s dial) don't block subsequent calls
+	// on the same connection. Responses are written under encMu so they
+	// don't interleave; request IDs let the client match them up.
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
 		line, err := r.ReadBytes('\n')
 		if err != nil {
@@ -111,14 +120,21 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		}
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
+			encMu.Lock()
 			_ = enc.Encode(Response{Error: &ErrorBody{Code: "bad_request", Message: err.Error()}})
+			encMu.Unlock()
 			continue
 		}
-		resp := s.dispatch(ctx, req)
-		if err := enc.Encode(resp); err != nil {
-			s.logger.Printf("ipc: write: %v", err)
-			return
-		}
+		wg.Add(1)
+		go func(req Request) {
+			defer wg.Done()
+			resp := s.dispatch(ctx, req)
+			encMu.Lock()
+			if err := enc.Encode(resp); err != nil {
+				s.logger.Printf("ipc: write: %v", err)
+			}
+			encMu.Unlock()
+		}(req)
 	}
 }
 

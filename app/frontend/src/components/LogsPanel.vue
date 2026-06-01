@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
-import { RecentLogs } from '../../wailsjs/go/main/App';
+import { RecentLogs, ClearLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
 type Filter = 'all' | 'block' | 'route' | 'unavailable';
@@ -11,6 +11,7 @@ const filter = ref<Filter>('all');
 const search = ref<string>('');
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
+const clearing = ref(false);
 let timer: number | undefined;
 
 // Map UI filter chip → daemon-side filter string. The daemon filters
@@ -89,6 +90,20 @@ function actionTag(action: string): string {
   return 'tag tag-off';
 }
 
+async function clearLogs() {
+  clearing.value = true;
+  try {
+    await ClearLogs();
+    logs.value = [];
+    totalsByAction.value = {};
+    error.value = '';
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    clearing.value = false;
+  }
+}
+
 // Switching chips should refetch immediately, not wait for the
 // 1s timer.
 watch(filter, () => { refresh(); });
@@ -120,7 +135,12 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           Unavailable <span class="count">{{ counts.unavailable }}</span>
         </button>
       </div>
-      <input v-model="search" placeholder="filter by domain…" style="width: 220px" />
+      <div class="row" style="gap: 8px; align-items: center">
+        <input v-model="search" placeholder="filter by domain…" style="width: 220px" />
+        <button @click="clearLogs" :disabled="clearing || !logs.length" class="danger-subtle">
+          {{ clearing ? 'Clearing…' : 'Clear' }}
+        </button>
+      </div>
     </div>
 
     <div class="muted" style="font-size: 11px; margin-bottom: 8px">
@@ -178,4 +198,11 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
   color: var(--text-dim);
 }
 .seg.active .count { background: var(--accent); color: #fff; }
+.danger-subtle {
+  color: var(--danger);
+  background: transparent;
+  border-color: var(--danger);
+  opacity: 0.75;
+}
+.danger-subtle:hover:not(:disabled) { opacity: 1; }
 </style>

@@ -53,7 +53,8 @@ const pendingDelete = ref<number | null>(null);
 let pendingDeleteTimer: number | undefined;
 
 const testTarget = ref<string>('1.1.1.1:443');
-const testResults = ref<Record<number, { ok: boolean; message: string; latencyMs: number }>>({});
+const testResults = ref<Record<number, { ok: boolean; message: string; latencyMs: number; exitIp?: string; country?: string; region?: string; city?: string }>>({});
+const revealedIPs = ref<Record<number, boolean>>({});
 
 const linkDialog = ref<{ open: boolean; link: string }>({ open: false, link: '' });
 
@@ -199,7 +200,7 @@ async function runTest(row: XrayRow) {
     const r = await TestXray(row.id, testTarget.value.trim());
     testResults.value = {
       ...testResults.value,
-      [row.id]: { ok: r.ok, message: r.message, latencyMs: r.latencyMs },
+      [row.id]: { ok: r.ok, message: r.message, latencyMs: r.latencyMs, exitIp: r.exitIp, country: r.country, region: r.region, city: r.city },
     };
   } catch (e: any) {
     testResults.value = {
@@ -223,6 +224,33 @@ async function testAll() {
   } finally {
     testing.value = false;
   }
+}
+
+// ---------- Country helpers ----------
+
+// toFlagEmoji converts an ISO 3166-1 alpha-2 country code (e.g. "US")
+// to its Unicode flag emoji (e.g. 🇺🇸) using Regional Indicator Symbols.
+function toFlagEmoji(code: string): string {
+  if (!code || code.length !== 2) return '';
+  return [...code.toUpperCase()]
+    .map(c => String.fromCodePoint(c.charCodeAt(0) + 0x1F1A5))
+    .join('');
+}
+
+// maskIP hides the host-specific part of an IP address.
+// IPv4: keeps first two octets  →  104.16.*.*
+// IPv6: keeps first group only  →  2606:…
+function maskIP(ip: string): string {
+  if (!ip) return '';
+  if (ip.includes(':')) {
+    return ip.split(':')[0] + ':…';
+  }
+  const p = ip.split('.');
+  return p.length === 4 ? `${p[0]}.${p[1]}.*.*` : ip;
+}
+
+function toggleIPReveal(id: number) {
+  revealedIPs.value = { ...revealedIPs.value, [id]: !revealedIPs.value[id] };
 }
 
 // ---------- JSON helpers ----------
@@ -385,6 +413,20 @@ defineExpose({ refresh });
                     :class="testResults[row.id].ok ? 'tag-allow' : 'tag-block'"
                     style="font-size: 11px">
                 {{ testResults[row.id].ok ? `${testResults[row.id].latencyMs} ms` : 'fail' }}
+              </span>
+              <span v-if="testResults[row.id]?.ok && testResults[row.id]?.country"
+                    class="tag" style="font-size: 11px; background: var(--panel-2); color: var(--text-dim)">
+                {{ toFlagEmoji(testResults[row.id].country!) }} {{ testResults[row.id].country }}
+                <template v-if="testResults[row.id].city || testResults[row.id].region">
+                  · {{ [testResults[row.id].city, testResults[row.id].region].filter(Boolean).join(', ') }}
+                </template>
+              </span>
+              <span v-if="testResults[row.id]?.ok && testResults[row.id]?.exitIp"
+                    class="tag"
+                    style="font-size: 11px; background: var(--panel-2); color: var(--text-dim); cursor: pointer; font-family: monospace"
+                    :title="revealedIPs[row.id] ? 'click to mask' : 'click to reveal full IP'"
+                    @click.stop="toggleIPReveal(row.id)">
+                {{ revealedIPs[row.id] ? testResults[row.id].exitIp : maskIP(testResults[row.id].exitIp!) }}
               </span>
             </div>
             <div class="row" style="gap: 6px">

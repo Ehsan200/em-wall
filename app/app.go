@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"sync"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"app/internal/installer"
@@ -11,6 +14,9 @@ import (
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/version"
 )
+
+// releasesAPI is the GitHub Releases endpoint for this project.
+const releasesAPI = "https://api.github.com/repos/ehsan200/em-wall/releases/latest"
 
 // App is the Wails-bound surface. Every public method is callable from
 // the Vue frontend via the generated `wailsjs/go/main/App` bindings.
@@ -20,36 +26,61 @@ import (
 type App struct {
 	ctx        context.Context
 	socketPath string
-
-	mu     sync.Mutex
-	client *ipc.Client
+	pool       chan *ipc.Client // buffered channel used as a connection pool
 }
+
+// rpcPoolCap is the max number of idle daemon connections kept open.
+// Concurrent frontend calls each take their own connection, so up to
+// rpcPoolCap calls can be in-flight at the same time without queueing.
+const rpcPoolCap = 4
 
 func NewApp(socketPath string) *App {
 	if socketPath == "" {
 		socketPath = ipc.DefaultSocketPath
 	}
-	return &App{socketPath: socketPath}
+	return &App{
+		socketPath: socketPath,
+		pool:       make(chan *ipc.Client, rpcPoolCap),
+	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
-// rpc returns a connected client, dialing lazily and reconnecting if
-// the daemon was restarted.
+// rpc takes a client from the pool or dials a fresh connection.
 func (a *App) rpc() (*ipc.Client, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.client != nil {
-		return a.client, nil
+	select {
+	case c := <-a.pool:
+		return c, nil
+	default:
+		c, err := ipc.Dial(a.socketPath)
+		if err != nil {
+			return nil, fmt.Errorf("daemon not reachable at %s: %w", a.socketPath, err)
+		}
+		return c, nil
 	}
-	c, err := ipc.Dial(a.socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("daemon not reachable at %s: %w", a.socketPath, err)
+}
+
+// putRPC returns a healthy client to the pool, or closes it if the pool is full.
+func (a *App) putRPC(c *ipc.Client) {
+	select {
+	case a.pool <- c:
+	default:
+		_ = c.Close()
 	}
-	a.client = c
-	return c, nil
+}
+
+// drainPool closes and discards all pooled connections (e.g. after daemon restart).
+func (a *App) drainPool() {
+	for {
+		select {
+		case c := <-a.pool:
+			_ = c.Close()
+		default:
+			return
+		}
+	}
 }
 
 func (a *App) call(method string, params, result any) error {
@@ -58,16 +89,20 @@ func (a *App) call(method string, params, result any) error {
 		return err
 	}
 	if err := c.Call(method, params, result); err != nil {
+		_ = c.Close()
 		// One-shot reconnect on transport errors.
-		a.mu.Lock()
-		a.client = nil
-		a.mu.Unlock()
-		c2, derr := a.rpc()
+		c2, derr := ipc.Dial(a.socketPath)
 		if derr != nil {
 			return err
 		}
-		return c2.Call(method, params, result)
+		if err2 := c2.Call(method, params, result); err2 != nil {
+			_ = c2.Close()
+			return err2
+		}
+		a.putRPC(c2)
+		return nil
 	}
+	a.putRPC(c)
 	return nil
 }
 
@@ -136,6 +171,10 @@ func (a *App) RecentLogs(limit int, filter string) ([]ipc.LogDTO, error) {
 	var out []ipc.LogDTO
 	err := a.call(ipc.MethodLogsRecent, ipc.LogsRecentParams{Limit: limit, Filter: filter}, &out)
 	return out, err
+}
+
+func (a *App) ClearLogs() error {
+	return a.call(ipc.MethodLogsClear, nil, nil)
 }
 
 func (a *App) ActiveRoutes() ([]ipc.ActiveRouteDTO, error) {
@@ -385,16 +424,76 @@ func (a *App) Uninstall(purge bool) error {
 		}
 		return err
 	}
-	// Drop any cached IPC connection — the daemon (and its socket) are
-	// gone now, and the next Status() call should fail cleanly rather
-	// than blocking on a half-dead connection.
-	a.mu.Lock()
-	if a.client != nil {
-		_ = a.client.Close()
-		a.client = nil
-	}
-	a.mu.Unlock()
+	// Drop all pooled connections — the daemon (and its socket) are gone
+	// now, so any cached connection would block on the next call.
+	a.drainPool()
 	return nil
+}
+
+// UpdateInfo is returned by CheckForUpdate.
+type UpdateInfo struct {
+	HasUpdate bool   `json:"hasUpdate"`
+	Version   string `json:"version"` // latest tag, e.g. "v1.2.3"
+	URL       string `json:"url"`     // GitHub release page
+}
+
+// CheckForUpdate fetches the latest GitHub release and compares it with
+// the running version. Returns HasUpdate=false when running a dev build,
+// when the fetch fails, or when already on the latest version.
+func (a *App) CheckForUpdate() UpdateInfo {
+	current := version.Version
+	if current == "" || current == "dev" {
+		return UpdateInfo{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesAPI, nil)
+	if err != nil {
+		return UpdateInfo{}
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", "em-wall/"+current)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return UpdateInfo{}
+	}
+	defer resp.Body.Close()
+	var release struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return UpdateInfo{}
+	}
+	if !semverNewer(release.TagName, current) {
+		return UpdateInfo{}
+	}
+	return UpdateInfo{HasUpdate: true, Version: release.TagName, URL: release.HTMLURL}
+}
+
+// semverNewer reports whether latest is a higher version than current.
+// Both strings may optionally start with "v". Non-numeric segments are
+// treated as 0, so malformed tags lose gracefully instead of crashing.
+func semverNewer(latest, current string) bool {
+	trim := func(s string) string { return strings.TrimPrefix(s, "v") }
+	lp := strings.SplitN(trim(latest), ".", 3)
+	cp := strings.SplitN(trim(current), ".", 3)
+	for i := 0; i < 3; i++ {
+		lv, cv := 0, 0
+		if i < len(lp) {
+			lv, _ = strconv.Atoi(lp[i])
+		}
+		if i < len(cp) {
+			cv, _ = strconv.Atoi(cp[i])
+		}
+		if lv > cv {
+			return true
+		}
+		if lv < cv {
+			return false
+		}
+	}
+	return false
 }
 
 // WaitForDaemon polls until the daemon answers Status() or the
@@ -407,13 +506,9 @@ func (a *App) WaitForDaemon(timeoutMs int) bool {
 	}
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	for time.Now().Before(deadline) {
-		// Drop stale client; force fresh dial each tick.
-		a.mu.Lock()
-		if a.client != nil {
-			_ = a.client.Close()
-			a.client = nil
-		}
-		a.mu.Unlock()
+		// Flush stale connections from the previous daemon instance before
+		// each probe so we don't reuse a half-dead socket.
+		a.drainPool()
 		var out ipc.StatusResult
 		if err := a.call(ipc.MethodStatus, nil, &out); err == nil {
 			return true

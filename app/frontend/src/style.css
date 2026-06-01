@@ -190,6 +190,21 @@ th {
 .compat-banner code { color: var(--text); }
 .compat-banner button.primary { flex: none; white-space: nowrap; }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 10px 16px 0;
+  padding: 10px 16px;
+  background: rgba(80, 200, 120, 0.10);
+  border: 1px solid rgba(80, 200, 120, 0.35);
+  border-radius: 8px;
+  color: var(--success);
+  font-size: 13px;
+}
+.update-banner button.primary { flex: none; white-space: nowrap; }
+
 /* One-shot flash applied to the Reinstall card when the user arrives
    from the compatibility banner, so the CTA they clicked is obvious. */
 @keyframes reinstall-flash {

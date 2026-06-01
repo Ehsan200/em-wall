@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,6 +150,7 @@ func main() {
 		proxyTable:    proxyTable,
 		xrayStore:     xrayStore,
 		xraySup:       xraySup,
+		xrayDataDir:   *xrayDataDir,
 		engine:        engine,
 		router:        router,
 		pf:            pf,
@@ -224,20 +226,25 @@ func main() {
 		}
 	}()
 
-	// App watcher: 1s tick. On each detected change, take the per-app
-	// write-lock (queries for that app block briefly), flush stale
-	// per-host routes pinned to the old utun, then release. The next
-	// query installs fresh routes via the new utun. New rules are
-	// picked up automatically by the next query (engine cache).
+	// App watcher: 1s tick, but the expensive lsof scan only runs when
+	// the set of utun interfaces changes. net.Interfaces() is a cheap
+	// kernel call (~0 CPU); lsof -nP +c 0 scans all process FDs and is
+	// the primary cause of CPU hotspots when run every second.
 	go func() {
 		defer wg.Done()
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
+		var lastSig string
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				sig := utunSignature()
+				if sig == lastSig {
+					continue // no utun change — skip lsof
+				}
+				lastSig = sig
 				changes := apps.Refresh()
 				for _, c := range changes {
 					release := apps.AcquireForWrite(c.Key)
@@ -376,20 +383,21 @@ func (s *storeLogSink) Log(name, action, iface string, ruleID int64, clientIP st
 // ---------- IPC handler wiring ----------
 
 type handlerDeps struct {
-	store      *rules.Store
-	proxyStore *proxy.Store
-	proxyTable *proxy.Table
-	xrayStore  *xray.Store
-	xraySup    *xraySupervisor
-	engine     *decision.Engine
-	router     *routing.Manager
-	pf         *pfctl.Manager
-	sysDNS     *SystemDNS
-	dnsServer  *dnsproxy.Server
-	apps       *applocator.Resolver
-	listenAddr string
-	upstream   string
-	startedAt  time.Time
+	store       *rules.Store
+	proxyStore  *proxy.Store
+	proxyTable  *proxy.Table
+	xrayStore   *xray.Store
+	xraySup     *xraySupervisor
+	xrayDataDir string // path to dir containing geoip.dat + geosite.dat
+	engine      *decision.Engine
+	router      *routing.Manager
+	pf          *pfctl.Manager
+	sysDNS      *SystemDNS
+	dnsServer   *dnsproxy.Server
+	apps        *applocator.Resolver
+	listenAddr  string
+	upstream    string
+	startedAt   time.Time
 
 	// Reachability-probe target for proxies.test, parsed from the
 	// -proxy-test-target flag. host may be an IP literal or a DNS name.
@@ -508,6 +516,24 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// utunSignature returns a comma-joined sorted list of current utun
+// interface names. Changes iff VPN tunnels appear or disappear — used
+// as a cheap sentinel to gate the expensive lsof scan.
+func utunSignature() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, iface := range ifaces {
+		if strings.HasPrefix(iface.Name, "utun") {
+			names = append(names, iface.Name)
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
 

@@ -37,6 +37,7 @@ const (
 	MethodSettingsGet         = "settings.get"
 	MethodSettingsSet         = "settings.set"
 	MethodLogsRecent          = "logs.recent"
+	MethodLogsClear           = "logs.clear"
 	MethodRoutesActive        = "routes.active"
 	MethodInterfacesList      = "interfaces.list"
 	MethodReload              = "reload"
@@ -381,11 +382,17 @@ type XrayTestParams struct {
 
 // XrayTestResult mirrors ProxiesTestResult. OK=true means the
 // connect+handshake completed; Message is human-readable (success
-// path includes the round-trip duration).
+// path includes the round-trip duration). Country and ExitIP are
+// populated on success: Country from the local geoip.dat lookup on
+// the server's IP, with ip-api.com (through the proxy) as fallback.
 type XrayTestResult struct {
 	OK        bool   `json:"ok"`
 	Message   string `json:"message"`
 	LatencyMS int    `json:"latencyMs"`
+	ExitIP    string `json:"exitIp"`  // actual public exit IP
+	Country   string `json:"country"` // ISO 3166-1 alpha-2 code, e.g. "DE"
+	Region    string `json:"region"`  // state / province, e.g. "Bavaria"
+	City      string `json:"city"`    // city, e.g. "Munich"
 }
 
 type SystemDNSStatus struct {

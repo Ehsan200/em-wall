@@ -322,6 +322,11 @@ func (s *Store) RecentLogs(ctx context.Context, limit int, filter string) ([]Log
 	return out, err
 }
 
+// ClearLogs deletes all rows from the log_entries table.
+func (s *Store) ClearLogs(ctx context.Context) error {
+	return s.db.WithContext(ctx).Exec("DELETE FROM log_entries").Error
+}
+
 // normalizeAction validates the action + interface combination and
 // canonicalises r in place:
 //
