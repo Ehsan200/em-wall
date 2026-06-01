@@ -299,6 +299,13 @@ func main() {
 		defer wg.Done()
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
+		// stableFor counts consecutive ticks where the upstream was healthy
+		// and unchanged. Once it reaches the threshold we skip most checks,
+		// only probing every skipEvery ticks (~60s) instead of every 10s.
+		// Any failure or change resets it to 0 so we recover quickly.
+		const skipEvery = 6 // 6 × 10s = 60s between probes when stable
+		stableFor := 0
+		skipCount := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -311,13 +318,29 @@ func main() {
 						} else {
 							log.Printf("em-walld: system DNS hijack activated on retry")
 						}
+						stableFor = 0
+						skipCount = 0
 						continue
 					}
 				}
+				// Back off DNS health probes when stable: skip most ticks.
+				if stableFor >= skipEvery {
+					skipCount++
+					if skipCount < skipEvery {
+						continue
+					}
+					skipCount = 0
+				}
 				if changed, err := deps.refreshUpstreamIfStale(ctx); err != nil {
 					log.Printf("em-walld: upstream refresh failed: %v", err)
+					stableFor = 0
+					skipCount = 0
 				} else if changed {
 					log.Printf("em-walld: upstream refreshed: now using %s", deps.upstream)
+					stableFor = 0
+					skipCount = 0
+				} else {
+					stableFor++
 				}
 			}
 		}

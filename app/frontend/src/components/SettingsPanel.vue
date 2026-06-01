@@ -268,10 +268,14 @@ onMounted(() => {
   // If we were mounted *because* the user clicked the banner (tab switch),
   // the prop is already set, so the watch above won't fire — handle it here.
   if (props.focusReinstallSeq) flashReinstall();
+  // SystemDNSStatus runs networksetup + scutil subprocesses on the
+  // daemon side — too expensive to call at 1.5s. 5s is still fast
+  // enough to feel live; explicit user actions call refreshStatus()
+  // directly so the user always sees immediate feedback.
   timer = window.setInterval(() => {
     refreshStatus();
     loadInstallStatus();
-  }, 1500);
+  }, 5000);
 });
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
