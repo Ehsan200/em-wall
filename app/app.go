@@ -124,6 +124,22 @@ func (a *App) ListRules() ([]ipc.RuleDTO, error) {
 	return out, err
 }
 
+// PublicIP returns the public egress identity for the system default
+// route — what sites see for traffic that matches no rule.
+func (a *App) PublicIP() (ipc.ExitIPResult, error) {
+	var out ipc.ExitIPResult
+	err := a.call(ipc.MethodPublicIP, nil, &out)
+	return out, err
+}
+
+// RuleExitIP probes the public egress identity for a single rule's
+// interface (the IP/location its matched traffic appears to come from).
+func (a *App) RuleExitIP(ruleID int64) (ipc.ExitIPResult, error) {
+	var out ipc.ExitIPResult
+	err := a.call(ipc.MethodRuleExitIP, ipc.RuleExitIPParams{RuleID: ruleID}, &out)
+	return out, err
+}
+
 func (a *App) AddRule(pattern, action, iface string, enabled bool) (ipc.RuleDTO, error) {
 	var out ipc.RuleDTO
 	err := a.call(ipc.MethodRulesAdd, ipc.RulesAddParams{

@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces, Apps,
   Groups, ApplyGroup, DeleteGroupRules, SetGroupEnabled,
-  ListProxies, ListXray, BulkUpdateRules,
+  ListProxies, ListXray, BulkUpdateRules, RuleExitIP,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import AppIcon from './AppIcon.vue';
@@ -47,6 +47,14 @@ const error = ref<string>('');
 const pendingDelete = ref<number | null>(null);
 const pendingDeleteGroup = ref<string | null>(null);
 const search = ref<string>('');
+// Per-rule exit-IP probe results, keyed by rule id. Fetched
+// automatically after rules load (bounded concurrency) and re-fetchable
+// per row via the retry button. The daemon caches each probe for a few
+// minutes, so the auto-fetch and any retries stay cheap.
+const exitInfo = ref<Record<number, ipc.ExitIPResult>>({});
+const exitLoading = ref<Record<number, boolean>>({});
+// Which rows have their exit IP revealed (default: masked).
+const revealedExitIPs = ref<Record<number, boolean>>({});
 let pendingDeleteTimer: number | undefined;
 let pendingDeleteGroupTimer: number | undefined;
 let ifaceTimer: number | undefined;
@@ -56,6 +64,61 @@ function normalizePattern(p: string): string {
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Turn a 2-letter ISO country code into its flag emoji.
+function flagEmoji(cc?: string): string {
+  if (!cc || cc.length !== 2) return '';
+  const base = 0x1f1e6;
+  const up = cc.toUpperCase();
+  return String.fromCodePoint(base + up.charCodeAt(0) - 65, base + up.charCodeAt(1) - 65);
+}
+
+// maskIP hides the host-specific part of an IP address.
+// IPv4: keeps first two octets → 104.16.*.*   IPv6: keeps first group.
+function maskIP(ip: string): string {
+  if (!ip) return '';
+  if (ip.includes(':')) return ip.split(':')[0] + ':…';
+  const p = ip.split('.');
+  return p.length === 4 ? `${p[0]}.${p[1]}.*.*` : ip;
+}
+
+function toggleExitReveal(id: number) {
+  revealedExitIPs.value = { ...revealedExitIPs.value, [id]: !revealedExitIPs.value[id] };
+}
+
+// Probe (or re-probe) the public exit IP a rule's matched traffic
+// egresses through. Result/failure both land in exitInfo so the row can
+// render the IP inline or explain why it couldn't be determined.
+async function checkExitIP(r: ipc.RuleDTO) {
+  exitLoading.value[r.id] = true;
+  try {
+    exitInfo.value[r.id] = await RuleExitIP(r.id);
+  } catch (e: any) {
+    exitInfo.value[r.id] = {
+      interface: r.interface, exitIp: '', country: '', region: '', city: '',
+      probed: false, message: e?.message || String(e),
+    } as ipc.ExitIPResult;
+  } finally {
+    exitLoading.value[r.id] = false;
+  }
+}
+
+// Auto-fetch exit IPs for every non-block rule that doesn't already have
+// a result, with a small concurrency cap so the daemon isn't slammed and
+// rows fill in progressively. Called after each rules refresh; rules
+// already probed (or in flight) are skipped, so it's cheap to re-run.
+const EXIT_IP_CONCURRENCY = 4;
+async function autoFetchExitIPs() {
+  const pending = rules.value.filter(
+    r => r.action !== 'block' && !exitInfo.value[r.id] && !exitLoading.value[r.id],
+  );
+  if (pending.length === 0) return;
+  let i = 0;
+  const worker = async () => {
+    while (i < pending.length) await checkExitIP(pending[i++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(EXIT_IP_CONCURRENCY, pending.length) }, worker));
+}
 
 // A rule "belongs to" a group when its pattern sits inside the scope
 // of any of the group's curated patterns. Mirrors the daemon's
@@ -626,6 +689,19 @@ async function refresh() {
       knownGroups.value = (await Groups()) || [];
     }
     error.value = '';
+    // Drop cached exit IPs for rules that no longer exist or whose
+    // binding changed, so stale entries don't linger, then auto-fetch
+    // any rule still missing a result. Fire-and-forget — the rows fill
+    // in as each probe returns.
+    const live = new Map(rules.value.map(r => [r.id, r.interface]));
+    for (const idStr of Object.keys(exitInfo.value)) {
+      const id = Number(idStr);
+      if (!live.has(id) || exitInfo.value[id].interface !== live.get(id)) {
+        delete exitInfo.value[id];
+        delete revealedExitIPs.value[id];
+      }
+    }
+    autoFetchExitIPs();
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
@@ -1268,6 +1344,27 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 </div>
                 <code v-else-if="r.action === 'route'" style="font-size: 12px">{{ r.interface }}</code>
                 <span v-else class="muted">—</span>
+
+                <!-- Exit IP: the public IP this pattern's traffic appears
+                     to come from. Fetched automatically after load; the IP
+                     is masked until clicked. Hidden for block rules. -->
+                <div v-if="r.action !== 'block'" class="exit-ip">
+                  <span v-if="exitLoading[r.id]" class="muted">probing exit IP…</span>
+                  <template v-else-if="exitInfo[r.id]">
+                    <template v-if="exitInfo[r.id].probed">
+                      <span v-if="flagEmoji(exitInfo[r.id].country)" class="flag">{{ flagEmoji(exitInfo[r.id].country) }}</span>
+                      <code class="exit-ip-val"
+                            :title="revealedExitIPs[r.id] ? 'click to mask' : 'click to reveal full IP'"
+                            @click="toggleExitReveal(r.id)">
+                        {{ revealedExitIPs[r.id] ? exitInfo[r.id].exitIp : maskIP(exitInfo[r.id].exitIp) }}
+                      </code>
+                      <span v-if="exitInfo[r.id].city" class="muted">· {{ exitInfo[r.id].city }}</span>
+                    </template>
+                    <span v-else class="muted" :title="exitInfo[r.id].message">— couldn't determine</span>
+                    <button class="link-btn" title="Re-probe exit IP" @click="checkExitIP(r)">↻</button>
+                  </template>
+                  <span v-else class="muted">queued…</span>
+                </div>
               </td>
               <td>
                 <label class="toggle" @click.prevent="toggle(r)">
@@ -1388,6 +1485,26 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
 </template>
 
 <style scoped>
+.exit-ip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.exit-ip .flag { font-size: 13px; line-height: 1; }
+.exit-ip-val { cursor: pointer; }
+.exit-ip-val:hover { text-decoration: underline; }
+.link-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 11px;
+}
+.link-btn:hover { text-decoration: underline; }
+
 tr.rule-iface-down td { background: rgba(255, 111, 111, 0.05); }
 tr.rule-iface-down code { opacity: 0.85; }
 tr.rule-selected td { background: rgba(110, 168, 255, 0.08); }

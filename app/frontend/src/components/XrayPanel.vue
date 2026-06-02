@@ -35,6 +35,10 @@ const entries = ref<XrayRow[]>([]);
 const error = ref<string>('');
 const busy = ref<boolean>(false);
 const testing = ref<boolean>(false);
+// IDs of entries with a probe currently in flight. Lets each row show
+// its own "testing…" state during a concurrent "Test all" run, instead
+// of the whole table looking idle until everything finishes.
+const testingIds = ref<Set<number>>(new Set());
 const subTab = ref<SubTab>('outbounds');
 
 const defaultOutbound = `{
@@ -196,6 +200,8 @@ async function toggleEnabled(row: XrayRow) {
 // ---------- Testing ----------
 
 async function runTest(row: XrayRow) {
+  // Mark this row in-flight (reassign the Set so Vue picks up the change).
+  testingIds.value = new Set(testingIds.value).add(row.id);
   try {
     const r = await TestXray(row.id, testTarget.value.trim());
     testResults.value = {
@@ -207,20 +213,35 @@ async function runTest(row: XrayRow) {
       ...testResults.value,
       [row.id]: { ok: false, message: e?.message || String(e), latencyMs: 0 },
     };
+  } finally {
+    const next = new Set(testingIds.value);
+    next.delete(row.id);
+    testingIds.value = next;
   }
 }
 
-// testAll fires runTest against every enabled entry SEQUENTIALLY (so
-// the daemon isn't slammed and the latency numbers are independent).
-// Disabled entries are skipped because the daemon refuses them anyway.
+// testAll tests every enabled entry CONCURRENTLY (with a small cap), so
+// each row's result lands the moment its own probe returns instead of
+// waiting through the others one-by-one. runTest writes each row's
+// result independently, so the table fills in progressively. The cap
+// keeps the daemon from being slammed and keeps per-entry latency
+// numbers roughly independent. Disabled entries are skipped because the
+// daemon refuses them anyway.
+const TEST_ALL_CONCURRENCY = 4;
 async function testAll() {
   if (testing.value) return;
   testing.value = true;
   try {
-    for (const row of entries.value) {
-      if (!row.enabled) continue;
-      await runTest(row);
-    }
+    const queue = entries.value.filter(r => r.enabled);
+    let i = 0;
+    const worker = async () => {
+      while (i < queue.length) {
+        await runTest(queue[i++]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(TEST_ALL_CONCURRENCY, queue.length) }, worker),
+    );
   } finally {
     testing.value = false;
   }
@@ -409,7 +430,8 @@ defineExpose({ refresh });
                 {{ row.enabled ? 'enabled' : 'disabled' }}
               </span>
               <code style="font-size: 11px; color: var(--text-dim)">127.0.0.1:{{ row.socksPort }}</code>
-              <span v-if="testResults[row.id]" class="tag"
+              <span v-if="testingIds.has(row.id)" class="tag" style="font-size: 11px">testing…</span>
+              <span v-else-if="testResults[row.id]" class="tag"
                     :class="testResults[row.id].ok ? 'tag-allow' : 'tag-block'"
                     style="font-size: 11px">
                 {{ testResults[row.id].ok ? `${testResults[row.id].latencyMs} ms` : 'fail' }}
@@ -430,7 +452,7 @@ defineExpose({ refresh });
               </span>
             </div>
             <div class="row" style="gap: 6px">
-              <button @click="runTest(row)" :disabled="busy || testing || !row.enabled">Test</button>
+              <button @click="runTest(row)" :disabled="busy || testing || testingIds.has(row.id) || !row.enabled">Test</button>
               <button @click="toggleEnabled(row)" :disabled="busy">{{ row.enabled ? 'Disable' : 'Enable' }}</button>
               <button @click="beginEdit(row)" :disabled="busy">Edit</button>
               <button @click="askDelete(row)" :disabled="busy"

@@ -8,7 +8,7 @@ import ProxiesPanel from './components/ProxiesPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
-import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate } from '../wailsjs/go/main/App';
+import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, PublicIP } from '../wailsjs/go/main/App';
 import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
 
@@ -29,6 +29,11 @@ const packaged = ref<boolean>(true);
 const reinstalling = ref<boolean>(false);
 const updateInfo = ref<main.UpdateInfo | null>(null);
 const updateDismissed = ref(false);
+// Public egress identity (default-route IP + geo). Polled on a slow
+// cadence — the daemon caches the ip-api.com probe for a few minutes,
+// and a public IP rarely changes — so this stays cheap.
+const egress = ref<ipc.ExitIPResult | null>(null);
+let egressTimer: number | undefined;
 // Bumped each time the user clicks "Reinstall" in the compatibility
 // banner. SettingsPanel watches it to scroll the Reinstall card into
 // view and flash it — a counter (not a boolean) so repeated clicks
@@ -90,6 +95,20 @@ async function refresh() {
   }
 }
 
+async function refreshEgress() {
+  let probed = false;
+  try {
+    const r = await PublicIP();
+    egress.value = r;
+    probed = !!r?.probed;
+  } catch { /* daemon may be down / starting; leave last value */ }
+  // Self-scheduling: retry quickly until we have a real exit IP (covers
+  // daemon-still-starting and transient probe failures), then back off
+  // to a slow poll since a public IP rarely changes.
+  if (egressTimer) window.clearTimeout(egressTimer);
+  egressTimer = window.setTimeout(refreshEgress, probed ? 120000 : 12000);
+}
+
 async function onInstalled() {
   // Force an immediate refresh so the UI flips to the regular tabs.
   await refresh();
@@ -100,18 +119,21 @@ onMounted(async () => {
   try { appVersion.value = await AppVersion(); } catch { appVersion.value = ''; }
   await refresh();
   timer = window.setInterval(refresh, 2000);
+  refreshEgress(); // self-schedules its own next run
   // Check for updates once on startup; runs in background so it never
   // delays the initial UI render.
   CheckForUpdate().then(info => { if (info.hasUpdate) updateInfo.value = info; }).catch(() => {});
 });
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
+  if (egressTimer) window.clearTimeout(egressTimer);
 });
 </script>
 
 <template>
   <StatusBar :status="status" :error="error" :appVersion="appVersion"
-             :incompatible="daemonIncompatible" :daemonVersion="daemonVersion" />
+             :incompatible="daemonIncompatible" :daemonVersion="daemonVersion"
+             :egress="egress" @refresh-egress="refreshEgress" />
 
   <div v-if="daemonIncompatible && !reinstalling" class="compat-banner">
     <div class="col" style="gap: 2px">

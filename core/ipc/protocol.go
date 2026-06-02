@@ -67,6 +67,8 @@ const (
 	MethodXraySetRouting      = "xray.setRouting"
 	MethodXrayParseLink       = "xray.parseLink"
 	MethodXrayTest            = "xray.test"
+	MethodPublicIP            = "net.public-ip"
+	MethodRuleExitIP          = "rules.exit-ip"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -393,6 +395,29 @@ type XrayTestResult struct {
 	Country   string `json:"country"` // ISO 3166-1 alpha-2 code, e.g. "DE"
 	Region    string `json:"region"`  // state / province, e.g. "Bavaria"
 	City      string `json:"city"`    // city, e.g. "Munich"
+}
+
+// ExitIPResult is the public egress identity for one path — the system
+// default route (net.public-ip) or a single rule's interface
+// (rules.exit-ip). ExitIP/geo come from an ip-api.com probe dialed
+// through that path, so they reflect what destination sites actually
+// see. Probed=false with a populated Message explains why no IP could
+// be determined (block rule, app/proxy not running, probe timeout).
+type ExitIPResult struct {
+	Interface string `json:"interface"` // "" = system default route; else the rule's interface
+	ExitIP    string `json:"exitIp"`    // public egress IP, "" if unknown
+	Country   string `json:"country"`   // ISO 3166-1 alpha-2, e.g. "DE"
+	Region    string `json:"region"`    // state / province
+	City      string `json:"city"`      // city
+	Probed    bool   `json:"probed"`    // true if a live exit IP was obtained
+	Message   string `json:"message"`   // human-readable note (errors / why no IP)
+}
+
+// RuleExitIPParams identifies the rule whose egress to probe. The
+// daemon resolves the rule's Interface to a dialer and probes through
+// it (block rules short-circuit; allow rules use the default route).
+type RuleExitIPParams struct {
+	RuleID int64 `json:"ruleId"`
 }
 
 type SystemDNSStatus struct {

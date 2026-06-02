@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -869,6 +868,30 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}, nil
 	})
 
+	// net.public-ip — public egress identity for the system default
+	// route ("what every site sees" for traffic no rule matches).
+	s.Handle(ipc.MethodPublicIP, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return d.resolveExitIP(ctx, ""), nil
+	})
+
+	// rules.exit-ip — public egress identity for one rule's interface.
+	// block rules short-circuit (no egress); allow rules fall through to
+	// the default route via an empty interface.
+	s.Handle(ipc.MethodRuleExitIP, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.RuleExitIPParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		r, err := d.store.Get(ctx, p.RuleID)
+		if err != nil {
+			return nil, err
+		}
+		if r.Action == rules.ActionBlock {
+			return ipc.ExitIPResult{Interface: r.Interface, Message: "blocked — no egress"}, nil
+		}
+		return d.resolveExitIP(ctx, r.Interface), nil
+	})
+
 	s.Handle(ipc.MethodXrayParseLink, func(_ context.Context, raw json.RawMessage) (any, error) {
 		var p ipc.XrayParseLinkParams
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -1014,44 +1037,12 @@ func (d *handlerDeps) rulesReferencingXray(ctx context.Context, name string) ([]
 // Fallback: resolve the configured server address and look it up in the
 // local geoip.dat (offline, no extra round-trip).
 func xrayExitCountry(ctx context.Context, dataDir, outboundJSON string, dialer proxy.Dialer) (exitIP, country, region, city string) {
-	// Primary: probe real exit IP through the proxy.
-	// ip-api.com sees the actual public exit IP, not just the configured
-	// server address, so country/region/city reflect the real exit location.
-	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	transport := &http.Transport{
-		DialContext: func(dctx context.Context, _, addr string) (net.Conn, error) {
-			h, portStr, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			p, err := strconv.Atoi(portStr)
-			if err != nil {
-				return nil, err
-			}
-			parsed := net.ParseIP(h)
-			var hostname string
-			if parsed == nil {
-				hostname = h
-			}
-			return dialer.Dial(dctx, hostname, parsed, p)
-		},
-	}
-	req, err := http.NewRequestWithContext(pctx, http.MethodGet,
-		"http://ip-api.com/json/?fields=query,countryCode,regionName,city", nil)
-	if err == nil {
-		if resp, err := (&http.Client{Transport: transport}).Do(req); err == nil {
-			defer resp.Body.Close()
-			var result struct {
-				Query       string `json:"query"`
-				CountryCode string `json:"countryCode"`
-				RegionName  string `json:"regionName"`
-				City        string `json:"city"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result.CountryCode) == 2 {
-				return result.Query, result.CountryCode, result.RegionName, result.City
-			}
-		}
+	// Primary: probe real exit IP through the proxy. ip-api.com sees the
+	// actual public exit IP, not just the configured server address, so
+	// country/region/city reflect the real exit location. Shares the same
+	// probe path as the per-rule / default-route exit-IP lookups.
+	if ip, cc, region, city, ok := probeExitIPVia(ctx, proxyDialContext(dialer)); ok {
+		return ip, cc, region, city
 	}
 
 	// Fallback: geoip.dat lookup on the configured server address.
@@ -1076,8 +1067,12 @@ func xrayExitCountry(ctx context.Context, dataDir, outboundJSON string, dialer p
 func xrayServerAddr(outboundJSON string) string {
 	var raw struct {
 		Settings struct {
-			Vnext   []struct{ Address string `json:"address"` } `json:"vnext"`
-			Servers []struct{ Address string `json:"address"` } `json:"servers"`
+			Vnext []struct {
+				Address string `json:"address"`
+			} `json:"vnext"`
+			Servers []struct {
+				Address string `json:"address"`
+			} `json:"servers"`
 		} `json:"settings"`
 	}
 	if err := json.Unmarshal([]byte(outboundJSON), &raw); err != nil {
