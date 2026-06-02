@@ -72,6 +72,40 @@ func KnownGroups() []Group {
 			Icon: svgBranded("G", "#4285f4", "#34a853", "#ffffff"),
 		},
 		{
+			Key:         "google",
+			DisplayName: "Google (all)",
+			Description: "Search, Gmail, Drive/Docs, Maps, Photos, Accounts, Play + Google shared CDNs/APIs. Routes ALL of Google — broader than Google AI.",
+			Patterns: []string{
+				// Product front-ends + accounts (apex + every subdomain).
+				"*.google.com",
+				"*.gmail.com",
+				"*.googlemail.com",
+				// Shared backends / CDNs the products call.
+				"*.googleapis.com",
+				"*.gstatic.com",
+				"*.googleusercontent.com",
+				"*.ggpht.com",
+				"*.gvt1.com",
+				"*.gvt2.com",
+				"*.gvt3.com",
+				"*.goog", // pki.goog, *.gke.goog
+				"*.googlesource.com",
+				"*.recaptcha.net",
+				// Shorteners / brand domains.
+				"*.withgoogle.com",
+				"*.goo.gl",
+				"*.g.co",
+				// Analytics / tag / ads (Google-owned).
+				"*.google-analytics.com",
+				"*.googletagmanager.com",
+				"*.googletagservices.com",
+				"*.googlesyndication.com",
+				"*.googleadservices.com",
+				"*.doubleclick.net",
+			},
+			Icon: svgGoogle(),
+		},
+		{
 			Key:         "github-copilot",
 			DisplayName: "GitHub Copilot",
 			Description: "Copilot Chat + suggestion endpoints",
@@ -129,11 +163,13 @@ func KnownGroups() []Group {
 		{
 			Key:         "grok",
 			DisplayName: "Grok / xAI",
-			Description: "Grok chat, xAI API, console",
+			Description: "Grok chat, xAI API/console, Grok-on-X surface + user content",
 			Patterns: []string{
 				"*.grok.com",
 				"*.x.ai",
 				"*.xai-cdn.com",
+				"*.grokusercontent.com", // images/files Grok serves back (cf. oaiusercontent.com)
+				"grok.x.com",            // Grok product surface reached via "sign in with X"
 			},
 			Icon: svgGrok(),
 		},
@@ -353,6 +389,19 @@ func svgBranded(initials, fill, accent, text string) string {
 // same rounded-square badge as svgBranded, so all groups stay visually
 // consistent. Any of them can be overridden by dropping a real
 // icons/<key>.svg|.png|.ico file (see LoadIcon).
+
+// svgGoogle: white badge with the four-colour Google "G" (48x48 source
+// paths, translated to centre inside the 64x64 badge).
+func svgGoogle() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>` +
+		`<g transform="translate(8,8)">` +
+		`<path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/>` +
+		`<path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/>` +
+		`<path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/>` +
+		`<path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>` +
+		`</g></svg>`
+}
 
 // svgYouTube: red badge with a white play triangle.
 func svgYouTube() string {

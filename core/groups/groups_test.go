@@ -92,3 +92,63 @@ func TestGoogleAI_CoversGeminiBackends(t *testing.T) {
 		}
 	}
 }
+
+// TestGoogle_CoversAllOfGoogle: the broad "google" group is the opposite of
+// google-ai — it MUST cover the mainstream Google products that google-ai
+// deliberately excludes.
+func TestGoogle_CoversAllOfGoogle(t *testing.T) {
+	g := FindByKey("google")
+	if g == nil {
+		t.Fatal("google group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		"www.google.com",
+		"mail.google.com",
+		"drive.google.com",
+		"maps.googleapis.com",
+		"photos.google.com",
+		"accounts.google.com",
+		"lh3.googleusercontent.com",
+		"fonts.gstatic.com",
+	} {
+		if !covered(h) {
+			t.Errorf("google group must cover %q but does not", h)
+		}
+	}
+}
+
+// TestGrok_CoversUserContentAndXSurface locks in the login-via-X gap: Grok
+// serves user content from grokusercontent.com and is reachable as grok.x.com
+// during "sign in with X", neither covered by the original three patterns.
+func TestGrok_CoversUserContentAndXSurface(t *testing.T) {
+	g := FindByKey("grok")
+	if g == nil {
+		t.Fatal("grok group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		"grokusercontent.com",
+		"assets.grokusercontent.com",
+		"grok.x.com",
+		"api.x.ai",
+	} {
+		if !covered(h) {
+			t.Errorf("grok group must cover %q but does not", h)
+		}
+	}
+}
