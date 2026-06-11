@@ -76,9 +76,15 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           DMG="dist/Em-Wall-${VERSION}.dmg"
+          # Stage the volume contents so the DMG shows the app next to
+          # an /Applications symlink for drag-to-install.
+          STAGE="$(mktemp -d)/Em Wall"
+          mkdir -p "$STAGE"
+          cp -R "app/build/bin/Em Wall.app" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
           hdiutil create \
             -volname "Em Wall" \
-            -srcfolder "app/build/bin/Em Wall.app" \
+            -srcfolder "$STAGE" \
             -ov -format UDZO \
             "$DMG"
           echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"

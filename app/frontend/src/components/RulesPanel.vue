@@ -222,21 +222,29 @@ async function setGroupEnabledAll(g: ipc.GroupDTO, enabled: boolean) {
   }
 }
 
-// Collapse/expand state per section. Default expanded so first-time
-// users see the rules; user toggles persist for the lifetime of the
-// component (no localStorage — nothing to migrate).
-const collapsed = ref<Set<string>>(new Set());
+// Collapse/expand state per section. Group sections start collapsed
+// to keep the list scannable; the ungrouped bucket (the user's own
+// rules) starts expanded. Applying a group expands its section so the
+// freshly created rules are visible. User toggles persist for the
+// lifetime of the component (no localStorage — nothing to migrate).
+const expanded = ref<Set<string>>(new Set(['__ungrouped__']));
 function sectionKey(g: ipc.GroupDTO | null): string {
   return g ? g.key : '__ungrouped__';
 }
 function isCollapsed(g: ipc.GroupDTO | null): boolean {
-  return collapsed.value.has(sectionKey(g));
+  return !expanded.value.has(sectionKey(g));
 }
 function toggleCollapse(g: ipc.GroupDTO | null) {
   const k = sectionKey(g);
-  const next = new Set(collapsed.value);
+  const next = new Set(expanded.value);
   if (next.has(k)) next.delete(k); else next.add(k);
-  collapsed.value = next;
+  expanded.value = next;
+}
+function expandSection(key: string) {
+  if (expanded.value.has(key)) return;
+  const next = new Set(expanded.value);
+  next.add(key);
+  expanded.value = next;
 }
 
 function askDeleteGroup(g: ipc.GroupDTO) {
@@ -345,6 +353,7 @@ async function applyGroup() {
       error.value = `Created ${created} rule(s); ${skipped} pattern(s) skipped (already exist).`;
     }
     groupApply.value = null;
+    expandSection(g.key);
     await refresh();
     emit('changed');
   } catch (e: any) {
