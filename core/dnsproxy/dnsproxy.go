@@ -101,6 +101,16 @@ type Config struct {
 	Interfaces  InterfaceChecker // nil → no enforcement (allow-via-iface won't strictly enforce)
 	Apps        AppLocator       // nil → no `app:` prefix support
 	Proxies     ProxyResolver    // nil → no `proxy:` prefix support
+	// EnableFakeIP turns on fake-IP for proxy:/xray: routed names: instead
+	// of resolving upstream, the server hands the client a synthetic IP
+	// from FakeIPv4CIDR, pins it to the proxy utun, and records the
+	// hostname so the netstack layer redials it through the proxy. nil
+	// FakeIP pool (see New) when false. Requires Proxies + ProxyTun.
+	EnableFakeIP bool
+	// FakeIPv4CIDR is the reserved range fake IPs are drawn from. Empty →
+	// DefaultFakeIPv4CIDR (198.18.0.0/15, RFC 2544 benchmarking, never
+	// globally routed so it can't collide with real destinations).
+	FakeIPv4CIDR string
 	// ProxyTun is the kernel-assigned name of the daemon-owned utun
 	// where the user-space TCP stack accepts proxy-routed connections.
 	// Empty disables the "proxy:" path; resolveIface will treat such
@@ -112,6 +122,10 @@ type Config struct {
 
 type Server struct {
 	cfg Config
+
+	// fakeIP is non-nil only when EnableFakeIP is set and the pool built
+	// successfully. Drives the proxy:/xray: fake-IP fast path.
+	fakeIP *fakeIPPool
 
 	mu      sync.Mutex
 	udp     *dns.Server
@@ -162,7 +176,19 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
 	}
-	return &Server{cfg: cfg}, nil
+	s := &Server{cfg: cfg}
+	if cfg.EnableFakeIP {
+		cidr := cfg.FakeIPv4CIDR
+		if cidr == "" {
+			cidr = DefaultFakeIPv4CIDR
+		}
+		pool, err := newFakeIPPool(cidr, cfg.RouteTTLMin)
+		if err != nil {
+			return nil, fmt.Errorf("dnsproxy: fake-ip pool: %w", err)
+		}
+		s.fakeIP = pool
+	}
+	return s, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -240,6 +266,17 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		if s.cfg.Interfaces != nil && !s.cfg.Interfaces.IsUp(iface) {
 			s.writeNX(w, req, name)
 			s.log(name, "block-iface-down", logIface, d.RuleID, clientIP)
+			return
+		}
+		// Fake-IP fast path for proxy:/xray: routes. We never resolve the
+		// name upstream: the real lookup happens proxy-side at connect time
+		// (the netstack handler redials by hostname), so the IP we return is
+		// only a routing handle. Synthesizing it avoids leaking the user's
+		// network to the answer's geo and sidesteps the region-pinned CDN
+		// hostnames (googlevideo `sn-*`) that SERVFAIL on a local/VPN
+		// resolver and used to surface as `forward-failed`.
+		if s.fakeIP != nil && (proxy.IsProxyInterface(d.Interface) || xray.IsXrayInterface(d.Interface)) {
+			s.handleFakeIP(w, req, name, iface, effIface, logIface, d.RuleID, clientIP)
 			return
 		}
 		resp, err := s.forward(req)
@@ -444,6 +481,87 @@ func (s *Server) writeServFail(w dns.ResponseWriter, req *dns.Msg) {
 	resp := new(dns.Msg)
 	resp.SetRcode(req, dns.RcodeServerFailure)
 	_ = w.WriteMsg(resp)
+}
+
+// writeEmpty replies NOERROR with no answers (NODATA) plus a negative-cache
+// SOA. Used by the fake-IP path for AAAA/HTTPS/etc. on a proxy-routed name:
+// we only hand out a fake A, so steering the client to it means saying
+// "this name exists but has no record of that type" for everything else.
+func (s *Server) writeEmpty(w dns.ResponseWriter, req *dns.Msg, name string) {
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	soa := &dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   dns.Fqdn(parentDomain(name)),
+			Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: s.cfg.NegativeTTL,
+		},
+		Ns: "em-wall.invalid.", Mbox: "em-wall.invalid.",
+		Serial: 1, Minttl: s.cfg.NegativeTTL,
+	}
+	resp.Ns = []dns.RR{soa}
+	_ = w.WriteMsg(resp)
+}
+
+// handleFakeIP serves a proxy:/xray: routed query without any upstream
+// lookup. For an A question it allocates a fake IP for the hostname, pins it
+// to the proxy utun, records the (proxyNames, hostname) mapping the netstack
+// handler consults at connect time, and answers with that synthetic record.
+// Every other qtype gets NODATA so the client falls through to the A record.
+// effIface is the xray-translated interface so the recorded proxy names match
+// what the TCP layer dials.
+func (s *Server) handleFakeIP(w dns.ResponseWriter, req *dns.Msg, name, iface, effIface, logIface string, ruleID int64, clientIP string) {
+	q := req.Question[0]
+	if q.Qtype != dns.TypeA {
+		// AAAA/HTTPS/etc.: NODATA. The proxy decides the egress address
+		// family itself when it dials the hostname, so withholding a fake
+		// AAAA just steers the client onto our fake A — no v6 fake range,
+		// no v6 host routes to manage.
+		s.writeEmpty(w, req, name)
+		s.log(name, "route", logIface, ruleID, clientIP)
+		return
+	}
+
+	ip, ttl, ok := s.fakeIP.Allocate(name)
+	if !ok {
+		// Pool exhausted — fail closed rather than leak via the default
+		// route. Extremely unlikely with a /15 (131072 slots).
+		s.writeServFail(w, req)
+		s.log(name, "block-fakeip-exhausted", logIface, ruleID, clientIP)
+		return
+	}
+
+	// Pin the fake IP to the proxy utun so the client's connection lands on
+	// our netstack. Fail closed if the route won't install.
+	if s.cfg.Routes != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := s.cfg.Routes.Install(ctx, ip.String(), iface, ttl, ruleID)
+		cancel()
+		if err != nil {
+			s.cfg.Logger.Printf("dnsproxy: fake-ip route %s via %s failed: %v", ip, iface, err)
+			s.writeServFail(w, req)
+			s.log(name, "block-route-failed", logIface, ruleID, clientIP)
+			return
+		}
+	}
+	// Record IP → (proxyNames, hostname) so the netstack handler redials the
+	// real hostname through the proxy when the client connects to the fake IP.
+	if s.cfg.Proxies != nil {
+		names := proxy.ParseInterface(effIface)
+		s.cfg.Proxies.Record(ip, name, names, ttl, ruleID)
+	}
+
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.Answer = []dns.RR{&dns.A{
+		Hdr: dns.RR_Header{
+			Name:   q.Name,
+			Rrtype: dns.TypeA, Class: dns.ClassINET,
+			Ttl: uint32(ttl / time.Second),
+		},
+		A: ip,
+	}}
+	_ = w.WriteMsg(resp)
+	s.log(name, "route", logIface, ruleID, clientIP)
 }
 
 func (s *Server) forward(req *dns.Msg) (*dns.Msg, error) {

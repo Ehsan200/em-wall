@@ -622,3 +622,141 @@ func TestServer_ServFailOnUpstreamError(t *testing.T) {
 		t.Errorf("expected SERVFAIL on upstream error, got %s", dns.RcodeToString[resp.Rcode])
 	}
 }
+
+// ---- fake-IP path (proxy:/xray: routes) ----
+
+type fakeProxies struct {
+	mu   sync.Mutex
+	recs []proxyRec
+}
+
+type proxyRec struct {
+	ip     net.IP
+	host   string
+	names  []string
+	ttl    time.Duration
+	ruleID int64
+}
+
+func (f *fakeProxies) HasProxy(string) bool { return true }
+
+func (f *fakeProxies) Record(ip net.IP, host string, names []string, ttl time.Duration, ruleID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recs = append(f.recs, proxyRec{ip, host, names, ttl, ruleID})
+}
+
+func startFakeIPServer(t *testing.T, rs []rules.Rule, fwd Forwarder, routes RouteInstaller, proxies ProxyResolver, logs LogSink) string {
+	t.Helper()
+	eng := decision.New(ruleSet(rs))
+	if err := eng.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+
+	s, err := New(Config{
+		Listen:       addr,
+		Decider:      eng,
+		Forwarder:    fwd,
+		Routes:       routes,
+		Proxies:      proxies,
+		EnableFakeIP: true,
+		ProxyTun:     "utun9",
+		Logs:         logs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Start(ctx) }()
+	select {
+	case <-s.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never became ready")
+	}
+	return addr
+}
+
+// A proxy-routed A query is answered with a fake IP, never forwarded upstream,
+// and pins a route + records the hostname mapping for the netstack handler.
+func TestServer_FakeIP_ProxyRoute(t *testing.T) {
+	fwd := &fakeForwarder{}
+	routes := &fakeRoutes{}
+	proxies := &fakeProxies{}
+	logs := &fakeLogs{}
+	rs := []rules.Rule{
+		{ID: 11, Pattern: "*.googlevideo.com", Action: rules.ActionRoute, Interface: "proxy:us", Enabled: true},
+	}
+	addr := startFakeIPServer(t, rs, fwd, routes, proxies, logs)
+
+	resp := query(t, addr, "rr3.googlevideo.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+		t.Fatalf("expected one A answer, got rcode=%s answers=%d", dns.RcodeToString[resp.Rcode], len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("answer is %T, want *dns.A", resp.Answer[0])
+	}
+	_, block, _ := net.ParseCIDR(DefaultFakeIPv4CIDR)
+	if !block.Contains(a.A) {
+		t.Fatalf("fake IP %s not in %s", a.A, DefaultFakeIPv4CIDR)
+	}
+	if fwd.calls != 0 {
+		t.Fatalf("proxy-routed name must NOT be forwarded upstream, got %d calls", fwd.calls)
+	}
+
+	routes.mu.Lock()
+	rcalls := append([]routeCall(nil), routes.calls...)
+	routes.mu.Unlock()
+	if len(rcalls) != 1 || rcalls[0].iface != "utun9" || rcalls[0].host != a.A.String() || rcalls[0].ruleID != 11 {
+		t.Fatalf("expected fake IP pinned to utun9, got %+v", rcalls)
+	}
+
+	proxies.mu.Lock()
+	recs := append([]proxyRec(nil), proxies.recs...)
+	proxies.mu.Unlock()
+	if len(recs) != 1 || recs[0].host != "rr3.googlevideo.com" || !recs[0].ip.Equal(a.A) {
+		t.Fatalf("expected mapping fakeIP→hostname, got %+v", recs)
+	}
+	if len(recs[0].names) != 1 || recs[0].names[0] != "us" {
+		t.Fatalf("expected proxy names [us], got %v", recs[0].names)
+	}
+	if len(logs.entries) != 1 || logs.entries[0].action != "route" {
+		t.Fatalf("expected one route log, got %+v", logs.entries)
+	}
+}
+
+// AAAA (and other non-A) queries on a proxy-routed name return NODATA so the
+// client falls through to the fake A — no upstream query, no v6 fake route.
+func TestServer_FakeIP_AAAAIsNodata(t *testing.T) {
+	fwd := &fakeForwarder{}
+	routes := &fakeRoutes{}
+	proxies := &fakeProxies{}
+	rs := []rules.Rule{
+		{ID: 12, Pattern: "*.googlevideo.com", Action: rules.ActionRoute, Interface: "proxy:us", Enabled: true},
+	}
+	addr := startFakeIPServer(t, rs, fwd, routes, proxies, nil)
+
+	resp := query(t, addr, "rr3.googlevideo.com", dns.TypeAAAA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR/NODATA, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Fatalf("expected no AAAA answer, got %d", len(resp.Answer))
+	}
+	if fwd.calls != 0 {
+		t.Fatalf("AAAA on proxy-routed name must not forward, got %d calls", fwd.calls)
+	}
+	routes.mu.Lock()
+	n := len(routes.calls)
+	routes.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("AAAA NODATA should install no routes, got %d", n)
+	}
+}

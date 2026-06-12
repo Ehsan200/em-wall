@@ -128,16 +128,17 @@ func main() {
 	fwd := dnsproxy.NewMultiUpstream(upstreams, 3*time.Second)
 
 	dnsServer, err := dnsproxy.New(dnsproxy.Config{
-		Listen:     *listenAddr,
-		Decider:    engine,
-		Forwarder:  fwd,
-		Routes:     router,
-		Interfaces: dnsproxy.DefaultInterfaceChecker,
-		Apps:       apps,
-		Proxies:    &proxyResolver{store: proxyStore, table: proxyTable},
-		ProxyTun:   proxyTunName,
-		Logs:       logSink,
-		Logger:     log.Default(),
+		Listen:       *listenAddr,
+		Decider:      engine,
+		Forwarder:    fwd,
+		Routes:       router,
+		Interfaces:   dnsproxy.DefaultInterfaceChecker,
+		Apps:         apps,
+		Proxies:      &proxyResolver{store: proxyStore, table: proxyTable},
+		EnableFakeIP: true,
+		ProxyTun:     proxyTunName,
+		Logs:         logSink,
+		Logger:       log.Default(),
 	})
 	if err != nil {
 		log.Fatalf("em-walld: dnsproxy: %v", err)
@@ -558,5 +559,3 @@ func utunSignature() string {
 	sort.Strings(names)
 	return strings.Join(names, ",")
 }
-
-
