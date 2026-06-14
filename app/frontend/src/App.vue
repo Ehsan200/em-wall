@@ -8,8 +8,8 @@ import ProxiesPanel from './components/ProxiesPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
-import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, PublicIP } from '../wailsjs/go/main/App';
-import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
+import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, PublicIP } from '../wailsjs/go/main/App';
+import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
 
 type Tab = 'rules' | 'logs' | 'network' | 'proxies' | 'xray' | 'settings';
@@ -29,6 +29,29 @@ const packaged = ref<boolean>(true);
 const reinstalling = ref<boolean>(false);
 const updateInfo = ref<main.UpdateInfo | null>(null);
 const updateDismissed = ref(false);
+// Self-update download state. `updating` gates the banner buttons while
+// the .dmg streams down; `updateProgress` (0..1) drives the bar. On
+// success the app quits and relaunches itself, so these never reset —
+// the process is gone. `updateError` surfaces a pre-handoff failure
+// (download/mount) where the running app is left untouched.
+const updating = ref(false);
+const updateProgress = ref(0);
+const updateError = ref('');
+
+async function startUpdate() {
+  if (!updateInfo.value) return;
+  updateError.value = '';
+  updateProgress.value = 0;
+  updating.value = true;
+  try {
+    // Resolves to nothing: the app quits on success. A thrown error
+    // means the download or mount failed before any swap — safe to retry.
+    await DownloadAndApplyUpdate(updateInfo.value.downloadUrl);
+  } catch (e: any) {
+    updateError.value = e?.message || String(e);
+    updating.value = false;
+  }
+}
 // Public egress identity (default-route IP + geo). Polled on a slow
 // cadence — the daemon caches the ip-api.com probe for a few minutes,
 // and a public IP rarely changes — so this stays cheap.
@@ -123,10 +146,12 @@ onMounted(async () => {
   // Check for updates once on startup; runs in background so it never
   // delays the initial UI render.
   CheckForUpdate().then(info => { if (info.hasUpdate) updateInfo.value = info; }).catch(() => {});
+  EventsOn('update:progress', (p: number) => { updateProgress.value = p; });
 });
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
   if (egressTimer) window.clearTimeout(egressTimer);
+  EventsOff('update:progress');
 });
 </script>
 
@@ -149,12 +174,21 @@ onUnmounted(() => {
   </div>
 
   <div v-if="updateInfo && !updateDismissed" class="update-banner">
-    <span>
+    <span v-if="!updating">
       Update available: <strong>{{ updateInfo.version }}</strong>
+      <span v-if="updateError" style="color: #c0392b; font-size: 12px; margin-left: 8px">{{ updateError }}</span>
     </span>
-    <div class="row" style="gap: 8px">
-      <button class="primary" @click="BrowserOpenURL(updateInfo!.url)">View release</button>
+    <span v-else>
+      Downloading {{ updateInfo.version }}… {{ Math.round(updateProgress * 100) }}%
+      — the app will restart automatically.
+    </span>
+    <div v-if="!updating" class="row" style="gap: 8px">
+      <button v-if="updateInfo.downloadUrl" class="primary" @click="startUpdate">Download &amp; install</button>
+      <button :class="{ primary: !updateInfo.downloadUrl }" @click="BrowserOpenURL(updateInfo!.url)">View release</button>
       <button @click="updateDismissed = true">Dismiss</button>
+    </div>
+    <div v-else class="update-progress">
+      <div class="update-progress-fill" :style="{ width: (updateProgress * 100) + '%' }"></div>
     </div>
   </div>
 

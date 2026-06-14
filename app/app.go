@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/version"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // releasesAPI is the GitHub Releases endpoint for this project.
@@ -448,9 +451,10 @@ func (a *App) Uninstall(purge bool) error {
 
 // UpdateInfo is returned by CheckForUpdate.
 type UpdateInfo struct {
-	HasUpdate bool   `json:"hasUpdate"`
-	Version   string `json:"version"` // latest tag, e.g. "v1.2.3"
-	URL       string `json:"url"`     // GitHub release page
+	HasUpdate   bool   `json:"hasUpdate"`
+	Version     string `json:"version"`     // latest tag, e.g. "v1.2.3"
+	URL         string `json:"url"`         // GitHub release page
+	DownloadURL string `json:"downloadUrl"` // .dmg asset, "" if none published
 }
 
 // CheckForUpdate fetches the latest GitHub release and compares it with
@@ -477,6 +481,10 @@ func (a *App) CheckForUpdate() UpdateInfo {
 	var release struct {
 		TagName string `json:"tag_name"`
 		HTMLURL string `json:"html_url"`
+		Assets  []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return UpdateInfo{}
@@ -484,7 +492,109 @@ func (a *App) CheckForUpdate() UpdateInfo {
 	if !semverNewer(release.TagName, current) {
 		return UpdateInfo{}
 	}
-	return UpdateInfo{HasUpdate: true, Version: release.TagName, URL: release.HTMLURL}
+	dmg := ""
+	for _, a := range release.Assets {
+		if strings.HasSuffix(strings.ToLower(a.Name), ".dmg") {
+			dmg = a.BrowserDownloadURL
+			break
+		}
+	}
+	return UpdateInfo{HasUpdate: true, Version: release.TagName, URL: release.HTMLURL, DownloadURL: dmg}
+}
+
+// DownloadAndApplyUpdate downloads the release .dmg from downloadURL,
+// then hands off to a detached swap script and quits the app so the new
+// bundle can replace the running one in place. On success the app exits
+// (this method does not return to the frontend); the new app relaunches
+// itself. The bundled daemon is updated separately — the relaunched app
+// reports a newer version than the running daemon, which trips the
+// existing "reinstall daemon" banner.
+//
+// Returns an error only when the download or mount fails before handoff;
+// in that case the running app is untouched. Emits "update:progress"
+// (0..1) events during the download for the UI's progress bar.
+func (a *App) DownloadAndApplyUpdate(downloadURL string) error {
+	if downloadURL == "" {
+		return fmt.Errorf("no downloadable build for this release — use View release to update manually")
+	}
+	if !installer.IsPackaged() {
+		return fmt.Errorf("self-update only works in a packaged build")
+	}
+	// Verify we can locate the bundle before spending time on the download.
+	if _, err := installer.AppBundlePath(); err != nil {
+		return err
+	}
+
+	dmgPath, err := a.downloadDMG(downloadURL)
+	if err != nil {
+		return err
+	}
+
+	if err := installer.ApplyAppUpdate(a.ctx, dmgPath); err != nil {
+		_ = os.Remove(dmgPath)
+		return err
+	}
+	// Hand-off succeeded: the swap script is waiting on our PID. Quit so it
+	// can replace the bundle and relaunch.
+	runtime.Quit(a.ctx)
+	return nil
+}
+
+// downloadDMG streams downloadURL to a temp file, emitting fractional
+// progress events. Returns the path to the downloaded .dmg.
+func (a *App) downloadDMG(downloadURL string) (string, error) {
+	req, err := http.NewRequestWithContext(a.ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("update: request: %w", err)
+	}
+	req.Header.Set("User-Agent", "em-wall/"+version.Version)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("update: download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("update: download: HTTP %d", resp.StatusCode)
+	}
+
+	f, err := os.CreateTemp("", "em-wall-update-*.dmg")
+	if err != nil {
+		return "", fmt.Errorf("update: temp file: %w", err)
+	}
+	pw := &progressWriter{ctx: a.ctx, total: resp.ContentLength}
+	if _, err := io.Copy(io.MultiWriter(f, pw), resp.Body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("update: write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("update: close: %w", err)
+	}
+	runtime.EventsEmit(a.ctx, "update:progress", 1.0)
+	return f.Name(), nil
+}
+
+// progressWriter emits "update:progress" (fraction 0..1) as bytes flow.
+// Throttled to whole-percent changes so the event stream stays light.
+type progressWriter struct {
+	ctx     context.Context
+	total   int64
+	written int64
+	lastPct int
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	p.written += int64(n)
+	if p.total > 0 {
+		pct := int(float64(p.written) / float64(p.total) * 100)
+		if pct != p.lastPct {
+			p.lastPct = pct
+			runtime.EventsEmit(p.ctx, "update:progress", float64(pct)/100)
+		}
+	}
+	return n, nil
 }
 
 // semverNewer reports whether latest is a higher version than current.

@@ -120,7 +120,15 @@ jobs:
 
             ## Upgrading
 
-            After replacing **Em Wall.app** in Applications with a new build, open **Settings** and run **ReInstall** so the bundled daemon is updated to match the new app.
+            Already running a previous build? You don't need this DMG. When a newer
+            release exists, the app shows an **Update available** banner — click
+            **Download & install** and it fetches this DMG, swaps the app in place,
+            and relaunches automatically. After it restarts, a **Daemon version
+            mismatch** banner appears: click **Reinstall daemon** (one admin prompt)
+            to update the bundled daemon to match. Done.
+
+            Manual fallback: replace **Em Wall.app** in Applications with this build,
+            then open **Settings** and run **ReInstall** so the bundled daemon matches.
 
             ## Platform support
 
