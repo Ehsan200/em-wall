@@ -27,6 +27,11 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
+const (
+	routeAddAttempts = 3
+	routeAddBackoff  = 100 * time.Millisecond
+)
+
 type entry struct {
 	host      string
 	iface     string
@@ -77,8 +82,27 @@ func (m *Manager) Install(ctx context.Context, host, iface string, ttl time.Dura
 		args = append(args, "-inet6")
 	}
 	args = append(args, "-host", host, "-interface", iface)
-	out, err := m.runner.Run(ctx, "/sbin/route", args...)
-	if err != nil && !looksLikeAlreadyExists(out) {
+
+	// Retry on transient OS failures (EAGAIN, momentary resource limits):
+	// a single `route add` hiccup must not fail-close the DNS answer and
+	// drop the user's page load. "Already exists" is success, not an error.
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= routeAddAttempts; attempt++ {
+		out, err = m.runner.Run(ctx, "/sbin/route", args...)
+		if err == nil || looksLikeAlreadyExists(out) {
+			err = nil
+			break
+		}
+		if attempt < routeAddAttempts {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("route add %s via %s: %w (%s)", host, iface, ctx.Err(), out)
+			case <-time.After(routeAddBackoff * time.Duration(attempt)):
+			}
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("route add %s via %s: %w (%s)", host, iface, err, out)
 	}
 
@@ -91,6 +115,23 @@ func (m *Manager) Install(ctx context.Context, host, iface string, ttl time.Dura
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// Extend pushes out the expiry of an already-installed route without
+// touching the kernel. Used to keep a route alive while a connection is
+// actively using it — an active flow doesn't re-trigger DNS, so without
+// this the TTL sweep would tear the route out mid-connection. Returns
+// false if the host isn't tracked (route already gone).
+func (m *Manager) Extend(host string, ttl time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.routes[host]
+	if !ok {
+		return false
+	}
+	e.expiresAt = m.now().Add(ttl)
+	m.routes[host] = e
+	return true
 }
 
 // Remove drops the route for a single host.

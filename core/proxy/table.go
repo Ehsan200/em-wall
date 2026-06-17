@@ -27,10 +27,10 @@ type Entry struct {
 // our utun. Thread-safe; reads are common, writes happen once per
 // DNS answer.
 type Table struct {
-	mu      sync.RWMutex
-	byIP    map[string]Entry
-	byRule  map[int64]map[string]struct{} // ruleID → set of IP strings
-	minTTL  time.Duration
+	mu     sync.RWMutex
+	byIP   map[string]Entry
+	byRule map[int64]map[string]struct{} // ruleID → set of IP strings
+	minTTL time.Duration
 }
 
 // NewTable returns an empty Table. minTTL is the minimum lifetime of
@@ -90,6 +90,25 @@ func (t *Table) Record(ip net.IP, hostname string, proxyNames []string, ttl time
 		t.byRule[ruleID] = map[string]struct{}{}
 	}
 	t.byRule[ruleID][key] = struct{}{}
+}
+
+// Touch extends an existing mapping's expiry to now+ttl. Used to keep a
+// mapping alive while a connection is actively using the IP, in lockstep
+// with the route keepalive. No-op if the IP isn't mapped.
+func (t *Table) Touch(ip net.IP, ttl time.Duration) bool {
+	if ip == nil {
+		return false
+	}
+	key := ip.String()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.byIP[key]
+	if !ok {
+		return false
+	}
+	e.ExpiresAt = time.Now().Add(ttl)
+	t.byIP[key] = e
+	return true
 }
 
 // Lookup returns the Entry for ip, or (zero, false) if no mapping or

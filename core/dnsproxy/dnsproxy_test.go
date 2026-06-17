@@ -40,10 +40,26 @@ func (f *fakeForwarder) Forward(_ context.Context, req *dns.Msg) (*dns.Msg, erro
 	return r, nil
 }
 
+// count returns the forward-call count under lock. The DNS round-trip
+// doesn't establish a happens-before edge the race detector tracks, so
+// mock counters must be read through the same mutex the handler writes.
+func (f *fakeForwarder) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 type fakeRoutes struct {
 	mu    sync.Mutex
 	calls []routeCall
 	err   error
+}
+
+// snapshot returns a copy of the recorded install calls under lock.
+func (f *fakeRoutes) snapshot() []routeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]routeCall(nil), f.calls...)
 }
 
 type routeCall struct {
@@ -73,6 +89,32 @@ func (f *fakeLogs) Log(name, action, iface string, ruleID int64, clientIP string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.entries = append(f.entries, logEntry{name, action, iface, clientIP, ruleID})
+}
+
+// waitFor returns a locked snapshot once at least n entries are logged, or
+// after a short timeout. The daemon logs just AFTER sending the DNS reply
+// (it won't delay the response for a log write), so a test that reads
+// immediately after the exchange both races the writer and may see nothing.
+func (f *fakeLogs) waitFor(n int) []logEntry {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		es := append([]logEntry(nil), f.entries...)
+		f.mu.Unlock()
+		if len(es) >= n || time.Now().After(deadline) {
+			return es
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// settle gives any trailing async log a moment to land, then returns a
+// locked snapshot. For assertions that expect zero entries.
+func (f *fakeLogs) settle() []logEntry {
+	time.Sleep(20 * time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]logEntry(nil), f.entries...)
 }
 
 type ruleSet []rules.Rule
@@ -140,11 +182,12 @@ func TestServer_BlocksMatching(t *testing.T) {
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("expected NXDOMAIN, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 0 {
-		t.Errorf("blocked query should not forward, got %d calls", fwd.calls)
+	if fwd.count() != 0 {
+		t.Errorf("blocked query should not forward, got %d calls", fwd.count())
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block" {
-		t.Errorf("expected one block log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block" {
+		t.Errorf("expected one block log, got %+v", le)
 	}
 }
 
@@ -157,11 +200,11 @@ func TestServer_AllowsUnmatched(t *testing.T) {
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Errorf("expected NOERROR, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 1 {
-		t.Errorf("expected 1 forward call, got %d", fwd.calls)
+	if fwd.count() != 1 {
+		t.Errorf("expected 1 forward call, got %d", fwd.count())
 	}
-	if len(logs.entries) != 0 {
-		t.Errorf("plain allow should not log, got %+v", logs.entries)
+	if le := logs.settle(); len(le) != 0 {
+		t.Errorf("plain allow should not log, got %+v", le)
 	}
 }
 
@@ -200,8 +243,9 @@ func TestServer_RouteInstallsHostRoutes(t *testing.T) {
 			t.Errorf("bad route call: %+v", c)
 		}
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "route" || logs.entries[0].iface != "utun3" {
-		t.Errorf("expected one route log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "route" || le[0].iface != "utun3" {
+		t.Errorf("expected one route log, got %+v", le)
 	}
 }
 
@@ -247,8 +291,9 @@ func TestServer_RouteFailure_NX(t *testing.T) {
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("expected NXDOMAIN when route install fails, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block-route-failed" {
-		t.Errorf("expected block-route-failed log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block-route-failed" {
+		t.Errorf("expected block-route-failed log, got %+v", le)
 	}
 }
 
@@ -322,11 +367,13 @@ func TestServer_AppPrefix_ResolvesToCurrentUtun(t *testing.T) {
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("expected NOERROR, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if len(routes.calls) != 1 || routes.calls[0].iface != "utun7" {
-		t.Errorf("expected install via utun7 (resolved from app:v2box), got %+v", routes.calls)
+	rc := routes.snapshot()
+	if len(rc) != 1 || rc[0].iface != "utun7" {
+		t.Errorf("expected install via utun7 (resolved from app:v2box), got %+v", rc)
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "route" || logs.entries[0].iface != "app:v2box → utun7" {
-		t.Errorf("expected one route log 'app:v2box → utun7', got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "route" || le[0].iface != "app:v2box → utun7" {
+		t.Errorf("expected one route log 'app:v2box → utun7', got %+v", le)
 	}
 }
 
@@ -356,11 +403,12 @@ func TestServer_AppPrefix_NXWhenAppDown(t *testing.T) {
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("expected NXDOMAIN, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 0 {
+	if fwd.count() != 0 {
 		t.Errorf("should not forward when app is down")
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-down" {
-		t.Errorf("expected one block-app-down log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block-app-down" {
+		t.Errorf("expected one block-app-down log, got %+v", le)
 	}
 }
 
@@ -407,14 +455,15 @@ func TestServer_AppPrefix_OnlyMatchingAppCounts(t *testing.T) {
 		t.Errorf("expected NXDOMAIN — rule says app:tailscale and only v2box is running; got %s",
 			dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 0 {
+	if fwd.count() != 0 {
 		t.Errorf("daemon must NOT forward upstream when the named app is down")
 	}
-	if len(routes.calls) != 0 {
+	if len(routes.snapshot()) != 0 {
 		t.Errorf("daemon must NOT install routes via v2box for a tailscale-bound rule")
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-down" {
-		t.Errorf("expected one block-app-down log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block-app-down" {
+		t.Errorf("expected one block-app-down log, got %+v", le)
 	}
 }
 
@@ -456,8 +505,9 @@ func TestServer_AppPrefix_MultiApp_PicksFirstRunning(t *testing.T) {
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("expected NOERROR with multi-app fallback, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if len(routes.calls) != 1 || routes.calls[0].iface != "utun9" {
-		t.Errorf("expected route via utun9 (hiddify, fallback from v2box), got %+v", routes.calls)
+	rc := routes.snapshot()
+	if len(rc) != 1 || rc[0].iface != "utun9" {
+		t.Errorf("expected route via utun9 (hiddify, fallback from v2box), got %+v", rc)
 	}
 }
 
@@ -487,11 +537,12 @@ func TestServer_AppPrefix_MultiApp_AllDownNX(t *testing.T) {
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("expected NXDOMAIN when all apps are down, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 0 {
+	if fwd.count() != 0 {
 		t.Errorf("should not forward when no app available")
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-down" {
-		t.Errorf("expected one block-app-down log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block-app-down" {
+		t.Errorf("expected one block-app-down log, got %+v", le)
 	}
 }
 
@@ -521,11 +572,12 @@ func TestServer_AppPrefix_NXOnTransitionTimeout(t *testing.T) {
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("expected NXDOMAIN on transition timeout, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 0 {
+	if fwd.count() != 0 {
 		t.Errorf("should not forward during transition timeout")
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block-app-busy" {
-		t.Errorf("expected one block-app-busy log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block-app-busy" {
+		t.Errorf("expected one block-app-busy log, got %+v", le)
 	}
 }
 
@@ -580,14 +632,15 @@ func TestServer_RouteIfaceDown_NXDOMAIN(t *testing.T) {
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("expected NXDOMAIN with iface down, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 0 {
-		t.Errorf("forwarder should not be called when iface is down, got %d", fwd.calls)
+	if fwd.count() != 0 {
+		t.Errorf("forwarder should not be called when iface is down, got %d", fwd.count())
 	}
-	if len(routes.calls) != 0 {
-		t.Errorf("no routes should be installed when iface is down, got %d", len(routes.calls))
+	if rc := routes.snapshot(); len(rc) != 0 {
+		t.Errorf("no routes should be installed when iface is down, got %d", len(rc))
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "block-iface-down" {
-		t.Errorf("expected one block-iface-down log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "block-iface-down" {
+		t.Errorf("expected one block-iface-down log, got %+v", le)
 	}
 }
 
@@ -604,7 +657,7 @@ func TestServer_AllowOverridesBlock(t *testing.T) {
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Errorf("expected NOERROR for explicit allow, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if fwd.calls != 1 {
+	if fwd.count() != 1 {
 		t.Errorf("explicit allow should forward")
 	}
 
@@ -707,8 +760,8 @@ func TestServer_FakeIP_ProxyRoute(t *testing.T) {
 	if !block.Contains(a.A) {
 		t.Fatalf("fake IP %s not in %s", a.A, DefaultFakeIPv4CIDR)
 	}
-	if fwd.calls != 0 {
-		t.Fatalf("proxy-routed name must NOT be forwarded upstream, got %d calls", fwd.calls)
+	if fwd.count() != 0 {
+		t.Fatalf("proxy-routed name must NOT be forwarded upstream, got %d calls", fwd.count())
 	}
 
 	routes.mu.Lock()
@@ -727,8 +780,9 @@ func TestServer_FakeIP_ProxyRoute(t *testing.T) {
 	if len(recs[0].names) != 1 || recs[0].names[0] != "us" {
 		t.Fatalf("expected proxy names [us], got %v", recs[0].names)
 	}
-	if len(logs.entries) != 1 || logs.entries[0].action != "route" {
-		t.Fatalf("expected one route log, got %+v", logs.entries)
+	le := logs.waitFor(1)
+	if len(le) != 1 || le[0].action != "route" {
+		t.Fatalf("expected one route log, got %+v", le)
 	}
 }
 
@@ -750,8 +804,8 @@ func TestServer_FakeIP_AAAAIsNodata(t *testing.T) {
 	if len(resp.Answer) != 0 {
 		t.Fatalf("expected no AAAA answer, got %d", len(resp.Answer))
 	}
-	if fwd.calls != 0 {
-		t.Fatalf("AAAA on proxy-routed name must not forward, got %d calls", fwd.calls)
+	if fwd.count() != 0 {
+		t.Fatalf("AAAA on proxy-routed name must not forward, got %d calls", fwd.count())
 	}
 	routes.mu.Lock()
 	n := len(routes.calls)

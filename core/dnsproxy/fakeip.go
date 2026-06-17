@@ -106,6 +106,18 @@ func (p *fakeIPPool) Allocate(host string) (net.IP, time.Duration, bool) {
 	return nil, 0, false
 }
 
+// Release frees the lease held by host, if any. Called when the work the
+// allocation was for (route install) fails, so the slot is reusable
+// immediately instead of lingering until its lease expires.
+func (p *fakeIPPool) Release(host string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if l, ok := p.byHost[host]; ok {
+		delete(p.byHost, host)
+		delete(p.byIP, l.ip)
+	}
+}
+
 func intToIP(v uint32) net.IP {
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint32(b, v)

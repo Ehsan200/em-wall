@@ -11,6 +11,7 @@ import (
 
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/proxytun"
+	"github.com/ehsan/em-wall/core/routing"
 )
 
 // proxyUDPIdleTimeout tears down a UDP flow's association after this
@@ -79,7 +80,48 @@ func (r *proxyResolver) Record(ip net.IP, hostname string, names []string, ttl t
 type proxyForwarder struct {
 	store  *proxy.Store
 	table  *proxy.Table
+	router *routing.Manager
 	logger *log.Logger
+}
+
+// Route keepalive. An active flow doesn't re-query DNS, so its fake-IP host
+// route would be swept mid-connection once the DNS-derived TTL lapses
+// (sweep runs every 15s; route floor 30s) — the fake IP then blackholes and
+// the connection dies. While a flow is live we re-stamp its route + table
+// mapping expiry: immediately on connect, then on a ticker. The grant
+// exceeds the sweep interval comfortably; once the flow ends, the last grant
+// lapses and the route is reclaimed normally.
+const (
+	proxyRouteKeepaliveTTL      = 90 * time.Second
+	proxyRouteKeepaliveInterval = 25 * time.Second
+)
+
+// keepRouteAlive stamps a fresh TTL on ip's route + mapping now, then keeps
+// re-stamping on a ticker until the returned stop func is called. Safe with a
+// nil router (dev daemon without proxy support).
+func (pf *proxyForwarder) keepRouteAlive(ip net.IP) func() {
+	pf.touchRoute(ip)
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(proxyRouteKeepaliveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				pf.touchRoute(ip)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (pf *proxyForwarder) touchRoute(ip net.IP) {
+	if pf.router != nil {
+		pf.router.Extend(ip.String(), proxyRouteKeepaliveTTL)
+	}
+	pf.table.Touch(ip, proxyRouteKeepaliveTTL)
 }
 
 func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
@@ -108,6 +150,11 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		return
 	}
 	defer upstream.Close()
+
+	// Keep the fake-IP route + mapping alive for as long as we're splicing,
+	// so the TTL sweep can't cut this connection out from under us.
+	stop := pf.keepRouteAlive(local.IP)
+	defer stop()
 
 	pf.logger.Printf("proxytun: %s:%d via proxy %q", target, local.Port, used)
 	_, _, _ = proxy.Splice(conn, upstream)
@@ -181,6 +228,9 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 		return
 	}
 	defer session.Close()
+
+	stopKeepalive := pf.keepRouteAlive(local.IP)
+	defer stopKeepalive()
 
 	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", local.IP, local.Port, used)
 
@@ -322,13 +372,13 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, logger *log.Logger) (*proxytun.Tunnel, string) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, logger *log.Logger) (*proxytun.Tunnel, string) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, logger: logger}
+	fwd := &proxyForwarder{store: store, table: table, router: router, logger: logger}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)

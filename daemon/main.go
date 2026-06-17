@@ -103,7 +103,8 @@ func main() {
 	// that a connection opened right after resolution isn't orphaned
 	// by an aggressive sweep.
 	proxyTable := proxy.NewTable(60 * time.Second)
-	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, log.Default())
+	router := routing.New(nil)
+	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
 	}
@@ -113,7 +114,6 @@ func main() {
 		log.Fatalf("em-walld: load rules: %v", err)
 	}
 
-	router := routing.New(nil)
 	pf := pfctl.New(nil)
 	sysDNS := NewSystemDNS(nil)
 	apps := applocator.NewResolver(lsofProvider{})

@@ -70,6 +70,11 @@ func (netInterfaceChecker) IsUp(name string) bool {
 // so the daemon can pass it explicitly.
 var DefaultInterfaceChecker InterfaceChecker = netInterfaceChecker{}
 
+// routeInstallTimeout caps a single per-host route install. Applied
+// per-IP (not per-answer) so a multi-record response can't starve its
+// later IPs. Generous enough to absorb routing.Manager's internal retries.
+const routeInstallTimeout = 3 * time.Second
+
 // LogSink receives one entry per non-allow decision (block + route).
 type LogSink interface {
 	Log(name, action, iface string, ruleID int64, clientIP string)
@@ -533,10 +538,13 @@ func (s *Server) handleFakeIP(w dns.ResponseWriter, req *dns.Msg, name, iface, e
 	// Pin the fake IP to the proxy utun so the client's connection lands on
 	// our netstack. Fail closed if the route won't install.
 	if s.cfg.Routes != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), routeInstallTimeout)
 		err := s.cfg.Routes.Install(ctx, ip.String(), iface, ttl, ruleID)
 		cancel()
 		if err != nil {
+			// Hand the slot back so a transient route failure doesn't leak
+			// a lease until expiry.
+			s.fakeIP.Release(name)
 			s.cfg.Logger.Printf("dnsproxy: fake-ip route %s via %s failed: %v", ip, iface, err)
 			s.writeServFail(w, req)
 			s.log(name, "block-route-failed", logIface, ruleID, clientIP)
@@ -602,8 +610,6 @@ func (s *Server) installRoutesFor(resp *dns.Msg, iface string, ruleID int64) err
 	if s.cfg.Routes == nil || iface == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	for _, rr := range resp.Answer {
 		var ip net.IP
 		var ttl uint32
@@ -622,7 +628,13 @@ func (s *Server) installRoutesFor(resp *dns.Msg, iface string, ruleID int64) err
 		if life < s.cfg.RouteTTLMin {
 			life = s.cfg.RouteTTLMin
 		}
-		if err := s.cfg.Routes.Install(ctx, ip.String(), iface, life, ruleID); err != nil {
+		// Per-IP timeout: a multi-answer response (e.g. Google's several
+		// A records) must not share one budget where slow early installs
+		// starve later IPs into a fail-closed whole-answer drop.
+		ctx, cancel := context.WithTimeout(context.Background(), routeInstallTimeout)
+		err := s.cfg.Routes.Install(ctx, ip.String(), iface, life, ruleID)
+		cancel()
+		if err != nil {
 			s.cfg.Logger.Printf("dnsproxy: route install %s via %s failed: %v", ip, iface, err)
 			return err
 		}
