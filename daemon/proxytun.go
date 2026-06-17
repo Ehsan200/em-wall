@@ -83,7 +83,21 @@ type proxyForwarder struct {
 	table   *proxy.Table
 	router  *routing.Manager
 	latency *netprobe.LatencyTracker
+	traffic *trafficAggregator // nil disables byte accounting
 	logger  *log.Logger
+}
+
+// proxyTrafficFlushInterval is how often an in-flight splice reports its
+// byte deltas to the aggregator. Frequent enough that a long-lived stream
+// shows up on the dashboard mid-connection, slow enough to stay cheap.
+const proxyTrafficFlushInterval = 20 * time.Second
+
+// recordTraffic forwards a sent/recv byte delta for host via proxy to the
+// aggregator, if one is wired. sent = client→proxy, recv = proxy→client.
+func (pf *proxyForwarder) recordTraffic(host, proxyName string, sent, recv int64) {
+	if pf.traffic != nil {
+		pf.traffic.Record(host, proxyName, sent, recv)
+	}
 }
 
 // orderedNames returns the binding's proxy names lowest-latency first when a
@@ -169,7 +183,12 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	defer stop()
 
 	pf.logger.Printf("proxytun: %s:%d via proxy %q", target, local.Port, used)
-	_, _, _ = proxy.Splice(conn, upstream)
+	// conn→upstream is bytes the client sent; upstream→conn is bytes it
+	// received. SpliceCounted reports deltas live so long-lived streams
+	// register on the usage dashboard before they close.
+	_, _, _ = proxy.SpliceCounted(conn, upstream, proxyTrafficFlushInterval, func(atob, btoa int64) {
+		pf.recordTraffic(entry.Hostname, used, atob, btoa)
+	})
 }
 
 // dialBinding walks the rule's proxy binding in order (first-available
@@ -264,6 +283,20 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	var lastActive atomic.Int64
 	lastActive.Store(time.Now().UnixNano())
 
+	// Live byte counters for usage stats. sent = client→proxy datagrams,
+	// recv = proxy→client. Flushed as deltas by the idle monitor below and
+	// once more after teardown, mirroring the TCP splice accounting.
+	var sentBytes, recvBytes atomic.Int64
+	var flushedSent, flushedRecv int64
+	flush := func() {
+		s, r := sentBytes.Load(), recvBytes.Load()
+		dS, dR := s-flushedSent, r-flushedRecv
+		flushedSent, flushedRecv = s, r
+		if dS != 0 || dR != 0 {
+			pf.recordTraffic(entry.Hostname, used, dS, dR)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -280,6 +313,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 				if werr := session.WriteTo(buf[:n], dst); werr != nil {
 					return
 				}
+				sentBytes.Add(int64(n))
 			}
 			if rerr != nil {
 				return
@@ -299,6 +333,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 				if _, werr := conn.Write(buf[:n]); werr != nil {
 					return
 				}
+				recvBytes.Add(int64(n))
 			}
 			if rerr != nil {
 				return
@@ -315,6 +350,8 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	}()
 
 	// Idle monitor: tear down after total-silence exceeds the timeout.
+	// Also flushes byte deltas each tick so long-lived flows (QUIC) show
+	// up on the dashboard before they end.
 	stop := make(chan struct{})
 	go func() {
 		t := time.NewTicker(proxyUDPIdleTimeout / 2)
@@ -324,6 +361,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 			case <-stop:
 				return
 			case <-t.C:
+				flush()
 				if time.Since(time.Unix(0, lastActive.Load())) >= proxyUDPIdleTimeout {
 					shutdown()
 					return
@@ -334,6 +372,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 
 	wg.Wait()
 	close(stop)
+	flush() // final delta after teardown
 }
 
 // associateUDP walks the rule's proxy binding and returns the first
@@ -386,13 +425,13 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, latency *netprobe.LatencyTracker, logger *log.Logger) (*proxytun.Tunnel, string) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, latency *netprobe.LatencyTracker, traffic *trafficAggregator, logger *log.Logger) (*proxytun.Tunnel, string) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, router: router, latency: latency, logger: logger}
+	fwd := &proxyForwarder{store: store, table: table, router: router, latency: latency, traffic: traffic, logger: logger}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)

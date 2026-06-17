@@ -69,6 +69,7 @@ const (
 	MethodXrayTest            = "xray.test"
 	MethodPublicIP            = "net.public-ip"
 	MethodRuleExitIP          = "rules.exit-ip"
+	MethodUsageQuery          = "usage.query"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -194,6 +195,7 @@ type GroupDTO struct {
 	DisplayName string   `json:"displayName"`
 	Description string   `json:"description"`
 	Patterns    []string `json:"patterns"`
+	Color       string   `json:"color"` // brand accent hex, "" if none
 }
 
 type GroupsIconParams struct {
@@ -418,6 +420,27 @@ type ExitIPResult struct {
 // it (block rules short-circuit; allow rules use the default route).
 type RuleExitIPParams struct {
 	RuleID int64 `json:"ruleId"`
+}
+
+// UsageQueryParams selects a window and grouping for proxied-traffic byte
+// stats. FromUnix/ToUnix are unix seconds (inclusive). Dimension is one of
+// "group", "domain", "proxy"; empty defaults to "domain".
+type UsageQueryParams struct {
+	FromUnix   int64  `json:"fromUnix"`
+	ToUnix     int64  `json:"toUnix"`
+	Dimension  string `json:"dimension"`
+	BucketSecs int64  `json:"bucketSecs"` // display bucket width; <60 clamps to stored 60s granularity
+}
+
+// UsagePointDTO is one aggregated bucket for the dashboard: BucketUnix is
+// the 5-minute bucket start (unix seconds), Key is the dimension value
+// (group key, domain, or proxy name), and the byte totals are the summed
+// sent/received for that bucket+key.
+type UsagePointDTO struct {
+	BucketUnix int64  `json:"bucketUnix"`
+	Key        string `json:"key"`
+	BytesSent  int64  `json:"bytesSent"`
+	BytesRecv  int64  `json:"bytesRecv"`
 }
 
 type SystemDNSStatus struct {

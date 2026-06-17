@@ -9,6 +9,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -36,6 +37,53 @@ type LogEntry struct {
 
 func (LogEntry) TableName() string { return "log_entries" }
 
+// TrafficStat is one time-bucketed byte tally for proxied traffic.
+// Only traffic that the daemon relays (SOCKS/xray routes) is counted —
+// DNS-only and kernel-routed bytes never pass through userspace. Rows
+// accumulate in place: (BucketTS, Domain, Proxy) is the composite key,
+// and bytes are added on conflict rather than overwritten.
+type TrafficStat struct {
+	BucketTS  int64  `gorm:"primaryKey;column:bucket_ts"` // unix seconds, floored to TrafficBucket
+	Domain    string `gorm:"primaryKey;column:domain"`
+	Proxy     string `gorm:"primaryKey;column:proxy"`
+	GroupKey  string `gorm:"column:group_key;index;default:''"` // "" = ungrouped
+	BytesSent int64  `gorm:"column:bytes_sent;default:0"`       // client → proxy
+	BytesRecv int64  `gorm:"column:bytes_recv;default:0"`       // proxy → client
+}
+
+func (TrafficStat) TableName() string { return "traffic_stats" }
+
+// TrafficBucket is the finest-grained time-bucket width usage stats are
+// STORED at. One minute is the floor; QueryTraffic re-buckets up to any
+// coarser display width (e.g. 5 min) at read time, so the UI can switch
+// resolution without a data migration. ~1440 rows/day/domain/proxy.
+const TrafficBucket = 1 * time.Minute
+
+// TrafficBucketSeconds is the stored granularity in seconds; the smallest
+// display bucket a query may ask for.
+const TrafficBucketSeconds = int64(TrafficBucket / time.Second)
+
+// TrafficRetention is how long usage history is kept before SweepTraffic
+// prunes it.
+const TrafficRetention = 7 * 24 * time.Hour
+
+// FloorBucket rounds a time down to the start of its TrafficBucket and
+// returns the unix-seconds bucket key.
+func FloorBucket(t time.Time) int64 {
+	w := int64(TrafficBucket / time.Second)
+	return (t.UTC().Unix() / w) * w
+}
+
+// TrafficPoint is one aggregated row returned by QueryTraffic: total
+// bytes for a single (bucket, key) where key is the grouping dimension's
+// value (group key, domain, or proxy name).
+type TrafficPoint struct {
+	BucketTS  int64  `gorm:"column:bucket_ts"`
+	Key       string `gorm:"column:k"`
+	BytesSent int64  `gorm:"column:bytes_sent"`
+	BytesRecv int64  `gorm:"column:bytes_recv"`
+}
+
 // gorm tags for Rule (defined in rules.go). We attach them via this
 // alias only to keep the model declaration in one place.
 func (Rule) TableName() string { return "rules" }
@@ -59,7 +107,7 @@ func Open(path string) (*Store, error) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&Rule{}, &Setting{}, &LogEntry{}); err != nil {
+	if err := db.AutoMigrate(&Rule{}, &Setting{}, &LogEntry{}, &TrafficStat{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
@@ -325,6 +373,88 @@ func (s *Store) RecentLogs(ctx context.Context, limit int, filter string) ([]Log
 // ClearLogs deletes all rows from the log_entries table.
 func (s *Store) ClearLogs(ctx context.Context) error {
 	return s.db.WithContext(ctx).Exec("DELETE FROM log_entries").Error
+}
+
+// Traffic usage stats.
+
+// AddTraffic accumulates sent/recv byte deltas into the (bucketTS,
+// domain, proxy) row, inserting it if absent. On conflict the byte
+// columns are incremented (not overwritten) so repeated flushes for the
+// same connection sum correctly. groupKey is refreshed on every write so
+// a late-resolved group attribution still lands. Zero-byte deltas are a
+// no-op.
+func (s *Store) AddTraffic(ctx context.Context, bucketTS int64, domain, proxy, groupKey string, sent, recv int64) error {
+	if sent == 0 && recv == 0 {
+		return nil
+	}
+	row := TrafficStat{
+		BucketTS:  bucketTS,
+		Domain:    domain,
+		Proxy:     proxy,
+		GroupKey:  groupKey,
+		BytesSent: sent,
+		BytesRecv: recv,
+	}
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "bucket_ts"}, {Name: "domain"}, {Name: "proxy"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"bytes_sent": gorm.Expr("bytes_sent + ?", sent),
+			"bytes_recv": gorm.Expr("bytes_recv + ?", recv),
+			"group_key":  groupKey,
+		}),
+	}).Create(&row).Error
+}
+
+// TrafficDimension is the column a usage query groups by.
+const (
+	TrafficByGroup  = "group"
+	TrafficByDomain = "domain"
+	TrafficByProxy  = "proxy"
+)
+
+// QueryTraffic returns per-bucket byte totals between from and to (unix
+// seconds, inclusive), grouped by both the time bucket and the chosen
+// dimension. dim is one of TrafficByGroup/Domain/Proxy; anything else
+// defaults to domain. Group dimension reports "" rows under the literal
+// key "ungrouped" so the UI has a stable label.
+//
+// bucketSec is the display bucket width in seconds. Rows stored at the
+// 1-minute granularity are re-floored to multiples of bucketSec so the
+// caller can request coarser resolution (e.g. 300 for 5-minute buckets)
+// off the same data. Values below the stored granularity are clamped up.
+func (s *Store) QueryTraffic(ctx context.Context, from, to int64, dim string, bucketSec int64) ([]TrafficPoint, error) {
+	if bucketSec < TrafficBucketSeconds {
+		bucketSec = TrafficBucketSeconds
+	}
+	var keyExpr string
+	switch dim {
+	case TrafficByGroup:
+		keyExpr = "CASE WHEN group_key = '' THEN 'ungrouped' ELSE group_key END"
+	case TrafficByProxy:
+		keyExpr = "proxy"
+	default:
+		keyExpr = "domain"
+	}
+	// bucketSec is an integer we fully control (clamped above), so inlining
+	// it into the re-floor expression is injection-safe.
+	timeExpr := fmt.Sprintf("(bucket_ts / %d) * %d", bucketSec, bucketSec)
+	var out []TrafficPoint
+	err := s.db.WithContext(ctx).
+		Model(&TrafficStat{}).
+		Select(timeExpr+" AS bucket_ts, "+keyExpr+" AS k, SUM(bytes_sent) AS bytes_sent, SUM(bytes_recv) AS bytes_recv").
+		Where("bucket_ts >= ? AND bucket_ts <= ?", from, to).
+		Group(timeExpr+", k").
+		Order(timeExpr+" ASC").
+		Scan(&out).Error
+	return out, err
+}
+
+// SweepTraffic deletes traffic rows whose bucket starts before the given
+// time. Called on the daemon's TTL sweep tick with now-TrafficRetention.
+func (s *Store) SweepTraffic(ctx context.Context, before time.Time) error {
+	return s.db.WithContext(ctx).
+		Where("bucket_ts < ?", before.UTC().Unix()).
+		Delete(&TrafficStat{}).Error
 }
 
 // normalizeAction validates the action + interface combination and

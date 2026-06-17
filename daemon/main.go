@@ -106,7 +106,8 @@ func main() {
 	proxyTable := proxy.NewTable(60 * time.Second)
 	router := routing.New(nil)
 	proxyLatency := netprobe.NewLatencyTracker(proxyLatencyTTL)
-	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, proxyLatency, log.Default())
+	trafficAgg := newTrafficAggregator(store, log.Default())
+	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, proxyLatency, trafficAgg, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
 	}
@@ -194,7 +195,7 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(6)
+	wg.Add(7)
 
 	go func() {
 		defer wg.Done()
@@ -225,8 +226,19 @@ func main() {
 			case <-t.C:
 				router.SweepExpired(ctx)
 				proxyTable.SweepExpired()
+				if err := store.SweepTraffic(ctx, time.Now().Add(-rules.TrafficRetention)); err != nil {
+					log.Printf("em-walld: traffic stat sweep failed: %v", err)
+				}
 			}
 		}
+	}()
+
+	// Traffic stat coalescer: drains buffered proxy byte deltas to the
+	// store on its own ticker (separate from the sweep so write batching
+	// and pruning don't share a cadence).
+	go func() {
+		defer wg.Done()
+		trafficAgg.Run(ctx)
 	}()
 
 	// Proxy latency prober: ranks multi-outbound route bindings by measured

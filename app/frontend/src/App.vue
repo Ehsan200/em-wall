@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import StatusBar from './components/StatusBar.vue';
 import RulesPanel from './components/RulesPanel.vue';
 import LogsPanel from './components/LogsPanel.vue';
+import DashboardPanel from './components/DashboardPanel.vue';
 import NetworkPanel from './components/NetworkPanel.vue';
 import ProxiesPanel from './components/ProxiesPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
@@ -12,7 +13,7 @@ import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, Download
 import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
 
-type Tab = 'rules' | 'logs' | 'network' | 'proxies' | 'xray' | 'settings';
+type Tab = 'rules' | 'logs' | 'usage' | 'network' | 'proxies' | 'xray' | 'settings';
 const tab = ref<Tab>('rules');
 const status = ref<ipc.StatusResult | null>(null);
 const error = ref<string>('');
@@ -199,6 +200,7 @@ onUnmounted(() => {
     <div class="tabs">
       <button :class="{active: tab==='rules'}"    @click="tab='rules'">Rules</button>
       <button :class="{active: tab==='logs'}"     @click="tab='logs'">Logs</button>
+      <button :class="{active: tab==='usage'}"    @click="tab='usage'">Usage</button>
       <button :class="{active: tab==='network'}"  @click="tab='network'">Network</button>
       <button :class="{active: tab==='proxies'}"  @click="tab='proxies'">Proxies</button>
       <button :class="{active: tab==='xray'}"     @click="tab='xray'">Xray</button>
@@ -207,6 +209,7 @@ onUnmounted(() => {
 
     <RulesPanel    v-if="tab==='rules'"    @changed="refresh" />
     <LogsPanel     v-else-if="tab==='logs'" />
+    <DashboardPanel v-else-if="tab==='usage'" />
     <NetworkPanel  v-else-if="tab==='network'" />
     <ProxiesPanel  v-else-if="tab==='proxies'" />
     <XrayPanel     v-else-if="tab==='xray'" />

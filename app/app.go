@@ -196,6 +196,21 @@ func (a *App) ClearLogs() error {
 	return a.call(ipc.MethodLogsClear, nil, nil)
 }
 
+// UsageStats returns per-bucket proxied-traffic byte totals between two
+// unix-second timestamps, grouped by dimension ("group", "domain", or
+// "proxy"). Only SOCKS/xray-proxied traffic is counted — DNS-only and
+// kernel-routed bytes never reach the daemon.
+func (a *App) UsageStats(fromUnix, toUnix int64, dimension string, bucketSecs int64) ([]ipc.UsagePointDTO, error) {
+	var out []ipc.UsagePointDTO
+	err := a.call(ipc.MethodUsageQuery, ipc.UsageQueryParams{
+		FromUnix:   fromUnix,
+		ToUnix:     toUnix,
+		Dimension:  dimension,
+		BucketSecs: bucketSecs,
+	}, &out)
+	return out, err
+}
+
 func (a *App) ActiveRoutes() ([]ipc.ActiveRouteDTO, error) {
 	var out []ipc.ActiveRouteDTO
 	err := a.call(ipc.MethodRoutesActive, nil, &out)

@@ -9,8 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "chart.js": "^4.5.1",
     "monaco-editor": "^0.55.1",
-    "vue": "^3.2.37"
+    "vue": "^3.2.37",
+    "vue-chartjs": "^5.3.3"
   },
   "devDependencies": {
     "@babel/types": "^7.18.10",

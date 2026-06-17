@@ -251,6 +251,25 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return map[string]any{"ok": true}, d.store.ClearLogs(ctx)
 	})
 
+	s.Handle(ipc.MethodUsageQuery, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.UsageQueryParams
+		_ = json.Unmarshal(raw, &p)
+		pts, err := d.store.QueryTraffic(ctx, p.FromUnix, p.ToUnix, p.Dimension, p.BucketSecs)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ipc.UsagePointDTO, len(pts))
+		for i, pt := range pts {
+			out[i] = ipc.UsagePointDTO{
+				BucketUnix: pt.BucketTS,
+				Key:        pt.Key,
+				BytesSent:  pt.BytesSent,
+				BytesRecv:  pt.BytesRecv,
+			}
+		}
+		return out, nil
+	})
+
 	s.Handle(ipc.MethodRoutesActive, func(_ context.Context, _ json.RawMessage) (any, error) {
 		active := d.router.Active()
 		out := make([]ipc.ActiveRouteDTO, len(active))
@@ -348,6 +367,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				DisplayName: g.DisplayName,
 				Description: g.Description,
 				Patterns:    g.Patterns,
+				Color:       groups.BrandColor(g.Key),
 			})
 		}
 		return out, nil
