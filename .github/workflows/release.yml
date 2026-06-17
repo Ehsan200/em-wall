@@ -34,13 +34,22 @@ jobs:
       # scratch space for an uncompressed UDRW staging volume before producing
       # the final UDZO .dmg, and was hitting ENOSPC mid-copy. Reclaim ~30+ GB
       # by deleting tooling we don't use in this build.
-      - name: Free disk space
+      #
+      # `rm -rf` on the Xcode apps walks millions of tiny files and is the
+      # slowest part of the run, so kick the deletes off in the background and
+      # let the Go/Node/Wails setup steps below run concurrently. We `wait` on
+      # the marker right before packaging, which is the first step that needs
+      # the reclaimed space.
+      - name: Free disk space (background)
         run: |
-          sudo rm -rf /Applications/Xcode_*.app
-          sudo rm -rf ~/Library/Developer/CoreSimulator
-          sudo rm -rf /Library/Developer/CoreSimulator
-          sudo rm -rf "$ANDROID_HOME"
-          df -h /
+          nohup sudo sh -c '
+            rm -rf /Applications/Xcode_*.app &
+            rm -rf ~/Library/Developer/CoreSimulator &
+            rm -rf /Library/Developer/CoreSimulator &
+            rm -rf "'"$ANDROID_HOME"'" &
+            wait
+          ' >/tmp/free-disk.log 2>&1 &
+          echo $! >/tmp/free-disk.pid
 
       - uses: actions/setup-go@v5
         with:
@@ -70,6 +79,18 @@ jobs:
 
       - name: Build .app bundle
         run: make app-bundle VERSION="$VERSION"
+
+      - name: Wait for disk cleanup
+        run: |
+          set -euo pipefail
+          # Block until the background reclaim finishes (BSD tail on macOS has
+          # no --pid, so poll the pid instead).
+          if [ -f /tmp/free-disk.pid ]; then
+            PID="$(cat /tmp/free-disk.pid)"
+            while kill -0 "$PID" 2>/dev/null; do sleep 2; done
+          fi
+          cat /tmp/free-disk.log || true
+          df -h /
 
       - name: Package DMG
         run: |
