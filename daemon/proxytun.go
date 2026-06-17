@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ehsan/em-wall/core/proxy"
@@ -182,59 +184,93 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 
 	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", local.IP, local.Port, used)
 
-	// Three goroutines: client→relay, relay→client, and a watcher that
-	// trips when the SOCKS5 control conn closes (which invalidates the
-	// association). Buffer 3 so all can send their done signal without
-	// blocking after the first teardown.
-	done := make(chan struct{}, 3)
+	// Single idempotent teardown. Closing both ends unblocks every pump's
+	// blocking Read so they error out and exit — no per-read deadlines.
+	var once sync.Once
+	shutdown := func() {
+		once.Do(func() {
+			_ = conn.Close()
+			_ = session.Close()
+		})
+	}
+	defer shutdown()
 
+	// Idle is measured across BOTH directions: either pump bumps lastActive
+	// on a datagram, so a flow that's busy one-way stays up. A monitor tears
+	// it down only after proxyUDPIdleTimeout of total silence.
+	var lastActive atomic.Int64
+	lastActive.Store(time.Now().UnixNano())
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// client → relay
 	go func() {
+		defer wg.Done()
+		defer shutdown()
+		dst := &net.UDPAddr{IP: local.IP, Port: local.Port}
 		buf := make([]byte, 64*1024)
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(proxyUDPIdleTimeout))
 			n, rerr := conn.Read(buf)
 			if n > 0 {
-				if werr := session.WriteTo(buf[:n], &net.UDPAddr{IP: local.IP, Port: local.Port}); werr != nil {
-					break
+				lastActive.Store(time.Now().UnixNano())
+				if werr := session.WriteTo(buf[:n], dst); werr != nil {
+					return
 				}
 			}
 			if rerr != nil {
-				break
+				return
 			}
 		}
-		done <- struct{}{}
 	}()
 
+	// relay → client
 	go func() {
+		defer wg.Done()
+		defer shutdown()
 		buf := make([]byte, 64*1024)
 		for {
-			_ = session.SetReadDeadline(time.Now().Add(proxyUDPIdleTimeout))
 			n, rerr := session.Read(buf)
 			if n > 0 {
+				lastActive.Store(time.Now().UnixNano())
 				if _, werr := conn.Write(buf[:n]); werr != nil {
-					break
+					return
 				}
 			}
 			if rerr != nil {
-				break
+				return
 			}
 		}
-		done <- struct{}{}
 	}()
 
+	// Watch the SOCKS5 control conn: its close means the proxy dropped the
+	// association. Exits when shutdown closes ctrl.
 	go func() {
-		// Parks until the control conn hits EOF/close — either the
-		// proxy dropped the association or our own Close() below did.
 		b := make([]byte, 1)
 		_, _ = session.CtrlConn().Read(b)
-		done <- struct{}{}
+		shutdown()
 	}()
 
-	<-done
-	// First exit wins; closing both ends unblocks the other pumps so
-	// they error out and exit too.
-	_ = conn.Close()
-	_ = session.Close()
+	// Idle monitor: tear down after total-silence exceeds the timeout.
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(proxyUDPIdleTimeout / 2)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if time.Since(time.Unix(0, lastActive.Load())) >= proxyUDPIdleTimeout {
+					shutdown()
+					return
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(stop)
 }
 
 // associateUDP walks the rule's proxy binding and returns the first
