@@ -31,6 +31,19 @@ const proxyUDPIdleTimeout = 60 * time.Second
 // nothing in practice, so it's collision-free.
 const proxyUTUNAddr = "192.0.2.1"
 
+// Proxy dial retry tuning. One dial can fail transiently (handshake
+// timeout, mid-handshake EOF, briefly overloaded relay) even when the
+// proxy is healthy; without retry a single flake drops the connection,
+// which on connection-heavy origins reads as slow/partial page loads. We
+// retry the whole binding a few rounds with backoff, cap each dial so a
+// hung proxy can't eat the budget, and bound the total via the outer ctx.
+const (
+	proxyDialAttemptTimeout = 6 * time.Second        // per single dial
+	proxyDialMaxRounds      = 3                      // full-binding passes
+	proxyDialBackoffBase    = 250 * time.Millisecond // *round between rounds
+	proxyConnectDeadline    = 20 * time.Second       // hard cap, all rounds
+)
+
 // defaultProxyTestTarget is the endpoint the proxies.test handler dials
 // through a proxy to confirm reachability, overridable via the
 // -proxy-test-target flag. Cloudflare's 1.1.1.1:443 is a well-known
@@ -84,44 +97,58 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		target = local.IP.String()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), proxy.DefaultDialTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
 	defer cancel()
 
-	// Walk the rule's proxy binding in order, using the first that both
-	// exists and dials successfully — same first-available fallback as
-	// app:KEY1,KEY2.
-	var (
-		upstream net.Conn
-		used     string
-		lastErr  error
-	)
-	for _, name := range entry.ProxyNames {
-		p, err := pf.store.GetByName(ctx, name)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		dialer, err := proxy.NewDialer(p)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		c, err := dialer.Dial(ctx, entry.Hostname, local.IP, local.Port)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		upstream, used = c, name
-		break
-	}
+	upstream, used, lastErr := pf.dialBinding(ctx, entry, local)
 	if upstream == nil {
-		pf.logger.Printf("proxytun: %s:%d — all upstream proxies failed: %v", target, local.Port, lastErr)
+		pf.logger.Printf("proxytun: %s:%d — all upstream proxies failed after %d rounds: %v", target, local.Port, proxyDialMaxRounds, lastErr)
 		return
 	}
 	defer upstream.Close()
 
 	pf.logger.Printf("proxytun: %s:%d via proxy %q", target, local.Port, used)
 	_, _, _ = proxy.Splice(conn, upstream)
+}
+
+// dialBinding walks the rule's proxy binding in order (first-available
+// fallback) and retries the whole list with backoff on transient failure.
+// Each dial is capped by proxyDialAttemptTimeout (clamped to remaining ctx).
+func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, local *net.TCPAddr) (net.Conn, string, error) {
+	var lastErr error
+	for round := 1; round <= proxyDialMaxRounds; round++ {
+		for _, name := range entry.ProxyNames {
+			p, err := pf.store.GetByName(ctx, name)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			dialer, err := proxy.NewDialer(p)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			actx, cancel := context.WithTimeout(ctx, proxyDialAttemptTimeout)
+			c, err := dialer.Dial(actx, entry.Hostname, local.IP, local.Port)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return c, name, nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if round < proxyDialMaxRounds {
+			select {
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			case <-time.After(proxyDialBackoffBase * time.Duration(round)):
+			}
+		}
+	}
+	return nil, "", lastErr
 }
 
 // handleUDP services one UDP flow netstack accepted on the utun: open a
@@ -140,7 +167,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 		return
 	}
 
-	dctx, cancel := context.WithTimeout(context.Background(), proxy.DefaultDialTimeout)
+	dctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
 	session, used, err := pf.associateUDP(dctx, entry)
 	cancel()
 	if session == nil {
@@ -215,22 +242,36 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 // skipped (no UDP support). Returns (nil, "", lastErr) if none work.
 func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (*proxy.UDPSession, string, error) {
 	var lastErr error
-	for _, name := range entry.ProxyNames {
-		p, err := pf.store.GetByName(ctx, name)
-		if err != nil {
-			lastErr = err
-			continue
+	for round := 1; round <= proxyDialMaxRounds; round++ {
+		for _, name := range entry.ProxyNames {
+			p, err := pf.store.GetByName(ctx, name)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if p.Protocol != proxy.ProtocolSOCKS5 {
+				lastErr = fmt.Errorf("proxy %q is %s; UDP requires socks5", name, p.Protocol)
+				continue
+			}
+			actx, cancel := context.WithTimeout(ctx, proxyDialAttemptTimeout)
+			sess, err := proxy.DialUDPAssociate(actx, p)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return sess, name, nil
 		}
-		if p.Protocol != proxy.ProtocolSOCKS5 {
-			lastErr = fmt.Errorf("proxy %q is %s; UDP requires socks5", name, p.Protocol)
-			continue
+		if ctx.Err() != nil {
+			break
 		}
-		sess, err := proxy.DialUDPAssociate(ctx, p)
-		if err != nil {
-			lastErr = err
-			continue
+		if round < proxyDialMaxRounds {
+			select {
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			case <-time.After(proxyDialBackoffBase * time.Duration(round)):
+			}
 		}
-		return sess, name, nil
 	}
 	return nil, "", lastErr
 }
