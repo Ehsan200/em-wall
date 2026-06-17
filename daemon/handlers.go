@@ -16,6 +16,7 @@ import (
 	"github.com/ehsan/em-wall/core/applocator"
 	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
+	"github.com/ehsan/em-wall/core/netprobe"
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/routing"
 	"github.com/ehsan/em-wall/core/rules"
@@ -641,37 +642,29 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err != nil {
 			return ipc.ProxiesTestResult{OK: false, Message: err.Error()}, nil
 		}
-		// An IP-literal target dials by IP (no proxy-side DNS); a DNS
-		// name is passed as the hostname so the proxy resolves it.
-		var hostname string
-		ip := net.ParseIP(d.proxyTestHost)
-		if ip == nil {
-			hostname = d.proxyTestHost
-		}
+		// netprobe.Measure dials then forces a TLS handshake: SOCKS5/HTTP
+		// CONNECT acceptance alone doesn't prove the chain works (chained
+		// outbounds accept the inbound and only dial upstream on first
+		// payload). The handshake pushes real bytes end-to-end.
+		target := netprobe.Target{Host: d.proxyTestHost, Port: d.proxyTestPort}
 		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		start := time.Now()
-		conn, err := dialer.Dial(tctx, hostname, ip, d.proxyTestPort)
-		if err != nil {
+		r := netprobe.Measure(tctx, dialer, target)
+		switch r.Stage {
+		case netprobe.StageDial:
 			return ipc.ProxiesTestResult{
 				OK:      false,
-				Message: fmt.Sprintf("connect via %s://%s:%d failed: %v", stored.Protocol, stored.Host, stored.Port, err),
+				Message: fmt.Sprintf("connect via %s://%s:%d failed: %v", stored.Protocol, stored.Host, stored.Port, r.Err),
 			}, nil
-		}
-		// SOCKS5/HTTP CONNECT acceptance alone doesn't prove the chain
-		// works: chained outbounds (VLESS+XHTTP etc.) accept the inbound
-		// and only dial upstream on first payload. A TLS handshake forces
-		// real bytes through the chain end-to-end.
-		probeDeadline, _ := tctx.Deadline()
-		if perr := proxy.ProbeTLS(conn, hostname, probeDeadline); perr != nil {
+		case netprobe.StageTLS:
 			return ipc.ProxiesTestResult{
 				OK:      false,
-				Message: fmt.Sprintf("TLS probe to %s via %s://%s:%d failed: %v", net.JoinHostPort(d.proxyTestHost, strconv.Itoa(d.proxyTestPort)), stored.Protocol, stored.Host, stored.Port, perr),
+				Message: fmt.Sprintf("TLS probe to %s via %s://%s:%d failed: %v", target, stored.Protocol, stored.Host, stored.Port, r.Err),
 			}, nil
 		}
 		return ipc.ProxiesTestResult{
 			OK:      true,
-			Message: fmt.Sprintf("reached %s through proxy in %s", net.JoinHostPort(d.proxyTestHost, strconv.Itoa(d.proxyTestPort)), time.Since(start).Round(time.Millisecond)),
+			Message: fmt.Sprintf("reached %s through proxy in %s", target, r.Latency.Round(time.Millisecond)),
 		}, nil
 	})
 
@@ -820,36 +813,28 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			return ipc.XrayTestResult{OK: false, Message: err.Error()}, nil
 		}
 
-		var hostname string
-		ip := net.ParseIP(host)
-		if ip == nil {
-			hostname = host
-		}
+		// xray's SOCKS5 inbound accepts CONNECT before the user's outbound
+		// (VLESS/VMess/etc.) actually dials upstream, so the TLS handshake
+		// in Measure forces a full round-trip through the outbound: "OK"
+		// means the upstream xray server is really reachable, not just that
+		// the local inbound is listening.
+		target := netprobe.Target{Host: host, Port: port}
 		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		start := time.Now()
-		conn, err := dialer.Dial(tctx, hostname, ip, port)
-		if err != nil {
+		r := netprobe.Measure(tctx, dialer, target)
+		switch r.Stage {
+		case netprobe.StageDial:
 			return ipc.XrayTestResult{
 				OK:      false,
-				Message: fmt.Sprintf("connect to %s via xray:%s failed: %v", net.JoinHostPort(host, strconv.Itoa(port)), entry.Name, err),
+				Message: fmt.Sprintf("connect to %s via xray:%s failed: %v", target, entry.Name, r.Err),
 			}, nil
-		}
-		// xray's SOCKS5 inbound accepts CONNECT before the user's
-		// outbound (VLESS/VMess/etc.) actually dials upstream. A TLS
-		// handshake forces a full round-trip through the outbound, so
-		// "OK" here means the upstream xray server really is reachable
-		// — not just that xray's inbound is listening.
-		probeDeadline, _ := tctx.Deadline()
-		if perr := proxy.ProbeTLS(conn, hostname, probeDeadline); perr != nil {
-			_ = conn.Close()
+		case netprobe.StageTLS:
 			return ipc.XrayTestResult{
 				OK:      false,
-				Message: fmt.Sprintf("xray:%s — local inbound reached, but upstream EOF'd Client Hello (chain likely broken): %v", entry.Name, perr),
+				Message: fmt.Sprintf("xray:%s — local inbound reached, but upstream EOF'd Client Hello (chain likely broken): %v", entry.Name, r.Err),
 			}, nil
 		}
-		_ = conn.Close()
-		elapsed := time.Since(start)
+		elapsed := r.Latency
 
 		// Determine exit country. Try geoip.dat lookup on the server's
 		// configured address first (no network needed). Fall back to

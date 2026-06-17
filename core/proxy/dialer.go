@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -13,44 +12,6 @@ import (
 
 	xproxy "golang.org/x/net/proxy"
 )
-
-// ProbeFallbackSNI is the ServerName ProbeTLS uses when the caller
-// can't supply a hostname (e.g. the test target is an IP literal).
-// Go's TLS stack refuses IP literals as ServerName and an empty value
-// causes some upstreams (notably Cloudflare on 1.1.1.1) to EOF without
-// responding — leaving the probe unable to distinguish a healthy
-// SOCKS5 hop from a black-holed outbound. Picking a real hostname
-// guarantees a TLS-layer reply (ServerHello, or at worst an
-// unrecognized-name alert), which is what we want: any TLS-shaped
-// answer proves bytes traversed the upstream end-to-end.
-const ProbeFallbackSNI = "www.cloudflare.com"
-
-// ProbeTLS performs a TLS handshake over conn to verify the upstream
-// proxy chain actually carries bytes — not just that SOCKS5 CONNECT
-// (or HTTP CONNECT) returned success. Chained outbounds like
-// VLESS+XHTTP accept the inbound SOCKS5 CONNECT immediately and only
-// dial their real upstream when the first payload arrives, so a
-// pure-Dial test reports OK even when the chain is broken. A TLS
-// handshake forces a round-trip through the entire chain.
-//
-// sni must be a hostname; pass ProbeFallbackSNI for IP-literal
-// targets. InsecureSkipVerify is on because we don't care that the
-// cert matches the SNI — we only need the upstream to speak TLS.
-//
-// Closes conn (the handshake mutates its read/write state past a
-// reasonable reuse point) and returns the handshake error, if any.
-func ProbeTLS(conn net.Conn, sni string, deadline time.Time) error {
-	if sni == "" || net.ParseIP(sni) != nil {
-		sni = ProbeFallbackSNI
-	}
-	_ = conn.SetDeadline(deadline)
-	tc := tls.Client(conn, &tls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-	})
-	defer tc.Close()
-	return tc.Handshake()
-}
 
 // DefaultDialTimeout is how long we wait for the upstream proxy to
 // connect and complete its handshake before giving up. Long enough to

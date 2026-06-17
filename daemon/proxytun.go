@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ehsan/em-wall/core/netprobe"
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/proxytun"
 	"github.com/ehsan/em-wall/core/routing"
@@ -78,10 +79,21 @@ func (r *proxyResolver) Record(ip net.IP, hostname string, names []string, ttl t
 // first reachable upstream proxy from the rule's binding, dial it, and
 // splice bytes both ways.
 type proxyForwarder struct {
-	store  *proxy.Store
-	table  *proxy.Table
-	router *routing.Manager
-	logger *log.Logger
+	store   *proxy.Store
+	table   *proxy.Table
+	router  *routing.Manager
+	latency *netprobe.LatencyTracker
+	logger  *log.Logger
+}
+
+// orderedNames returns the binding's proxy names lowest-latency first when a
+// latency tracker is wired, else the binding's original order. Single-name
+// bindings pass through untouched.
+func (pf *proxyForwarder) orderedNames(entry proxy.Entry) []string {
+	if pf.latency == nil {
+		return entry.ProxyNames
+	}
+	return pf.latency.Rank(entry.ProxyNames)
 }
 
 // Route keepalive. An active flow doesn't re-query DNS, so its fake-IP host
@@ -165,8 +177,9 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 // Each dial is capped by proxyDialAttemptTimeout (clamped to remaining ctx).
 func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, local *net.TCPAddr) (net.Conn, string, error) {
 	var lastErr error
+	names := pf.orderedNames(entry)
 	for round := 1; round <= proxyDialMaxRounds; round++ {
-		for _, name := range entry.ProxyNames {
+		for _, name := range names {
 			p, err := pf.store.GetByName(ctx, name)
 			if err != nil {
 				lastErr = err
@@ -328,8 +341,9 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 // skipped (no UDP support). Returns (nil, "", lastErr) if none work.
 func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (*proxy.UDPSession, string, error) {
 	var lastErr error
+	names := pf.orderedNames(entry)
 	for round := 1; round <= proxyDialMaxRounds; round++ {
-		for _, name := range entry.ProxyNames {
+		for _, name := range names {
 			p, err := pf.store.GetByName(ctx, name)
 			if err != nil {
 				lastErr = err
@@ -372,13 +386,13 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, logger *log.Logger) (*proxytun.Tunnel, string) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, latency *netprobe.LatencyTracker, logger *log.Logger) (*proxytun.Tunnel, string) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, router: router, logger: logger}
+	fwd := &proxyForwarder{store: store, table: table, router: router, latency: latency, logger: logger}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)

@@ -24,6 +24,7 @@ import (
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/dnsproxy"
 	"github.com/ehsan/em-wall/core/ipc"
+	"github.com/ehsan/em-wall/core/netprobe"
 	"github.com/ehsan/em-wall/core/pfctl"
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/routing"
@@ -104,7 +105,8 @@ func main() {
 	// by an aggressive sweep.
 	proxyTable := proxy.NewTable(60 * time.Second)
 	router := routing.New(nil)
-	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, log.Default())
+	proxyLatency := netprobe.NewLatencyTracker(proxyLatencyTTL)
+	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, proxyLatency, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
 	}
@@ -192,7 +194,7 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 
 	go func() {
 		defer wg.Done()
@@ -223,6 +225,31 @@ func main() {
 			case <-t.C:
 				router.SweepExpired(ctx)
 				proxyTable.SweepExpired()
+			}
+		}
+	}()
+
+	// Proxy latency prober: ranks multi-outbound route bindings by measured
+	// latency. Probes ONLY proxies bound alongside another (nothing to rank
+	// otherwise), so a single-outbound setup does no network work here.
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(proxyProbeInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				rs, err := store.List(ctx)
+				if err != nil {
+					continue
+				}
+				names := multiBindingProxyNames(rs)
+				if len(names) == 0 {
+					continue
+				}
+				probeProxies(ctx, proxyStore, proxyLatency, names, proxyTestHost, proxyTestPort)
 			}
 		}
 	}()
