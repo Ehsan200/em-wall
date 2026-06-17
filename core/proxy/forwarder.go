@@ -21,46 +21,84 @@ const SpliceTimeout = 5 * time.Minute
 // each side as its source EOFs, so the peer sees a clean FIN rather
 // than a RST).
 //
+// A direction that EOFs cleanly leaves the other running (a half-closed
+// download keeps streaming). A direction that hard-errors marks the whole
+// session broken, so we force the other direction's read to expire now
+// instead of waiting out its idle timeout — prompt, leak-free teardown.
+//
 // Returns the number of bytes copied in each direction (a->b, b->a)
 // and the first non-nil error from either direction.
 func Splice(a, b net.Conn) (atob, btoa int64, err error) {
 	type result struct {
+		dir int // 0 = a->b, 1 = b->a
 		n   int64
 		err error
 	}
-	c1, c2 := make(chan result, 1), make(chan result, 1)
+	done := make(chan result, 2)
 
 	go func() {
 		n, e := copyAndCloseWrite(b, a)
-		c1 <- result{n, e}
+		done <- result{0, n, e}
 	}()
 	go func() {
 		n, e := copyAndCloseWrite(a, b)
-		c2 <- result{n, e}
+		done <- result{1, n, e}
 	}()
 
-	r1 := <-c1
-	r2 := <-c2
-	atob, btoa = r1.n, r2.n
-	if r1.err != nil && r1.err != io.EOF {
-		err = r1.err
-	} else if r2.err != nil && r2.err != io.EOF {
-		err = r2.err
+	for i := 0; i < 2; i++ {
+		r := <-done
+		if r.dir == 0 {
+			atob = r.n
+		} else {
+			btoa = r.n
+		}
+		if err == nil && r.err != nil && r.err != io.EOF {
+			err = r.err
+			// Hard error: unblock the still-running direction immediately.
+			_ = a.SetReadDeadline(time.Now())
+			_ = b.SetReadDeadline(time.Now())
+		}
 	}
 	return
 }
 
-// copyAndCloseWrite copies src -> dst, then half-closes the write
-// side of dst so the peer sees a clean FIN. Falls back to a full
-// Close if the conn doesn't expose CloseWrite (e.g. a TLS wrapper).
+// copyAndCloseWrite copies src -> dst with an idle read deadline, then
+// half-closes the write side of dst so the peer sees a clean FIN. Falls
+// back to a write-deadline poke if the conn doesn't expose CloseWrite
+// (e.g. a TLS wrapper).
 func copyAndCloseWrite(dst, src net.Conn) (int64, error) {
-	n, err := io.Copy(dst, src)
+	n, err := idleCopy(dst, src)
 	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 	} else {
 		_ = dst.SetWriteDeadline(time.Now())
 	}
 	return n, err
+}
+
+// idleCopy copies src -> dst, resetting a SpliceTimeout read deadline on
+// src before each read so a stalled or half-open connection can't block
+// the goroutine forever. A clean EOF returns nil; an idle expiry returns
+// the timeout error.
+func idleCopy(dst, src net.Conn) (int64, error) {
+	var total int64
+	buf := make([]byte, 32*1024)
+	for {
+		_ = src.SetReadDeadline(time.Now().Add(SpliceTimeout))
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return total, werr
+			}
+			total += int64(n)
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return total, nil
+			}
+			return total, rerr
+		}
+	}
 }
 
 // FullCloseOnce closes a conn at most once. Useful because Splice's
