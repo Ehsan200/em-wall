@@ -2,10 +2,10 @@
 
 ![em-wall](assets/screenshots/main.png)
 
-A macOS firewall that works at the DNS layer. Every domain lookup on your machine passes through em-wall before any connection is made — rules decide whether it is blocked, allowed, or routed through a specific network interface, VPN app, SOCKS/HTTP proxy, or embedded Xray outbound.
+A macOS firewall that works at the DNS layer. Every domain lookup on your machine passes through em-wall before any connection is made — rules decide whether it is blocked, allowed, or routed through a specific network interface, SOCKS/HTTP proxy, or embedded Xray outbound.
 
 - Block domains and wildcards (`*.example.com` matches the apex and all subdomains).
-- Route specific domains out a chosen target: a raw interface (`utun3`), a running VPN app by key (`app:tailscale`), a configured upstream proxy (`proxy:work`), or an embedded Xray outbound (`xray:home`).
+- Route specific domains out a chosen target: a raw interface (`utun3`), a configured upstream proxy (`proxy:work`), or an embedded Xray outbound (`xray:home`). Multi-target bindings (`xray:home,backup`) fall back to the first reachable member, ranked lowest-latency first.
 - Curated domain groups (OpenAI, Anthropic, Google, Meta, X, Telegram, JetBrains, …) for one-click bulk rules, plus bulk enable/disable/delete on whole groups.
 - Optional toggle to block encrypted DNS (DoH/DoT), which would otherwise bypass the firewall entirely.
 - Live log of every DNS query with the decision that was applied.
@@ -24,8 +24,7 @@ em-walld  (LaunchDaemon, root)
   ├─ core/rules      GORM + SQLite rule store
   ├─ core/decision   rule engine, in-memory cache
   ├─ core/dnsproxy   UDP + TCP server on 127.0.0.1:53
-  ├─ core/routing    per-host route installer via /sbin/route
-  ├─ core/applocator app-key → currently-owned utun lookup (lsof)
+  ├─ core/routing    per-host route installer via /sbin/route; utun owner labels (lsof)
   ├─ core/proxy      SOCKS/HTTP upstream proxies (proxy:NAME target)
   ├─ core/proxytun   userspace TUN that funnels matched traffic into a proxy
   ├─ core/xray       embedded xray-core lifecycle + config builder
@@ -37,8 +36,7 @@ The daemon owns everything — the UI is a thin client that forwards calls over 
 - **block** → NXDOMAIN with a negative-cache TTL.
 - **allow** with no interface → forward upstream as normal.
 - **allow/route** with `Interface = "utunN"` → forward, then install `route -host <ip> -interface utunN` for every A/AAAA in the answer.
-- **route** with `Interface = "app:KEY[,KEY...]"` → resolve the app key to its current utun via `applocator` (first running wins) and pin routes there; an app watcher flushes and re-installs on utun changes so restarting the VPN doesn't strand traffic.
-- **route** with `Interface = "proxy:NAME"` or `"xray:NAME"` → install routes that point at em-wall's userspace TUN, which forwards matched flows into the configured SOCKS/HTTP proxy or Xray outbound.
+- **route** with `Interface = "proxy:NAME"` or `"xray:NAME"` → install routes that point at em-wall's userspace TUN, which forwards matched flows into the configured SOCKS/HTTP proxy or Xray outbound. Comma-separated lists (`proxy:work,backup`) fall back to the first reachable member, ranked lowest-latency first.
 
 ## Repo layout
 
@@ -47,8 +45,7 @@ core/          Go library — fully testable without root
   rules/       SQLite store + wildcard matcher
   decision/    rule evaluation engine
   dnsproxy/    DNS server + multi-upstream forwarder
-  routing/     per-host route installer
-  applocator/  app-key → currently-owned utun resolver
+  routing/     per-host route installer + utun owner labels
   proxy/       SOCKS/HTTP upstream proxy registry
   proxytun/    userspace TUN that funnels matched flows into a proxy
   xray/        embedded xray-core lifecycle + JSON config builder
