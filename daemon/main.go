@@ -158,6 +158,7 @@ func main() {
 		pf:            pf,
 		sysDNS:        sysDNS,
 		dnsServer:     dnsServer,
+		latency:       proxyLatency,
 		listenAddr:    *listenAddr,
 		upstream:      joinCSV(upstreams),
 		startedAt:     time.Now(),
@@ -421,6 +422,7 @@ type handlerDeps struct {
 	pf          *pfctl.Manager
 	sysDNS      *SystemDNS
 	dnsServer   *dnsproxy.Server
+	latency     *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
 	listenAddr  string
 	upstream    string
 	startedAt   time.Time

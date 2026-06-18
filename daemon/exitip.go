@@ -103,18 +103,64 @@ func boundDialContext(ifIndex int) dialContext {
 	return d.DialContext
 }
 
-// dialContextForInterface builds the DialContext that egresses the way a
-// rule bound to iface would route its matched traffic:
+// exitCandidate is one egress path the exit-IP probe can try. name is
+// the proxy/xray entry it dials through (the literal iface for utunN,
+// empty for the default route) — surfaced so a successful probe can
+// report which member of a multi-binding actually answered. rankKey is
+// the proxy.Store name the latency tracker keys on (== name for proxy:,
+// the internal _xray_ name for xray:), used to order candidates the same
+// way live traffic is ranked.
+type exitCandidate struct {
+	name    string
+	rankKey string
+	dc      dialContext
+}
+
+// rankCandidates reorders cands lowest-latency-first using the same
+// LatencyTracker that proxytun.orderedNames consults at connection time,
+// so the exit IP shown is the member traffic actually prefers. Unknown /
+// unprobed members keep their binding order; dead ones sink last. No-op
+// without a tracker or for single-candidate lists.
+func (d *handlerDeps) rankCandidates(cands []exitCandidate) []exitCandidate {
+	if d.latency == nil || len(cands) < 2 {
+		return cands
+	}
+	keys := make([]string, len(cands))
+	byKey := make(map[string]exitCandidate, len(cands))
+	for i, c := range cands {
+		keys[i] = c.rankKey
+		byKey[c.rankKey] = c
+	}
+	out := make([]exitCandidate, 0, len(cands))
+	for _, k := range d.latency.Rank(keys) {
+		out = append(out, byKey[k])
+	}
+	return out
+}
+
+// dialCandidatesForInterface returns the ordered list of egress paths a
+// rule bound to iface would try, first-available first — the SAME walk
+// dialBinding (proxytun.go) does at connection time. The exit-IP probe
+// then tries each in order and reports the first that answers, so a
+// single down proxy/xray entry in a multi-binding rule no longer makes
+// the whole exit identity read "couldn't determine" when later entries
+// are healthy.
+//
 //   - ""              → system default route (what unmatched traffic uses)
-//   - proxy:NAME[,..] → first existing proxy in the list
-//   - xray:NAME[,..]  → first enabled xray entry's local SOCKS5 inbound
+//   - proxy:NAME[,..] → every existing proxy in the list, in order
+//   - xray:NAME[,..]  → every enabled xray entry's local SOCKS5 inbound
 //   - utunN (literal) → that interface, interface-bound
-func (d *handlerDeps) dialContextForInterface(ctx context.Context, iface string) (dialContext, error) {
+//
+// Returns an error only when NO candidate can even be constructed
+// (unknown proxy, no enabled xray, missing interface) — distinct from a
+// candidate that builds but later fails to reach the probe target.
+func (d *handlerDeps) dialCandidatesForInterface(ctx context.Context, iface string) ([]exitCandidate, error) {
 	switch {
 	case iface == "":
-		return (&net.Dialer{}).DialContext, nil
+		return []exitCandidate{{name: "", dc: (&net.Dialer{}).DialContext}}, nil
 
 	case proxy.IsProxyInterface(iface):
+		var out []exitCandidate
 		for _, name := range proxy.ParseInterface(iface) {
 			p, err := d.proxyStore.GetByName(ctx, name)
 			if err != nil {
@@ -124,11 +170,15 @@ func (d *handlerDeps) dialContextForInterface(ctx context.Context, iface string)
 			if err != nil {
 				continue
 			}
-			return proxyDialContext(dl), nil
+			out = append(out, exitCandidate{name: name, rankKey: name, dc: proxyDialContext(dl)})
 		}
-		return nil, fmt.Errorf("no usable proxy found for %q", iface)
+		if len(out) == 0 {
+			return nil, fmt.Errorf("no usable proxy found for %q", iface)
+		}
+		return d.rankCandidates(out), nil
 
 	case xray.IsXrayInterface(iface):
+		var out []exitCandidate
 		for _, name := range xray.ParseInterface(iface) {
 			cfg, err := d.xrayStore.GetByName(ctx, name)
 			if err != nil || !cfg.Enabled {
@@ -142,16 +192,23 @@ func (d *handlerDeps) dialContextForInterface(ctx context.Context, iface string)
 			if err != nil {
 				continue
 			}
-			return proxyDialContext(dl), nil
+			out = append(out, exitCandidate{
+				name:    name,
+				rankKey: xray.InternalProxyName(name),
+				dc:      proxyDialContext(dl),
+			})
 		}
-		return nil, fmt.Errorf("no enabled xray entry found for %q", iface)
+		if len(out) == 0 {
+			return nil, fmt.Errorf("no enabled xray entry found for %q", iface)
+		}
+		return d.rankCandidates(out), nil
 
 	default:
 		ifc, err := net.InterfaceByName(iface)
 		if err != nil {
 			return nil, fmt.Errorf("interface %s not found: %w", iface, err)
 		}
-		return boundDialContext(ifc.Index), nil
+		return []exitCandidate{{name: iface, dc: boundDialContext(ifc.Index)}}, nil
 	}
 }
 
@@ -202,20 +259,51 @@ func (d *handlerDeps) resolveExitIP(ctx context.Context, iface string) ipc.ExitI
 		return cached
 	}
 	res := ipc.ExitIPResult{Interface: iface}
-	dc, err := d.dialContextForInterface(ctx, iface)
+	cands, err := d.dialCandidatesForInterface(ctx, iface)
 	if err != nil {
 		res.Message = err.Error()
 		cacheExitPut(iface, res, exitFailTTL)
 		return res
 	}
-	ip, country, region, city, ok := probeExitIPVia(ctx, dc)
-	if !ok {
-		res.Message = "couldn't reach ip-api.com through this path (timeout or unreachable)"
-		cacheExitPut(iface, res, exitFailTTL)
+
+	// Probe every candidate concurrently and report the first one (in
+	// binding / fallback order) that answers. Walking the whole list means
+	// a single down member of a multi-binding rule (xray:A,B,C) no longer
+	// masks the healthy ones — the result only reads "couldn't determine"
+	// when EVERY candidate fails. Concurrency caps wall-time at one probe
+	// timeout regardless of how many entries the rule binds.
+	type probeResult struct {
+		ip, country, region, city string
+		ok                        bool
+	}
+	results := make([]probeResult, len(cands))
+	var wg sync.WaitGroup
+	for i := range cands {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ip, country, region, city, ok := probeExitIPVia(ctx, cands[i].dc)
+			results[i] = probeResult{ip, country, region, city, ok}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, r := range results {
+		if !r.ok {
+			continue
+		}
+		res.ExitIP, res.Country, res.Region, res.City, res.Probed = r.ip, r.country, r.region, r.city, true
+		res.Message = "ok"
+		// For a multi-binding rule, name which member answered so the UI
+		// can show the exit that traffic actually egresses through.
+		if len(cands) > 1 && cands[i].name != "" {
+			res.Message = "ok via " + cands[i].name
+		}
+		cacheExitPut(iface, res, exitOKTTL)
 		return res
 	}
-	res.ExitIP, res.Country, res.Region, res.City, res.Probed = ip, country, region, city, true
-	res.Message = "ok"
-	cacheExitPut(iface, res, exitOKTTL)
+
+	res.Message = "couldn't reach ip-api.com through this path (timeout or unreachable)"
+	cacheExitPut(iface, res, exitFailTTL)
 	return res
 }
