@@ -4,6 +4,8 @@ go 1.26.3
 
 require github.com/wailsapp/wails/v2 v2.12.0
 
+require github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect

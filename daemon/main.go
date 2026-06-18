@@ -13,14 +13,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/ehsan/em-wall/core/applocator"
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/dnsproxy"
 	"github.com/ehsan/em-wall/core/ipc"
@@ -31,13 +29,6 @@ import (
 	"github.com/ehsan/em-wall/core/rules"
 	"github.com/ehsan/em-wall/core/xray"
 )
-
-// lsofProvider adapts core/routing's exported LsofUtunOwners to the
-// LsofProvider interface that applocator depends on. Keeps applocator
-// free of any direct dependency on routing.
-type lsofProvider struct{}
-
-func (lsofProvider) LsofUtunOwners() map[string]string { return routing.LsofUtunOwners() }
 
 // publicFallbackDNS is the last-resort upstream used only when no
 // system/DHCP/VPN resolver can be discovered AND validated. Without a
@@ -112,6 +103,16 @@ func main() {
 		defer proxyTunnel.Stop()
 	}
 
+	// Purge retired app-based routing rules (Interface "app:KEY"). The
+	// app: binding was removed; resolving an app's utun via lsof was
+	// fragile and broke whenever a VPN app hijacked DNS. proxy:/xray:
+	// supersede it. Delete before the engine loads so they never match.
+	if n, err := store.DeleteByInterfacePrefix(context.Background(), "app:"); err != nil {
+		log.Printf("em-walld: purge app: rules failed (continuing): %v", err)
+	} else if n > 0 {
+		log.Printf("em-walld: removed %d retired app-based rule(s)", n)
+	}
+
 	engine := decision.New(store)
 	if err := engine.Reload(context.Background()); err != nil {
 		log.Fatalf("em-walld: load rules: %v", err)
@@ -119,8 +120,6 @@ func main() {
 
 	pf := pfctl.New(nil)
 	sysDNS := NewSystemDNS(nil)
-	apps := applocator.NewResolver(lsofProvider{})
-	apps.Refresh() // populate initial app→utun mapping
 
 	logSink := &storeLogSink{store: store}
 
@@ -136,7 +135,6 @@ func main() {
 		Forwarder:    fwd,
 		Routes:       router,
 		Interfaces:   dnsproxy.DefaultInterfaceChecker,
-		Apps:         apps,
 		Proxies:      &proxyResolver{store: proxyStore, table: proxyTable},
 		EnableFakeIP: true,
 		ProxyTun:     proxyTunName,
@@ -160,7 +158,6 @@ func main() {
 		pf:            pf,
 		sysDNS:        sysDNS,
 		dnsServer:     dnsServer,
-		apps:          apps,
 		listenAddr:    *listenAddr,
 		upstream:      joinCSV(upstreams),
 		startedAt:     time.Now(),
@@ -195,7 +192,7 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(7)
+	wg.Add(6)
 
 	go func() {
 		defer wg.Done()
@@ -262,39 +259,6 @@ func main() {
 					continue
 				}
 				probeProxies(ctx, proxyStore, proxyLatency, names, proxyTestHost, proxyTestPort)
-			}
-		}
-	}()
-
-	// App watcher: 1s tick, but the expensive lsof scan only runs when
-	// the set of utun interfaces changes. net.Interfaces() is a cheap
-	// kernel call (~0 CPU); lsof -nP +c 0 scans all process FDs and is
-	// the primary cause of CPU hotspots when run every second.
-	go func() {
-		defer wg.Done()
-		t := time.NewTicker(time.Second)
-		defer t.Stop()
-		var lastSig string
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				sig := utunSignature()
-				if sig == lastSig {
-					continue // no utun change — skip lsof
-				}
-				lastSig = sig
-				changes := apps.Refresh()
-				for _, c := range changes {
-					release := apps.AcquireForWrite(c.Key)
-					if c.Old != "" {
-						_ = router.RemoveByInterface(ctx, c.Old)
-					}
-					log.Printf("em-walld: app %s: %s → %s", c.Key,
-						orDash(c.Old), orDash(c.New))
-					release()
-				}
 			}
 		}
 	}()
@@ -457,7 +421,6 @@ type handlerDeps struct {
 	pf          *pfctl.Manager
 	sysDNS      *SystemDNS
 	dnsServer   *dnsproxy.Server
-	apps        *applocator.Resolver
 	listenAddr  string
 	upstream    string
 	startedAt   time.Time
@@ -574,27 +537,3 @@ func parseTestTarget(s, fallbackHost string, fallbackPort int) (host string, por
 	return h, n, nil
 }
 
-func orDash(s string) string {
-	if s == "" {
-		return "—"
-	}
-	return s
-}
-
-// utunSignature returns a comma-joined sorted list of current utun
-// interface names. Changes iff VPN tunnels appear or disappear — used
-// as a cheap sentinel to gate the expensive lsof scan.
-func utunSignature() string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-	var names []string
-	for _, iface := range ifaces {
-		if strings.HasPrefix(iface.Name, "utun") {
-			names = append(names, iface.Name)
-		}
-	}
-	sort.Strings(names)
-	return strings.Join(names, ",")
-}

@@ -12,9 +12,8 @@ import (
 // proxy it should pass the original hostname (not the IP) so SNI and
 // proxy-side hostname ACLs stay intact end-to-end.
 //
-// One IP can map to multiple ProxyNames — same multi-binding fallback
-// semantics as app:KEY1,KEY2. The first reachable one wins at
-// connection time.
+// One IP can map to multiple ProxyNames — multi-binding fallback:
+// the first reachable one wins at connection time.
 type Entry struct {
 	ProxyNames []string
 	Hostname   string

@@ -45,8 +45,6 @@ const (
 	MethodSystemDNSActivate   = "system.dns.activate"
 	MethodSystemDNSDeactivate = "system.dns.deactivate"
 	MethodSystemRoutesList    = "system.routes.list"
-	MethodAppsList            = "apps.list"
-	MethodAppsIcon            = "apps.icon"
 	MethodGroupsList          = "groups.list"
 	MethodGroupsApply         = "groups.apply"
 	MethodGroupsIcon          = "groups.icon"
@@ -168,26 +166,6 @@ type SystemRouteDTO struct {
 	Gateway     string `json:"gateway"`
 	Flags       string `json:"flags"`
 	Interface   string `json:"interface"`
-}
-
-type AppDTO struct {
-	Key          string `json:"key"`
-	DisplayName  string `json:"displayName"`
-	BundleID     string `json:"bundleId"`
-	BundlePath   string `json:"bundlePath"`
-	Installed    bool   `json:"installed"`
-	CurrentIface string `json:"currentInterface"` // empty if not running
-}
-
-type AppsIconParams struct {
-	Key string `json:"key"`
-}
-
-type AppIconDTO struct {
-	Key       string `json:"key"`
-	MIME      string `json:"mime"`
-	DataB64   string `json:"data"` // base64 of icon bytes
-	Installed bool   `json:"installed"`
 }
 
 type GroupDTO struct {

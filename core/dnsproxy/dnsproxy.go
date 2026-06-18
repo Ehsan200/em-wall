@@ -40,19 +40,6 @@ type InterfaceChecker interface {
 	IsUp(name string) bool
 }
 
-// AppLocator resolves an app key to the utun it currently owns and
-// holds a per-app read lock for the duration of a query, so that a
-// concurrent transition (utun number change) doesn't strand the
-// query with a stale interface. nil = no app: prefix support.
-//
-// FirstAvailable picks the first running app from a candidate list —
-// used to support multi-app rules ("via v2box OR Hiddify").
-type AppLocator interface {
-	Current(appKey string) string
-	FirstAvailable(keys []string) (key, iface string)
-	AcquireForRead(appKey string, timeout time.Duration) (release func(), ok bool)
-}
-
 type netInterfaceChecker struct{}
 
 func (netInterfaceChecker) IsUp(name string) bool {
@@ -99,12 +86,10 @@ type Config struct {
 	Listen      string        // e.g. "127.0.0.1:53"
 	NegativeTTL uint32        // TTL on NXDOMAIN responses
 	RouteTTLMin time.Duration // floor on per-host route lifetime
-	AppHoldMax  time.Duration // max wait for an app's read lock during transitions (default 2s)
 	Decider     *decision.Engine
 	Forwarder   Forwarder
 	Routes      RouteInstaller
 	Interfaces  InterfaceChecker // nil → no enforcement (allow-via-iface won't strictly enforce)
-	Apps        AppLocator       // nil → no `app:` prefix support
 	Proxies     ProxyResolver    // nil → no `proxy:` prefix support
 	// EnableFakeIP turns on fake-IP for proxy:/xray: routed names: instead
 	// of resolving upstream, the server hands the client a synthetic IP
@@ -168,9 +153,6 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.RouteTTLMin == 0 {
 		cfg.RouteTTLMin = 30 * time.Second
-	}
-	if cfg.AppHoldMax == 0 {
-		cfg.AppHoldMax = 2 * time.Second
 	}
 	if cfg.Decider == nil {
 		return nil, errors.New("dnsproxy: missing Decider")
@@ -261,11 +243,9 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		defer release()
 		// Build the log-friendly interface label up front so EVERY
 		// failure branch (iface-down, forward-failed, route-failed)
-		// AND the success branch use the same `app:X → utunN` form.
-		// Without this, app-bound failures looked like fixed-iface
-		// failures in the Logs tab.
+		// AND the success branch use the same `proxy:X → utunN` form.
 		logIface := iface
-		if strings.HasPrefix(d.Interface, "app:") || proxy.IsProxyInterface(d.Interface) || xray.IsXrayInterface(d.Interface) {
+		if proxy.IsProxyInterface(d.Interface) || xray.IsXrayInterface(d.Interface) {
 			logIface = d.Interface + " → " + iface
 		}
 		if s.cfg.Interfaces != nil && !s.cfg.Interfaces.IsUp(iface) {
@@ -335,11 +315,6 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 //
 //   - empty                       → "" (caller treats as default route)
 //   - "utunN" / "enN"             → returned as-is
-//   - "app:<k1>[,<k2>,...]"       → resolved via the AppLocator. Walks
-//     the candidate list in order and uses the first running app's
-//     utun. Acquires the per-app read lock (waits up to AppHoldMax).
-//     The caller MUST invoke release() after writing the response
-//     and installing any routes.
 //   - "proxy:<n1>[,<n2>,...]"     → resolved via the ProxyResolver.
 //     Returns the daemon-owned utun (cfg.ProxyTun) so per-host routes
 //     are pinned there. The TCP layer (proxytun + netstack) then
@@ -382,66 +357,8 @@ func (s *Server) resolveIface(stored, qname string, ruleID int64, clientIP strin
 		}
 		return s.cfg.ProxyTun, noop, true
 	}
-	if !strings.HasPrefix(stored, "app:") {
-		return stored, noop, true
-	}
-	if s.cfg.Apps == nil {
-		s.writeServFail(w, req)
-		s.log(qname, "block-app-unsupported", stored, ruleID, clientIP)
-		return "", noop, false
-	}
-
-	keys := parseAppKeys(stored)
-	if len(keys) == 0 {
-		s.writeNX(w, req, qname)
-		s.log(qname, "block-app-down", stored, ruleID, clientIP)
-		return "", noop, false
-	}
-
-	pickedKey, pickedIface := s.cfg.Apps.FirstAvailable(keys)
-	if pickedKey == "" {
-		s.writeNX(w, req, qname)
-		s.log(qname, "block-app-down", stored, ruleID, clientIP)
-		return "", noop, false
-	}
-
-	rel, gotLock := s.cfg.Apps.AcquireForRead(pickedKey, s.cfg.AppHoldMax)
-	if !gotLock {
-		s.writeNX(w, req, qname)
-		s.log(qname, "block-app-busy", stored, ruleID, clientIP)
-		return "", noop, false
-	}
-
-	// Re-check after acquiring the lock — a concurrent transition may
-	// have just torn down the app's utun.
-	current := s.cfg.Apps.Current(pickedKey)
-	if current == "" {
-		rel()
-		s.writeNX(w, req, qname)
-		s.log(qname, "block-app-down", stored, ruleID, clientIP)
-		return "", noop, false
-	}
-	if current != pickedIface {
-		// Utun number changed between FirstAvailable and lock — use
-		// the post-lock value, which is the canonical one.
-		pickedIface = current
-	}
-	return pickedIface, rel, true
-}
-
-// parseAppKeys parses "app:k1,k2,k3" into ["k1","k2","k3"], dropping
-// empty entries and trimming whitespace.
-func parseAppKeys(stored string) []string {
-	raw := strings.TrimPrefix(stored, "app:")
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	// Literal interface (utunN/enN) or empty — used as-is.
+	return stored, noop, true
 }
 
 // translateXrayInterface rewrites a stored "xray:NAME[,NAME2]" field
@@ -603,9 +520,8 @@ func (s *Server) SetForwarder(f Forwarder) {
 // installRoutesFor pins each A/AAAA from resp to iface. Returns an
 // error if ANY install fails — caller MUST treat this as fail-closed
 // (return NXDOMAIN, do not deliver the response). Without this, a
-// bogus interface (e.g. "app:tailscale" resolved to a non-existent
-// utun in old code paths) would let `route add` fail silently and
-// the IP would leak via the default route.
+// bogus interface would let `route add` fail silently and the IP
+// would leak via the default route.
 func (s *Server) installRoutesFor(resp *dns.Msg, iface string, ruleID int64) error {
 	if s.cfg.Routes == nil || iface == "" {
 		return nil

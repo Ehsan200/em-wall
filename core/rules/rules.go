@@ -14,8 +14,8 @@ const (
 	// overriding any broader block rule. Interface MUST be empty.
 	ActionAllow Action = "allow"
 	// ActionRoute lets matching queries through and pins their
-	// resolved IPs to a specific interface (utunN) or app
-	// (`app:KEY[,KEY...]`). Interface MUST be non-empty.
+	// resolved IPs to a specific interface (utunN), proxy:NAME, or
+	// xray:NAME. Interface MUST be non-empty.
 	ActionRoute Action = "route"
 )
 

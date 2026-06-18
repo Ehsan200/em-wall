@@ -168,27 +168,6 @@ func (m *Manager) RemoveByRule(ctx context.Context, ruleID int64) error {
 	return firstErr
 }
 
-// RemoveByInterface flushes every route currently pinned to iface.
-// Used by the applocator watcher when an app's utun number changes —
-// stale routes via the old utun must go before the new ones land.
-func (m *Manager) RemoveByInterface(ctx context.Context, iface string) error {
-	m.mu.Lock()
-	var hosts []string
-	for h, e := range m.routes {
-		if e.iface == iface {
-			hosts = append(hosts, h)
-		}
-	}
-	m.mu.Unlock()
-	var firstErr error
-	for _, h := range hosts {
-		if err := m.Remove(ctx, h); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
 // SweepExpired removes routes whose TTL has passed.
 func (m *Manager) SweepExpired(ctx context.Context) int {
 	now := m.now()
@@ -335,10 +314,6 @@ func detectVPNOwners() map[string]string {
 
 	return out
 }
-
-// LsofUtunOwners is the exported alias for use by other packages
-// (e.g. applocator) that need the same per-utun process map.
-func LsofUtunOwners() map[string]string { return lsofUtunOwners() }
 
 // lsofUtunOwners returns iface→owner-name for every utun that has a
 // known owning process. Walks `lsof -nP +c 0` output (no name

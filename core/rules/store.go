@@ -196,6 +196,19 @@ func (s *Store) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
+// DeleteByInterfacePrefix hard-deletes every rule whose Interface field
+// begins with prefix. Used to purge the retired "app:KEY" routing rules
+// on daemon startup. Returns the number of rows removed.
+func (s *Store) DeleteByInterfacePrefix(ctx context.Context, prefix string) (int64, error) {
+	res := s.db.WithContext(ctx).
+		Where("interface LIKE ?", prefix+"%").
+		Delete(&Rule{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("delete rules by interface prefix: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 func (s *Store) Get(ctx context.Context, id int64) (Rule, error) {
 	var r Rule
 	err := s.db.WithContext(ctx).First(&r, id).Error
@@ -465,7 +478,7 @@ func (s *Store) SweepTraffic(ctx context.Context, before time.Time) error {
 //     these directly; it's the implicit default for unmatched
 //     queries, but stored explicit "allow" rules still serve as
 //     "override broader block").
-//   - route: interface required (utunN, enN, or "app:KEY[,KEY...]").
+//   - route: interface required (utunN, enN, proxy:NAME, or xray:NAME).
 func normalizeAction(r *Rule) error {
 	if !ValidAction(r.Action) {
 		return ErrInvalidAction

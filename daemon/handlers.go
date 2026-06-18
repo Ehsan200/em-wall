@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ehsan/em-wall/core/applocator"
 	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/netprobe"
@@ -99,7 +98,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		// Flush per-host routes installed for this rule. The next DNS
 		// query will reinstall them via the new binding (or not, if
 		// the rule is now disabled / now points elsewhere). Without
-		// this, switching a rule from utun4 to app:tailscale would
+		// this, switching a rule from utun4 to proxy:work would
 		// leave the original utun4 routes in the OS table — letting
 		// browser-cached IPs reach the destination via the wrong path.
 		_ = d.router.RemoveByRule(ctx, p.ID)
@@ -318,44 +317,6 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			}
 		}
 		return out, nil
-	})
-
-	s.Handle(ipc.MethodAppsList, func(_ context.Context, _ json.RawMessage) (any, error) {
-		registry := d.apps.Apps()
-		out := make([]ipc.AppDTO, 0, len(registry))
-		for _, a := range registry {
-			path := a.InstalledPath()
-			if path == "" {
-				path = a.BundlePath // fall back to primary so UI has SOMETHING to show
-			}
-			out = append(out, ipc.AppDTO{
-				Key:          a.Key,
-				DisplayName:  a.DisplayName,
-				BundleID:     a.BundleID,
-				BundlePath:   path,
-				Installed:    a.IsInstalled(),
-				CurrentIface: d.apps.Current(a.Key),
-			})
-		}
-		return out, nil
-	})
-
-	s.Handle(ipc.MethodAppsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
-		var p ipc.AppsIconParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, err
-		}
-		a := applocator.FindByKey(p.Key)
-		if a == nil {
-			return nil, fmt.Errorf("unknown app: %s", p.Key)
-		}
-		icon := applocator.LoadIcon(*a)
-		return ipc.AppIconDTO{
-			Key:       a.Key,
-			MIME:      icon.MIME,
-			DataB64:   base64.StdEncoding.EncodeToString(icon.Data),
-			Installed: icon.Installed,
-		}, nil
 	})
 
 	s.Handle(ipc.MethodGroupsList, func(_ context.Context, _ json.RawMessage) (any, error) {
@@ -953,7 +914,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 
 // validateProxyRefs checks that every proxy name referenced by a
 // rule's Interface field actually exists in the proxy store. Returns
-// nil for non-proxy interfaces (utunN, app:KEY, xray:NAME, empty), or
+// nil for non-proxy interfaces (utunN, xray:NAME, empty), or
 // a wrapped error naming the missing proxies.
 func (d *handlerDeps) validateProxyRefs(ctx context.Context, iface string) error {
 	if !proxy.IsProxyInterface(iface) {

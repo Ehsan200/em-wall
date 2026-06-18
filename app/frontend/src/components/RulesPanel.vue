@@ -1,12 +1,11 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
-  ListRules, AddRule, UpdateRule, DeleteRule, Interfaces, Apps,
+  ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
   Groups, ApplyGroup, DeleteGroupRules, SetGroupEnabled,
   ListProxies, ListXray, BulkUpdateRules, RuleExitIP,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
-import AppIcon from './AppIcon.vue';
 import GroupIcon from './GroupIcon.vue';
 
 // Local shape for a proxy row — same fields as ipc.ProxyDTO; using a
@@ -39,7 +38,6 @@ const emit = defineEmits<{ (e: 'changed'): void }>();
 
 const rules = ref<ipc.RuleDTO[]>([]);
 const interfaces = ref<ipc.InterfaceDTO[]>([]);
-const apps = ref<ipc.AppDTO[]>([]);
 const proxies = ref<ProxyRow[]>([]);
 const xrays = ref<XrayRow[]>([]);
 const knownGroups = ref<ipc.GroupDTO[]>([]);
@@ -277,9 +275,8 @@ async function confirmDeleteGroup(g: ipc.GroupDTO) {
 const groupApply = ref<{
   key: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'app' | 'proxy' | 'xray';
+  binding: 'iface' | 'proxy' | 'xray';
   iface: string;
-  apps: string[];
   proxies: string[];
   xrays: string[];
   enabled: boolean;
@@ -291,7 +288,6 @@ function openGroupForm(g: ipc.GroupDTO) {
     action: 'block',
     binding: 'iface',
     iface: '',
-    apps: [],
     proxies: [],
     xrays: [],
     enabled: true,
@@ -299,13 +295,6 @@ function openGroupForm(g: ipc.GroupDTO) {
 }
 
 function closeGroupForm() { groupApply.value = null; }
-
-function toggleGroupApp(key: string) {
-  if (!groupApply.value) return;
-  const idx = groupApply.value.apps.indexOf(key);
-  if (idx >= 0) groupApply.value.apps.splice(idx, 1);
-  else groupApply.value.apps.push(key);
-}
 
 function toggleGroupProxy(name: string) {
   if (!groupApply.value) return;
@@ -324,7 +313,6 @@ function toggleGroupXray(name: string) {
 function groupInterfaceField(): string {
   const g = groupApply.value;
   if (!g || g.action !== 'route') return '';
-  if (g.binding === 'app' && g.apps.length > 0) return `app:${g.apps.join(',')}`;
   if (g.binding === 'proxy' && g.proxies.length > 0) return `proxy:${g.proxies.join(',')}`;
   if (g.binding === 'xray' && g.xrays.length > 0) return `xray:${g.xrays.join(',')}`;
   if (g.binding === 'iface') return g.iface;
@@ -338,7 +326,7 @@ function groupApplyValid(): boolean {
   if (g.binding === 'iface') return !!g.iface;
   if (g.binding === 'proxy') return g.proxies.length > 0;
   if (g.binding === 'xray') return g.xrays.length > 0;
-  return g.apps.length > 0;
+  return false;
 }
 
 async function applyGroup() {
@@ -376,9 +364,8 @@ const draft = ref({
   pattern: '',
   action: 'block' as 'block' | 'route',
   // Only meaningful when action === 'route':
-  binding: 'iface' as 'iface' | 'app' | 'proxy' | 'xray',
+  binding: 'iface' as 'iface' | 'proxy' | 'xray',
   iface: '',
-  apps: [] as string[],
   proxies: [] as string[],
   xrays: [] as string[],
   enabled: true,
@@ -386,9 +373,6 @@ const draft = ref({
 
 function draftInterfaceField(): string {
   if (draft.value.action !== 'route') return '';
-  if (draft.value.binding === 'app' && draft.value.apps.length > 0) {
-    return `app:${draft.value.apps.join(',')}`;
-  }
   if (draft.value.binding === 'proxy' && draft.value.proxies.length > 0) {
     return `proxy:${draft.value.proxies.join(',')}`;
   }
@@ -404,19 +388,9 @@ function draftIsValid(): boolean {
   if (draft.value.action === 'block') return true;
   // route requires a non-empty binding
   if (draft.value.binding === 'iface') return !!draft.value.iface;
-  if (draft.value.binding === 'app') return draft.value.apps.length > 0;
   if (draft.value.binding === 'proxy') return draft.value.proxies.length > 0;
   if (draft.value.binding === 'xray') return draft.value.xrays.length > 0;
   return false;
-}
-
-function toggleDraftApp(key: string) {
-  const idx = draft.value.apps.indexOf(key);
-  if (idx >= 0) {
-    draft.value.apps.splice(idx, 1);
-  } else {
-    draft.value.apps.push(key);
-  }
 }
 
 function toggleDraftProxy(name: string) {
@@ -493,9 +467,8 @@ function toggleSection(rs: ipc.RuleDTO[]) {
 // Editor panel state, mirroring `draft` minus pattern/enabled.
 type BulkState = {
   action: 'block' | 'route';
-  binding: 'iface' | 'app' | 'proxy' | 'xray';
+  binding: 'iface' | 'proxy' | 'xray';
   iface: string;
-  apps: string[];
   proxies: string[];
   xrays: string[];
 };
@@ -506,20 +479,12 @@ function openBulk() {
     action: 'block',
     binding: 'iface',
     iface: '',
-    apps: [],
     proxies: [],
     xrays: [],
   };
 }
 
 function closeBulk() { bulk.value = null; }
-
-function toggleBulkApp(key: string) {
-  if (!bulk.value) return;
-  const idx = bulk.value.apps.indexOf(key);
-  if (idx >= 0) bulk.value.apps.splice(idx, 1);
-  else bulk.value.apps.push(key);
-}
 
 function toggleBulkProxy(name: string) {
   if (!bulk.value) return;
@@ -538,7 +503,6 @@ function toggleBulkXray(name: string) {
 function bulkInterfaceField(): string {
   const b = bulk.value;
   if (!b || b.action !== 'route') return '';
-  if (b.binding === 'app' && b.apps.length > 0) return `app:${b.apps.join(',')}`;
   if (b.binding === 'proxy' && b.proxies.length > 0) return `proxy:${b.proxies.join(',')}`;
   if (b.binding === 'xray' && b.xrays.length > 0) return `xray:${b.xrays.join(',')}`;
   if (b.binding === 'iface') return b.iface;
@@ -550,7 +514,6 @@ function bulkIsValid(): boolean {
   if (!b) return false;
   if (b.action === 'block') return true;
   if (b.binding === 'iface') return !!b.iface;
-  if (b.binding === 'app') return b.apps.length > 0;
   if (b.binding === 'proxy') return b.proxies.length > 0;
   if (b.binding === 'xray') return b.xrays.length > 0;
   return false;
@@ -582,9 +545,8 @@ type EditState = {
   id: number;
   pattern: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'app' | 'proxy' | 'xray';
+  binding: 'iface' | 'proxy' | 'xray';
   iface: string;
-  apps: string[];
   proxies: string[];
   xrays: string[];
   enabled: boolean;
@@ -593,14 +555,15 @@ type EditState = {
 const editing = ref<EditState | null>(null);
 
 function beginEdit(r: ipc.RuleDTO) {
-  let binding: 'iface' | 'app' | 'proxy' | 'xray' = 'iface';
+  let binding: 'iface' | 'proxy' | 'xray' = 'iface';
   let iface = '';
-  let appKeys: string[] = [];
   let proxyNames: string[] = [];
   let xrayNames: string[] = [];
   if (r.interface.startsWith('app:')) {
-    binding = 'app';
-    appKeys = r.interface.substring(4).split(',').map(s => s.trim()).filter(Boolean);
+    // Legacy app-bound rules are being removed daemon-side; degrade
+    // gracefully to an empty interface binding so editing doesn't crash.
+    binding = 'iface';
+    iface = '';
   } else if (r.interface.startsWith('proxy:')) {
     binding = 'proxy';
     proxyNames = r.interface.substring(6).split(',').map(s => s.trim()).filter(Boolean);
@@ -623,7 +586,6 @@ function beginEdit(r: ipc.RuleDTO) {
     action,
     binding,
     iface,
-    apps: appKeys,
     proxies: proxyNames,
     xrays: xrayNames,
     enabled: r.enabled,
@@ -635,7 +597,6 @@ function cancelEdit() { editing.value = null; }
 function editingInterfaceField(): string {
   const e = editing.value;
   if (!e || e.action !== 'route') return '';
-  if (e.binding === 'app' && e.apps.length > 0) return `app:${e.apps.join(',')}`;
   if (e.binding === 'proxy' && e.proxies.length > 0) return `proxy:${e.proxies.join(',')}`;
   if (e.binding === 'xray' && e.xrays.length > 0) return `xray:${e.xrays.join(',')}`;
   if (e.binding === 'iface') return e.iface;
@@ -647,17 +608,9 @@ function editingIsValid(): boolean {
   if (!e || !e.pattern.trim()) return false;
   if (e.action === 'block') return true;
   if (e.binding === 'iface') return !!e.iface;
-  if (e.binding === 'app') return e.apps.length > 0;
   if (e.binding === 'proxy') return e.proxies.length > 0;
   if (e.binding === 'xray') return e.xrays.length > 0;
   return false;
-}
-
-function toggleEditingApp(key: string) {
-  if (!editing.value) return;
-  const idx = editing.value.apps.indexOf(key);
-  if (idx >= 0) editing.value.apps.splice(idx, 1);
-  else editing.value.apps.push(key);
 }
 
 function toggleEditingProxy(name: string) {
@@ -691,7 +644,6 @@ async function refresh() {
   try {
     rules.value = (await ListRules()) || [];
     interfaces.value = (await Interfaces()) || [];
-    apps.value = (await Apps()) || [];
     proxies.value = ((await ListProxies()) || []) as unknown as ProxyRow[];
     xrays.value = ((await ListXray()) || []) as unknown as XrayRow[];
     if (knownGroups.value.length === 0) {
@@ -724,7 +676,6 @@ async function add() {
       draft.value.enabled);
     draft.value.pattern = '';
     draft.value.iface = '';
-    draft.value.apps = [];
     draft.value.proxies = [];
     draft.value.xrays = [];
     await refresh();
@@ -770,13 +721,11 @@ async function confirmDelete(r: ipc.RuleDTO) {
 
 
 async function refreshLive() {
-  // Polled every few seconds: interfaces + apps so chips reflect
-  // live "running" state without requiring a rule edit. Rules
-  // themselves don't refresh here — they only change on user action.
+  // Polled every few seconds: interfaces so chips reflect live
+  // "running" state without requiring a rule edit. Rules themselves
+  // don't refresh here — they only change on user action.
   try {
-    const [ifs, ap] = await Promise.all([Interfaces(), Apps()]);
-    interfaces.value = ifs || [];
-    apps.value = ap || [];
+    interfaces.value = (await Interfaces()) || [];
   } catch (_) { /* ignore — keep last good */ }
 }
 
@@ -787,17 +736,8 @@ function ifaceLabel(i: ipc.InterfaceDTO): string {
 // Rule binding helpers. The `interface` field on a Rule can be:
 //   ''            → default route
 //   'utunN'       → fixed interface
-//   'app:KEY'     → bound to an app (resolved live)
 //   'proxy:NAME'  → routed through an upstream HTTP/SOCKS5 proxy
 //   'xray:NAME'   → routed through an embedded xray-core outbound
-function ruleIsApp(field: string): boolean { return field.startsWith('app:'); }
-function ruleAppKey(field: string): string { return field.replace(/^app:/, ''); }
-
-// "app:v2box,hiddify" → ["v2box","hiddify"]
-function ruleAppKeys(field: string): string[] {
-  return ruleAppKey(field).split(',').map(s => s.trim()).filter(Boolean);
-}
-
 function ruleIsProxy(field: string): boolean { return field.startsWith('proxy:'); }
 
 // "proxy:work,home" → ["work","home"]
@@ -846,39 +786,9 @@ function proxyStatusLabel(name: string): string {
   return `${p.protocol}://${p.host}:${p.port}`;
 }
 
-function appByKey(key: string): ipc.AppDTO | undefined {
-  return apps.value.find(a => a.key === key);
-}
-
-function appDisplayName(key: string): string {
-  return appByKey(key)?.displayName || key;
-}
-
-// One-word live-state badge: "utun4" / "off" / "—"
-function appStatusBadge(key: string): string {
-  const a = appByKey(key);
-  if (!a) return '?';
-  if (a.currentInterface) return a.currentInterface;
-  return a.installed ? 'off' : '—';
-}
-
-function appStatusLabel(key: string): string {
-  const a = appByKey(key);
-  if (!a) return `${key} — unknown app`;
-  if (a.currentInterface) return `connected via ${a.currentInterface}`;
-  return a.installed ? 'installed but not running' : 'not installed';
-}
-
 // True if a rule's saved binding can't be honoured right now.
-// For multi-app rules ("app:v2box,hiddify"), down means NONE of the
-// listed apps is currently running — matches the daemon's behaviour
-// of trying each in order and returning NXDOMAIN if all are down.
 function bindingDown(field: string): boolean {
   if (!field) return false;
-  if (ruleIsApp(field)) {
-    const keys = ruleAppKeys(field);
-    return !keys.some(k => !!appByKey(k)?.currentInterface);
-  }
   if (ruleIsProxy(field)) {
     const names = ruleProxyKeys(field);
     return !names.some(n => !!proxyByName(n));
@@ -966,7 +876,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
           <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
           <div class="row" style="gap: 0">
             <button :class="['seg', {active: groupApply.binding === 'iface'}]" @click="groupApply.binding = 'iface'">Interface</button>
-            <button :class="['seg', {active: groupApply.binding === 'app'}]" @click="groupApply.binding = 'app'">App</button>
             <button :class="['seg', {active: groupApply.binding === 'proxy'}]" @click="groupApply.binding = 'proxy'">Proxy</button>
             <button :class="['seg', {active: groupApply.binding === 'xray'}]" @click="groupApply.binding = 'xray'">Xray</button>
           </div>
@@ -974,12 +883,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <option value="">— pick interface —</option>
             <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
           </select>
-          <span v-else-if="groupApply.binding === 'app'" class="muted" style="font-size: 11px; flex: 1">
-            select one or more — daemon uses the first one that's running
-            <span v-if="groupApply.apps.length" style="color: var(--accent); font-weight: 600">
-              · {{ groupApply.apps.length }} selected
-            </span>
-          </span>
           <span v-else-if="groupApply.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
             select one or more — daemon uses the first one that's reachable
             <span v-if="groupApply.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -992,15 +895,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ groupApply.xrays.length }} selected
             </span>
           </span>
-        </div>
-        <div v-if="groupApply.binding === 'app'" class="chip-grid">
-          <button v-for="a in apps" :key="a.key"
-                  :class="['app-chip', {active: groupApply.apps.includes(a.key), 'not-installed': !a.installed, 'not-running': a.installed && !a.currentInterface}]"
-                  @click="toggleGroupApp(a.key)">
-            <AppIcon :app-key="a.key" :size="20" />
-            <span>{{ a.displayName }}</span>
-            <span v-if="groupApply.apps.includes(a.key)" class="chip-rank">{{ groupApply.apps.indexOf(a.key) + 1 }}</span>
-          </button>
         </div>
         <div v-if="groupApply.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
@@ -1049,7 +943,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
           <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
           <div class="row" style="gap: 0">
             <button :class="['seg', {active: draft.binding === 'iface'}]" @click="draft.binding = 'iface'">Interface</button>
-            <button :class="['seg', {active: draft.binding === 'app'}]" @click="draft.binding = 'app'">App</button>
             <button :class="['seg', {active: draft.binding === 'proxy'}]" @click="draft.binding = 'proxy'">Proxy</button>
             <button :class="['seg', {active: draft.binding === 'xray'}]" @click="draft.binding = 'xray'">Xray</button>
           </div>
@@ -1057,12 +950,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <option value="">— pick interface —</option>
             <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
           </select>
-          <span v-else-if="draft.binding === 'app'" class="muted" style="font-size: 11px; flex: 1">
-            select one or more — daemon uses the first one that's running
-            <span v-if="draft.apps.length" style="color: var(--accent); font-weight: 600">
-              · {{ draft.apps.length }} selected
-            </span>
-          </span>
           <span v-else-if="draft.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
             select one or more — daemon uses the first one that's reachable
             <span v-if="draft.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1075,16 +962,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ draft.xrays.length }} selected
             </span>
           </span>
-        </div>
-        <div v-if="draft.binding === 'app'" class="chip-grid">
-          <button v-for="a in apps" :key="a.key"
-                  :class="['app-chip', {active: draft.apps.includes(a.key), 'not-installed': !a.installed, 'not-running': a.installed && !a.currentInterface}]"
-                  @click="toggleDraftApp(a.key)"
-                  :title="a.installed ? (a.currentInterface ? `connected via ${a.currentInterface}` : 'installed but not running — rule will block matching domains until app connects') : 'not installed — rule won\'t resolve until you install the app'">
-            <AppIcon :app-key="a.key" :size="20" />
-            <span>{{ a.displayName }}</span>
-            <span v-if="draft.apps.includes(a.key)" class="chip-rank">{{ draft.apps.indexOf(a.key) + 1 }}</span>
-          </button>
         </div>
         <div v-if="draft.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
@@ -1147,7 +1024,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
             <div class="row" style="gap: 0">
               <button :class="['seg', {active: bulk.binding === 'iface'}]" @click="bulk.binding = 'iface'">Interface</button>
-              <button :class="['seg', {active: bulk.binding === 'app'}]" @click="bulk.binding = 'app'">App</button>
               <button :class="['seg', {active: bulk.binding === 'proxy'}]" @click="bulk.binding = 'proxy'">Proxy</button>
               <button :class="['seg', {active: bulk.binding === 'xray'}]" @click="bulk.binding = 'xray'">Xray</button>
             </div>
@@ -1155,12 +1031,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               <option value="">— pick interface —</option>
               <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
             </select>
-            <span v-else-if="bulk.binding === 'app'" class="muted" style="font-size: 11px; flex: 1">
-              select one or more — daemon uses the first one that's running
-              <span v-if="bulk.apps.length" style="color: var(--accent); font-weight: 600">
-                · {{ bulk.apps.length }} selected
-              </span>
-            </span>
             <span v-else-if="bulk.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
               select one or more — daemon uses the first one that's reachable
               <span v-if="bulk.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1173,15 +1043,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 · {{ bulk.xrays.length }} selected
               </span>
             </span>
-          </div>
-          <div v-if="bulk.binding === 'app'" class="chip-grid">
-            <button v-for="a in apps" :key="a.key"
-                    :class="['app-chip', {active: bulk.apps.includes(a.key), 'not-installed': !a.installed, 'not-running': a.installed && !a.currentInterface}]"
-                    @click="toggleBulkApp(a.key)">
-              <AppIcon :app-key="a.key" :size="20" />
-              <span>{{ a.displayName }}</span>
-              <span v-if="bulk.apps.includes(a.key)" class="chip-rank">{{ bulk.apps.indexOf(a.key) + 1 }}</span>
-            </button>
           </div>
           <div v-if="bulk.binding === 'proxy'" class="chip-grid">
             <button v-for="p in proxies" :key="p.id"
@@ -1312,28 +1173,16 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 </span>
                 <span v-if="r.action === 'route' && bindingDown(r.interface)"
                       class="tag tag-block" style="margin-left: 6px"
-                      :title="ruleIsApp(r.interface) ? 'App not running — queries return NXDOMAIN until it connects'
-                            : ruleIsProxy(r.interface) ? 'Proxy missing — referenced proxy no longer exists'
+                      :title="ruleIsProxy(r.interface) ? 'Proxy missing — referenced proxy no longer exists'
                             : ruleIsXray(r.interface) ? 'No referenced xray entry is enabled — queries return NXDOMAIN'
                             : 'Configured interface is not up — queries return NXDOMAIN until it comes back'">
-                  ⚠ {{ ruleIsApp(r.interface) ? 'app down'
-                       : ruleIsProxy(r.interface) ? 'proxy missing'
+                  ⚠ {{ ruleIsProxy(r.interface) ? 'proxy missing'
                        : ruleIsXray(r.interface) ? 'xray off'
                        : 'iface down' }}
                 </span>
               </td>
               <td>
-                <div v-if="r.action === 'route' && ruleIsApp(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
-                  <span v-for="(k, i) in ruleAppKeys(r.interface)" :key="k"
-                        class="row" style="gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 12px; font-size: 11px"
-                        :title="appStatusLabel(k)">
-                    <AppIcon :app-key="k" :size="14" />
-                    <span>{{ appDisplayName(k) }}</span>
-                    <span class="muted">{{ appStatusBadge(k) }}</span>
-                    <span v-if="i < ruleAppKeys(r.interface).length - 1" class="muted">·</span>
-                  </span>
-                </div>
-                <div v-else-if="r.action === 'route' && ruleIsProxy(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
+                <div v-if="r.action === 'route' && ruleIsProxy(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
                   <span v-for="(n, i) in ruleProxyKeys(r.interface)" :key="n"
                         class="row" style="gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 12px; font-size: 11px"
                         :title="proxyStatusLabel(n)">
@@ -1417,7 +1266,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                       <span class="muted" style="font-size: 11px; min-width: 60px">via:</span>
                       <div class="row" style="gap: 0">
                         <button :class="['seg', {active: editing!.binding === 'iface'}]" @click="editing!.binding = 'iface'">Interface</button>
-                        <button :class="['seg', {active: editing!.binding === 'app'}]" @click="editing!.binding = 'app'">App</button>
                         <button :class="['seg', {active: editing!.binding === 'proxy'}]" @click="editing!.binding = 'proxy'">Proxy</button>
                         <button :class="['seg', {active: editing!.binding === 'xray'}]" @click="editing!.binding = 'xray'">Xray</button>
                       </div>
@@ -1427,12 +1275,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                         <option v-if="editing!.iface && !interfaces.some(i => i.name === editing!.iface)"
                                 :value="editing!.iface" disabled>{{ editing!.iface }} — down (saved)</option>
                       </select>
-                      <span v-else-if="editing!.binding === 'app'" class="muted" style="font-size: 11px; flex: 1">
-                        select one or more — daemon uses the first one that's running
-                        <span v-if="editing!.apps.length" style="color: var(--accent); font-weight: 600">
-                          · {{ editing!.apps.length }} selected
-                        </span>
-                      </span>
                       <span v-else-if="editing!.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
                         select one or more — daemon uses the first one that's reachable
                         <span v-if="editing!.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1445,16 +1287,6 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                           · {{ editing!.xrays.length }} selected
                         </span>
                       </span>
-                    </div>
-                    <div v-if="editing!.binding === 'app'" class="chip-grid">
-                      <button v-for="a in apps" :key="a.key"
-                              :class="['app-chip', {active: editing!.apps.includes(a.key), 'not-installed': !a.installed, 'not-running': a.installed && !a.currentInterface}]"
-                              @click="toggleEditingApp(a.key)"
-                              :title="a.installed ? (a.currentInterface ? `connected via ${a.currentInterface}` : 'installed but not running') : 'not installed'">
-                        <AppIcon :app-key="a.key" :size="20" />
-                        <span>{{ a.displayName }}</span>
-                        <span v-if="editing!.apps.includes(a.key)" class="chip-rank">{{ editing!.apps.indexOf(a.key) + 1 }}</span>
-                      </button>
                     </div>
                     <div v-if="editing!.binding === 'proxy'" class="chip-grid">
                       <button v-for="p in proxies" :key="p.id"

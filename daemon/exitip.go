@@ -19,9 +19,9 @@ import (
 )
 
 // dialContext is the std net.Transport DialContext shape. Each rule
-// interface (proxy:, xray:, utunN, app:KEY, or "" for the default
-// route) resolves to one of these so a single HTTP probe works across
-// all of them.
+// interface (proxy:, xray:, utunN, or "" for the default route)
+// resolves to one of these so a single HTTP probe works across all of
+// them.
 type dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
 // exitProbeURL is plaintext HTTP on purpose — it must work through a
@@ -108,7 +108,6 @@ func boundDialContext(ifIndex int) dialContext {
 //   - ""              → system default route (what unmatched traffic uses)
 //   - proxy:NAME[,..] → first existing proxy in the list
 //   - xray:NAME[,..]  → first enabled xray entry's local SOCKS5 inbound
-//   - app:KEY[,..]    → first running app's current utun, interface-bound
 //   - utunN (literal) → that interface, interface-bound
 func (d *handlerDeps) dialContextForInterface(ctx context.Context, iface string) (dialContext, error) {
 	switch {
@@ -148,33 +147,12 @@ func (d *handlerDeps) dialContextForInterface(ctx context.Context, iface string)
 		return nil, fmt.Errorf("no enabled xray entry found for %q", iface)
 
 	default:
-		utun := iface
-		if strings.HasPrefix(iface, "app:") {
-			keys := parseAppKeys(iface)
-			if _, resolved := d.apps.FirstAvailable(keys); resolved != "" {
-				utun = resolved
-			} else {
-				return nil, fmt.Errorf("no running app for %q", iface)
-			}
-		}
-		ifc, err := net.InterfaceByName(utun)
+		ifc, err := net.InterfaceByName(iface)
 		if err != nil {
-			return nil, fmt.Errorf("interface %s not found: %w", utun, err)
+			return nil, fmt.Errorf("interface %s not found: %w", iface, err)
 		}
 		return boundDialContext(ifc.Index), nil
 	}
-}
-
-// parseAppKeys splits "app:k1,k2" into ["k1","k2"], dropping blanks.
-func parseAppKeys(iface string) []string {
-	raw := strings.Split(strings.TrimPrefix(iface, "app:"), ",")
-	keys := make([]string, 0, len(raw))
-	for _, k := range raw {
-		if k = strings.TrimSpace(k); k != "" {
-			keys = append(keys, k)
-		}
-	}
-	return keys
 }
 
 // --- TTL cache ---------------------------------------------------------

@@ -62,10 +62,8 @@ func IsProxyInterface(s string) bool {
 // ParseInterface returns the proxy names referenced by a stored
 // Interface field of the form "proxy:NAME[,NAME...]". Whitespace around
 // names is trimmed; empty names are dropped. Returns nil for fields
-// that don't start with "proxy:".
-//
-// Mirrors core/dnsproxy.parseAppKeys for the app:KEY case so multi-
-// proxy fallback semantics ("first available") work the same way.
+// that don't start with "proxy:". The list order drives multi-proxy
+// fallback ("first available wins").
 func ParseInterface(s string) []string {
 	if !IsProxyInterface(s) {
 		return nil
