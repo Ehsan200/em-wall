@@ -2,6 +2,7 @@ package decision
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/ehsan/em-wall/core/rules"
@@ -40,6 +41,35 @@ func TestEngine_Decide(t *testing.T) {
 		if got.Outcome != tc.wantOutcome || got.Interface != tc.wantIface || got.RuleID != tc.wantRuleID {
 			t.Errorf("Decide(%q) = %+v, want outcome=%v iface=%q rule=%d",
 				tc.name, got, tc.wantOutcome, tc.wantIface, tc.wantRuleID)
+		}
+	}
+}
+
+func TestEngine_DecideIP(t *testing.T) {
+	src := staticSource{list: []rules.Rule{
+		{ID: 1, Pattern: "10.0.0.0/8", Action: rules.ActionRoute, Interface: "proxy:work", Enabled: true},
+		{ID: 2, Pattern: "10.1.2.3", Action: rules.ActionBlock, Enabled: true},
+		{ID: 3, Pattern: "*.y.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
+	}}
+	e := New(src)
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		ip          string
+		wantOutcome Outcome
+		wantIface   string
+		wantRuleID  int64
+	}{
+		{"10.5.5.5", OutcomeRoute, "proxy:work", 1},
+		{"10.1.2.3", OutcomeBlock, "", 2}, // exact host rule wins over /8
+		{"8.8.8.8", OutcomeAllow, "", 0},
+	}
+	for _, tc := range cases {
+		got := e.DecideIP(net.ParseIP(tc.ip))
+		if got.Outcome != tc.wantOutcome || got.Interface != tc.wantIface || got.RuleID != tc.wantRuleID {
+			t.Errorf("DecideIP(%q) = %+v, want outcome=%v iface=%q rule=%d",
+				tc.ip, got, tc.wantOutcome, tc.wantIface, tc.wantRuleID)
 		}
 	}
 }

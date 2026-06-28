@@ -4,6 +4,7 @@ package decision
 
 import (
 	"context"
+	"net"
 	"sync/atomic"
 
 	"github.com/ehsan/em-wall/core/rules"
@@ -68,6 +69,28 @@ func (e *Engine) Reload(ctx context.Context) error {
 func (e *Engine) Decide(name string) Decision {
 	list := *e.cache.Load()
 	r := rules.MostSpecific(list, name)
+	if r == nil {
+		return Decision{Outcome: OutcomeAllow}
+	}
+	switch r.Action {
+	case rules.ActionBlock:
+		return Decision{Outcome: OutcomeBlock, RuleID: r.ID, Pattern: r.Pattern}
+	case rules.ActionAllow:
+		return Decision{Outcome: OutcomeAllow, RuleID: r.ID, Pattern: r.Pattern}
+	case rules.ActionRoute:
+		return Decision{Outcome: OutcomeRoute, Interface: r.Interface, RuleID: r.ID, Pattern: r.Pattern}
+	}
+	return Decision{Outcome: OutcomeAllow}
+}
+
+// DecideIP evaluates a destination IP against the IP/CIDR rule set. It is
+// the IP-layer counterpart to Decide: the netstack TCP/UDP handler calls
+// it when a connection arrives for an IP that has no DNS-time mapping, to
+// learn whether that IP should be routed through a proxy. Domain rules are
+// ignored here (see rules.MostSpecificIP).
+func (e *Engine) DecideIP(ip net.IP) Decision {
+	list := *e.cache.Load()
+	r := rules.MostSpecificIP(list, ip)
 	if r == nil {
 		return Decision{Outcome: OutcomeAllow}
 	}

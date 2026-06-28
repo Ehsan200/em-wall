@@ -9,10 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/netprobe"
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/proxytun"
 	"github.com/ehsan/em-wall/core/routing"
+	"github.com/ehsan/em-wall/core/xray"
 )
 
 // proxyUDPIdleTimeout tears down a UDP flow's association after this
@@ -82,9 +84,56 @@ type proxyForwarder struct {
 	store   *proxy.Store
 	table   *proxy.Table
 	router  *routing.Manager
+	decider ipRouteDecider // resolves dest IPs with no DNS-time mapping; may be nil
 	latency *netprobe.LatencyTracker
 	traffic *trafficAggregator // nil disables byte accounting
 	logger  *log.Logger
+}
+
+// ipRouteDecider resolves a destination IP to a routing decision for
+// connections that arrive at the utun without a DNS-time table entry —
+// i.e. traffic matched by an IP/CIDR rule rather than a domain rule.
+// *decision.Engine satisfies it.
+type ipRouteDecider interface {
+	DecideIP(ip net.IP) decision.Decision
+}
+
+// proxyNamesForInterface resolves a rule's stored interface field
+// ("proxy:NAME[,...]" or "xray:NAME[,...]") into the proxy.Store record
+// names the dial path looks up. xray entries are backed by a hidden
+// _xray_NAME proxy row (see translateXrayInterface in dnsproxy), so they
+// map through xray.InternalProxyName. Non-proxy interfaces yield nil.
+func proxyNamesForInterface(iface string) []string {
+	if xray.IsXrayInterface(iface) {
+		names := xray.ParseInterface(iface)
+		out := make([]string, 0, len(names))
+		for _, n := range names {
+			out = append(out, xray.InternalProxyName(n))
+		}
+		return out
+	}
+	return proxy.ParseInterface(iface)
+}
+
+// lookupIPRule resolves an IP/CIDR rule for dest when no DNS-time table
+// entry exists. Returns a synthetic Entry for a proxy:/xray: route rule;
+// false otherwise (no rule, non-route outcome, or a literal-interface rule
+// whose traffic the OS already routed without going through netstack).
+// Hostname is set to the destination IP — there's no DNS name to preserve,
+// so the dial targets the IP directly and traffic accounts under it.
+func (pf *proxyForwarder) lookupIPRule(dest net.IP) (proxy.Entry, bool) {
+	if pf.decider == nil {
+		return proxy.Entry{}, false
+	}
+	d := pf.decider.DecideIP(dest)
+	if d.Outcome != decision.OutcomeRoute {
+		return proxy.Entry{}, false
+	}
+	names := proxyNamesForInterface(d.Interface)
+	if len(names) == 0 {
+		return proxy.Entry{}, false
+	}
+	return proxy.Entry{ProxyNames: names, Hostname: dest.String(), RuleID: d.RuleID}, true
 }
 
 // proxyTrafficFlushInterval is how often an in-flight splice reports its
@@ -155,11 +204,14 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 
 	entry, ok := pf.table.Lookup(local.IP)
 	if !ok {
-		// The IP was routed to our utun but we have no DNS-time record
-		// of which proxy to use — most likely a stale route lingering
-		// after a table sweep. Drop the connection.
-		pf.logger.Printf("proxytun: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
-		return
+		// No DNS-time mapping. Either an IP/CIDR rule routed this real
+		// dest IP to our utun (resolve it via the decision engine), or
+		// it's a stale route lingering after a table sweep — drop then.
+		entry, ok = pf.lookupIPRule(local.IP)
+		if !ok {
+			pf.logger.Printf("proxytun: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
+			return
+		}
 	}
 
 	target := entry.Hostname
@@ -244,8 +296,11 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 
 	entry, ok := pf.table.Lookup(local.IP)
 	if !ok {
-		pf.logger.Printf("proxytun/udp: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
-		return
+		entry, ok = pf.lookupIPRule(local.IP)
+		if !ok {
+			pf.logger.Printf("proxytun/udp: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
+			return
+		}
 	}
 
 	dctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
@@ -425,13 +480,13 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, latency *netprobe.LatencyTracker, traffic *trafficAggregator, logger *log.Logger) (*proxytun.Tunnel, string) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, logger *log.Logger) (*proxytun.Tunnel, string) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, router: router, latency: latency, traffic: traffic, logger: logger}
+	fwd := &proxyForwarder{store: store, table: table, router: router, decider: decider, latency: latency, traffic: traffic, logger: logger}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)

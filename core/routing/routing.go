@@ -37,6 +37,9 @@ type entry struct {
 	iface     string
 	expiresAt time.Time
 	ruleID    int64
+	isNet     bool // route is a -net <cidr>, not a -host <ip>
+	isV4      bool
+	static    bool // never swept by TTL; lives until the rule is removed
 }
 
 // Manager owns the set of active host routes. Safe for concurrent use.
@@ -74,7 +77,7 @@ func (m *Manager) Install(ctx context.Context, host, iface string, ttl time.Dura
 	m.mu.Unlock()
 
 	if had && prev.iface != iface {
-		_ = m.removeOne(ctx, host, ip.To4() != nil)
+		_ = m.removeOne(ctx, host, ip.To4() != nil, prev.isNet)
 	}
 
 	args := []string{"-n", "add"}
@@ -112,9 +115,82 @@ func (m *Manager) Install(ctx context.Context, host, iface string, ttl time.Dura
 		iface:     iface,
 		expiresAt: m.now().Add(ttl),
 		ruleID:    ruleID,
+		isV4:      ip.To4() != nil,
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// InstallStatic pins a destination IP or CIDR (dest) to iface for the
+// lifetime of ruleID — unlike Install, the route is never reclaimed by the
+// TTL sweep; it lives until RemoveByRule/Remove drops it. A bare address
+// installs a `-host` route; an "addr/bits" string installs a `-net` route.
+// Re-installing the same dest with a different interface replaces it.
+// Idempotent: an already-present kernel route is treated as success.
+func (m *Manager) InstallStatic(ctx context.Context, dest, iface string, ruleID int64) error {
+	if iface == "" {
+		return fmt.Errorf("routing: empty interface")
+	}
+	ip, ipnet, err := parseDest(dest)
+	if err != nil {
+		return err
+	}
+	isNet := ipnet != nil
+	isV4 := ip.To4() != nil
+	// Canonicalize: a CIDR with host bits set (1.2.3.4/24) becomes its
+	// network (1.2.3.0/24) so `route` accepts it and the key is stable.
+	if isNet {
+		dest = ipnet.String()
+	} else {
+		dest = ip.String()
+	}
+
+	m.mu.Lock()
+	prev, had := m.routes[dest]
+	m.mu.Unlock()
+	if had && prev.iface != iface {
+		_ = m.removeOne(ctx, dest, prev.isV4, prev.isNet)
+	}
+
+	args := []string{"-n", "add"}
+	if !isV4 {
+		args = append(args, "-inet6")
+	}
+	if isNet {
+		args = append(args, "-net", dest)
+	} else {
+		args = append(args, "-host", dest)
+	}
+	args = append(args, "-interface", iface)
+
+	out, err := m.runner.Run(ctx, "/sbin/route", args...)
+	if err != nil && !looksLikeAlreadyExists(out) {
+		return fmt.Errorf("route add %s via %s: %w (%s)", dest, iface, err, out)
+	}
+
+	m.mu.Lock()
+	m.routes[dest] = entry{
+		host:   dest,
+		iface:  iface,
+		ruleID: ruleID,
+		isNet:  isNet,
+		isV4:   isV4,
+		static: true,
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// parseDest interprets dest as either a bare IP (ipnet nil) or a CIDR
+// (ipnet set). The returned ip is the address to test the family on.
+func parseDest(dest string) (ip net.IP, ipnet *net.IPNet, err error) {
+	if ip = net.ParseIP(strings.TrimSpace(dest)); ip != nil {
+		return ip, nil, nil
+	}
+	if i, n, e := net.ParseCIDR(strings.TrimSpace(dest)); e == nil {
+		return i, n, nil
+	}
+	return nil, nil, fmt.Errorf("routing: invalid IP/CIDR %q", dest)
 }
 
 // Extend pushes out the expiry of an already-installed route without
@@ -137,7 +213,7 @@ func (m *Manager) Extend(host string, ttl time.Duration) bool {
 // Remove drops the route for a single host.
 func (m *Manager) Remove(ctx context.Context, host string) error {
 	m.mu.Lock()
-	_, ok := m.routes[host]
+	e, ok := m.routes[host]
 	if ok {
 		delete(m.routes, host)
 	}
@@ -145,8 +221,7 @@ func (m *Manager) Remove(ctx context.Context, host string) error {
 	if !ok {
 		return nil
 	}
-	ip := net.ParseIP(host)
-	return m.removeOne(ctx, host, ip != nil && ip.To4() != nil)
+	return m.removeOne(ctx, host, e.isV4, e.isNet)
 }
 
 // RemoveByRule flushes every route that was installed on behalf of ruleID.
@@ -174,6 +249,9 @@ func (m *Manager) SweepExpired(ctx context.Context) int {
 	m.mu.Lock()
 	var stale []string
 	for h, e := range m.routes {
+		if e.static {
+			continue // static IP/CIDR rule routes outlive the TTL sweep
+		}
 		if now.After(e.expiresAt) {
 			stale = append(stale, h)
 		}
@@ -221,12 +299,16 @@ type ActiveRoute struct {
 	RuleID    int64
 }
 
-func (m *Manager) removeOne(ctx context.Context, host string, isV4 bool) error {
+func (m *Manager) removeOne(ctx context.Context, host string, isV4, isNet bool) error {
 	args := []string{"-n", "delete"}
 	if !isV4 {
 		args = append(args, "-inet6")
 	}
-	args = append(args, "-host", host)
+	if isNet {
+		args = append(args, "-net", host)
+	} else {
+		args = append(args, "-host", host)
+	}
 	out, err := m.runner.Run(ctx, "/sbin/route", args...)
 	if err != nil && !looksLikeNotFound(out) {
 		return fmt.Errorf("route delete %s: %w (%s)", host, err, out)

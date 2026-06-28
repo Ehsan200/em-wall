@@ -927,7 +927,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
 
     <div class="add-form">
       <div class="row" style="gap: 8px">
-        <input v-model="draft.pattern" placeholder="Pattern (e.g. *.bad.com)" style="flex: 1" @keyup.enter="add" />
+        <input v-model="draft.pattern" placeholder="Pattern (e.g. *.bad.com or 1.2.3.0/24)" style="flex: 1" @keyup.enter="add" />
         <select v-model="draft.action" style="width: 100px">
           <option value="block">block</option>
           <option value="route">route</option>
@@ -1246,7 +1246,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 <div class="edit-card">
                   <div class="row" style="gap: 8px">
                     <input v-model="editing!.pattern"
-                           placeholder="Pattern (e.g. *.bad.com)"
+                           placeholder="Pattern (e.g. *.bad.com or 1.2.3.0/24)"
                            style="flex: 1"
                            @keyup.enter="saveEdit"
                            @keyup.esc="cancelEdit" />

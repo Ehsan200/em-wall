@@ -1,6 +1,9 @@
 package rules
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
 
 func TestMatch(t *testing.T) {
 	cases := []struct {
@@ -55,6 +58,54 @@ func TestValidate(t *testing.T) {
 	for _, p := range bad {
 		if err := Validate(p); err == nil {
 			t.Errorf("Validate(%q) expected error, got nil", p)
+		}
+	}
+}
+
+func TestValidate_IPCIDR(t *testing.T) {
+	good := []string{"1.2.3.4", "1.2.3.0/24", "10.0.0.0/8", "2001:db8::1", "fe80::/10", "::1"}
+	for _, p := range good {
+		if err := Validate(p); err != nil {
+			t.Errorf("Validate(%q) unexpected err: %v", p, err)
+		}
+		if !IsIPRule(p) {
+			t.Errorf("IsIPRule(%q) = false, want true", p)
+		}
+	}
+	// Domain patterns must NOT be classed as IP rules.
+	for _, p := range []string{"y.com", "*.y.com", "1.2.3.4.com"} {
+		if IsIPRule(p) {
+			t.Errorf("IsIPRule(%q) = true, want false", p)
+		}
+	}
+}
+
+func TestMostSpecificIP(t *testing.T) {
+	rs := []Rule{
+		{ID: 1, Pattern: "10.0.0.0/8", Action: ActionRoute, Interface: "proxy:a", Enabled: true},
+		{ID: 2, Pattern: "10.1.0.0/16", Action: ActionRoute, Interface: "proxy:b", Enabled: true},
+		{ID: 3, Pattern: "10.1.2.3", Action: ActionRoute, Interface: "proxy:c", Enabled: true},
+		{ID: 4, Pattern: "192.168.0.0/16", Action: ActionBlock, Enabled: false},
+		{ID: 5, Pattern: "*.y.com", Action: ActionBlock, Enabled: true}, // domain rule ignored
+	}
+	cases := []struct {
+		ip     string
+		wantID int64
+	}{
+		{"10.1.2.3", 3},   // exact host beats both CIDRs
+		{"10.1.5.5", 2},   // /16 beats /8
+		{"10.9.9.9", 1},   // only /8 matches
+		{"192.168.1.1", 0}, // disabled rule skipped
+		{"8.8.8.8", 0},    // no match
+	}
+	for _, tc := range cases {
+		got := MostSpecificIP(rs, net.ParseIP(tc.ip))
+		var gotID int64
+		if got != nil {
+			gotID = got.ID
+		}
+		if gotID != tc.wantID {
+			t.Errorf("MostSpecificIP(%q) = %d, want %d", tc.ip, gotID, tc.wantID)
 		}
 	}
 }

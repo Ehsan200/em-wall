@@ -144,6 +144,65 @@ func TestManager_SweepExpired(t *testing.T) {
 	}
 }
 
+func TestManager_InstallStatic_Net(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	ctx := context.Background()
+	if err := m.InstallStatic(ctx, "10.0.0.0/8", "utun3", 5); err != nil {
+		t.Fatalf("InstallStatic: %v", err)
+	}
+	calls := r.joinedCalls()
+	if len(calls) != 1 || !strings.Contains(calls[0], "/sbin/route -n add -net 10.0.0.0/8 -interface utun3") {
+		t.Errorf("unexpected call: %v", calls)
+	}
+	// Removal must use -net too.
+	if err := m.Remove(ctx, "10.0.0.0/8"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if del := r.joinedCalls()[1]; !strings.Contains(del, "-net 10.0.0.0/8") || !strings.Contains(del, "delete") {
+		t.Errorf("expected -net delete, got %v", del)
+	}
+}
+
+func TestManager_InstallStatic_HostAndCanonicalize(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	ctx := context.Background()
+	// Single IP → -host; CIDR with host bits set → canonical network.
+	if err := m.InstallStatic(ctx, "1.2.3.4", "utun3", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.InstallStatic(ctx, "192.168.5.9/24", "utun3", 2); err != nil {
+		t.Fatal(err)
+	}
+	calls := r.joinedCalls()
+	if !strings.Contains(calls[0], "-host 1.2.3.4") {
+		t.Errorf("expected -host route, got %v", calls[0])
+	}
+	if !strings.Contains(calls[1], "-net 192.168.5.0/24") {
+		t.Errorf("expected canonicalized -net 192.168.5.0/24, got %v", calls[1])
+	}
+}
+
+func TestManager_InstallStatic_SurvivesSweep(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	ctx := context.Background()
+	_ = m.Install(ctx, "1.2.3.4", "utun3", time.Second, 0) // TTL route
+	_ = m.InstallStatic(ctx, "10.0.0.0/8", "utun3", 1)     // static route
+
+	m.now = func() time.Time { return now.Add(time.Hour) }
+	if n := m.SweepExpired(ctx); n != 1 {
+		t.Errorf("SweepExpired = %d, want 1 (static route must not be swept)", n)
+	}
+	active := m.Active()
+	if len(active) != 1 || active[0].Host != "10.0.0.0/8" {
+		t.Errorf("expected static route to remain, got %+v", active)
+	}
+}
+
 func TestParseNetstat(t *testing.T) {
 	sample := `Routing tables
 

@@ -23,6 +23,43 @@ import (
 	"github.com/ehsan/em-wall/core/xray"
 )
 
+// reconcileIPRoutes installs a kernel route for every enabled IP/CIDR
+// route rule so its destination traffic is pinned to the right egress.
+// proxy:/xray: rules route to the daemon's utun (the netstack handler then
+// dials the chosen upstream); a literal-interface rule routes straight to
+// that interface. Idempotent — already-present routes are a no-op — so it's
+// safe to call after every rule change. Routes for removed/retargeted rules
+// are dropped by the RemoveByRule calls the CRUD handlers already make.
+// Best-effort: a single route failure is logged, not fatal.
+func (d *handlerDeps) reconcileIPRoutes(ctx context.Context) {
+	if d.router == nil {
+		return
+	}
+	rs, err := d.store.List(ctx)
+	if err != nil {
+		log.Printf("em-walld: reconcile IP routes: list rules: %v", err)
+		return
+	}
+	for _, r := range rs {
+		if r.Action != rules.ActionRoute || !r.Enabled || !rules.IsIPRule(r.Pattern) {
+			continue
+		}
+		iface := r.Interface
+		if proxy.IsProxyInterface(iface) || xray.IsXrayInterface(iface) {
+			if d.proxyTun == "" {
+				continue // proxy routing disabled (utun didn't open)
+			}
+			iface = d.proxyTun
+		}
+		if iface == "" {
+			continue
+		}
+		if err := d.router.InstallStatic(ctx, r.Pattern, iface, r.ID); err != nil {
+			log.Printf("em-walld: install IP route %s via %s failed: %v", r.Pattern, iface, err)
+		}
+	}
+}
+
 func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	s.Handle(ipc.MethodStatus, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		list, _ := d.store.List(ctx)
@@ -71,6 +108,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			return nil, err
 		}
 		_ = d.engine.Reload(ctx)
+		d.reconcileIPRoutes(ctx)
 		return ruleToDTO(added), nil
 	})
 
@@ -107,6 +145,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		// dispatching cached IPs through the old proxy.
 		d.proxyTable.RemoveByRule(p.ID)
 		_ = d.engine.Reload(ctx)
+		d.reconcileIPRoutes(ctx)
 		return map[string]any{"ok": true}, nil
 	})
 
@@ -161,6 +200,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			touched = append(touched, r.ID)
 		}
 		_ = d.engine.Reload(ctx)
+		d.reconcileIPRoutes(ctx)
 		return ipc.GroupsBulkResult{Affected: len(touched), RuleIDs: touched}, nil
 	})
 

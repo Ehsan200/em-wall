@@ -98,10 +98,6 @@ func main() {
 	router := routing.New(nil)
 	proxyLatency := netprobe.NewLatencyTracker(proxyLatencyTTL)
 	trafficAgg := newTrafficAggregator(store, log.Default())
-	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, proxyLatency, trafficAgg, log.Default())
-	if proxyTunnel != nil {
-		defer proxyTunnel.Stop()
-	}
 
 	// Purge retired app-based routing rules (Interface "app:KEY"). The
 	// app: binding was removed; resolving an app's utun via lsof was
@@ -116,6 +112,14 @@ func main() {
 	engine := decision.New(store)
 	if err := engine.Reload(context.Background()); err != nil {
 		log.Fatalf("em-walld: load rules: %v", err)
+	}
+
+	// The netstack handler consults the engine to resolve IP/CIDR rules
+	// for connections that arrive without a DNS-time mapping, so the
+	// engine must exist before the tunnel is built.
+	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, log.Default())
+	if proxyTunnel != nil {
+		defer proxyTunnel.Stop()
 	}
 
 	pf := pfctl.New(nil)
@@ -159,6 +163,7 @@ func main() {
 		sysDNS:        sysDNS,
 		dnsServer:     dnsServer,
 		latency:       proxyLatency,
+		proxyTun:      proxyTunName,
 		listenAddr:    *listenAddr,
 		upstream:      joinCSV(upstreams),
 		startedAt:     time.Now(),
@@ -166,6 +171,12 @@ func main() {
 		proxyTestPort: proxyTestPort,
 	}
 	registerHandlers(ipcSrv, deps)
+
+	// Install kernel routes for any IP/CIDR route rules already in the
+	// store so their traffic is pinned to the proxy utun from boot,
+	// without waiting for a rule edit. Best-effort — a route failure must
+	// not block startup.
+	deps.reconcileIPRoutes(context.Background())
 
 	// Restore pf state from settings. Default-on so fresh installs
 	// block DoH/DoT without the user having to toggle it.
@@ -423,6 +434,7 @@ type handlerDeps struct {
 	sysDNS      *SystemDNS
 	dnsServer   *dnsproxy.Server
 	latency     *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
+	proxyTun    string                   // daemon-owned utun name; "" if proxy routing is disabled
 	listenAddr  string
 	upstream    string
 	startedAt   time.Time

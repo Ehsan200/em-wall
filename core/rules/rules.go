@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"net"
 	"strings"
 	"time"
 )
@@ -44,6 +45,34 @@ func normalize(s string) string {
 	return s
 }
 
+// ParseCIDR interprets pattern as a destination IP or CIDR rule. A bare
+// address ("1.2.3.4", "2001:db8::1") becomes a host route (/32 or /128);
+// a "addr/bits" string is parsed as a network. Returns ok=false for
+// anything that isn't an IP/CIDR — i.e. a normal domain pattern.
+func ParseCIDR(pattern string) (*net.IPNet, bool) {
+	p := normalize(pattern)
+	if p == "" {
+		return nil, false
+	}
+	if ip := net.ParseIP(p); ip != nil {
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, true
+	}
+	if _, n, err := net.ParseCIDR(p); err == nil {
+		return n, true
+	}
+	return nil, false
+}
+
+// IsIPRule reports whether pattern is a destination IP/CIDR (vs a domain).
+func IsIPRule(pattern string) bool {
+	_, ok := ParseCIDR(pattern)
+	return ok
+}
+
 // Match reports whether name matches pattern.
 // A pattern of "*.y.com" matches "y.com", "a.y.com", and "a.b.y.com".
 // A pattern of "y.com" matches only "y.com".
@@ -82,7 +111,9 @@ func Specificity(pattern string) int {
 	return score
 }
 
-// Validate returns nil if the pattern is well-formed.
+// Validate returns nil if the pattern is well-formed. A pattern is valid
+// if it is either a domain pattern (optionally wildcarded) or a
+// destination IP/CIDR.
 func Validate(pattern string) error {
 	p := normalize(pattern)
 	if p == "" {
@@ -90,6 +121,10 @@ func Validate(pattern string) error {
 	}
 	if strings.Contains(p, " ") {
 		return ErrInvalidPattern
+	}
+	// IP / CIDR rule: accept as-is, skip the domain-label checks below.
+	if IsIPRule(p) {
+		return nil
 	}
 	body := p
 	if strings.HasPrefix(body, "*.") {
@@ -123,6 +158,9 @@ func MostSpecific(rules []Rule, name string) *Rule {
 		if !r.Enabled {
 			continue
 		}
+		if IsIPRule(r.Pattern) {
+			continue // IP/CIDR rules are matched by MostSpecificIP, not by name
+		}
 		if !Match(r.Pattern, name) {
 			continue
 		}
@@ -130,6 +168,31 @@ func MostSpecific(rules []Rule, name string) *Rule {
 		if score > bestScore || (score == bestScore && best != nil && r.ID < best.ID) {
 			best = r
 			bestScore = score
+		}
+	}
+	return best
+}
+
+// MostSpecificIP returns the most specific IP/CIDR rule whose network
+// contains ip, or nil. "Most specific" means the longest prefix (largest
+// mask); ties are broken by lower ID (older rule wins). Disabled rules and
+// domain rules are skipped.
+func MostSpecificIP(rules []Rule, ip net.IP) *Rule {
+	var best *Rule
+	bestOnes := -1
+	for i := range rules {
+		r := &rules[i]
+		if !r.Enabled {
+			continue
+		}
+		n, ok := ParseCIDR(r.Pattern)
+		if !ok || !n.Contains(ip) {
+			continue
+		}
+		ones, _ := n.Mask.Size()
+		if ones > bestOnes || (ones == bestOnes && best != nil && r.ID < best.ID) {
+			best = r
+			bestOnes = ones
 		}
 	}
 	return best
