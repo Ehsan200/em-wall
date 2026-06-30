@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -282,6 +283,104 @@ func (a *App) SetGroupEnabled(key string, enabled bool) (ipc.GroupsBulkResult, e
 	var out ipc.GroupsBulkResult
 	err := a.call(ipc.MethodGroupsSetEnabled, ipc.GroupsSetEnabledParams{Key: key, Enabled: enabled}, &out)
 	return out, err
+}
+
+// ---- Custom groups ----
+
+// AddCustomGroup creates a user-defined group. Key may be empty — the
+// daemon derives a "custom:"-prefixed slug from displayName.
+func (a *App) AddCustomGroup(key, displayName, description string, patterns []string, color string) (ipc.GroupDTO, error) {
+	var out ipc.GroupDTO
+	err := a.call(ipc.MethodGroupsAdd, ipc.GroupsAddParams{
+		Key: key, DisplayName: displayName, Description: description, Patterns: patterns, Color: color,
+	}, &out)
+	return out, err
+}
+
+// UpdateCustomGroup edits a custom group, matched by its key.
+func (a *App) UpdateCustomGroup(key, displayName, description string, patterns []string, color string) error {
+	return a.call(ipc.MethodGroupsUpdate, ipc.GroupsUpdateParams{
+		Key: key, DisplayName: displayName, Description: description, Patterns: patterns, Color: color,
+	}, nil)
+}
+
+// DeleteCustomGroup removes a custom group definition. When deleteRules is
+// true, rules created from its patterns are purged too.
+func (a *App) DeleteCustomGroup(key string, deleteRules bool) (ipc.GroupsBulkResult, error) {
+	var out ipc.GroupsBulkResult
+	err := a.call(ipc.MethodGroupsDelete, ipc.GroupsDeleteParams{Key: key, DeleteRules: deleteRules}, &out)
+	return out, err
+}
+
+// ---- Export / Import ----
+
+// Export builds an encrypted bundle from the selection and returns it
+// (base64) for the caller to write to a file.
+func (a *App) Export(sel ipc.ExportSelection, passphrase string) (ipc.ExportResult, error) {
+	var out ipc.ExportResult
+	err := a.call(ipc.MethodExport, ipc.ExportParams{Selection: sel, Passphrase: passphrase}, &out)
+	return out, err
+}
+
+// Import decrypts a base64 bundle blob and applies it (skip-existing).
+func (a *App) Import(blob, passphrase string) (ipc.ImportResult, error) {
+	var out ipc.ImportResult
+	err := a.call(ipc.MethodImport, ipc.ImportParams{Blob: blob, Passphrase: passphrase}, &out)
+	return out, err
+}
+
+// SaveExportFile writes a base64 export blob to a user-chosen path via a
+// native save dialog. Returns the chosen path, or "" if the user cancelled.
+// blobB64 is what Export returned; suggestedName is its Filename.
+func (a *App) SaveExportFile(blobB64, suggestedName string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(blobB64)
+	if err != nil {
+		return "", err
+	}
+	if suggestedName == "" {
+		suggestedName = "em-wall-export.embackup"
+	}
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:                "Export em-wall rules",
+		DefaultFilename:      suggestedName,
+		CanCreateDirectories: true,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "em-wall backup (*.embackup)", Pattern: "*.embackup"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil // cancelled
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// ReadImportFile prompts for a backup file via a native open dialog and
+// returns its contents base64-encoded, ready to pass to Import. Returns ""
+// (no error) if the user cancelled the dialog.
+func (a *App) ReadImportFile() (string, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Import em-wall rules",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "em-wall backup (*.embackup)", Pattern: "*.embackup"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil // cancelled
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 // ---- Proxies ----

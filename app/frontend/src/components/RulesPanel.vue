@@ -4,9 +4,12 @@ import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
   Groups, ApplyGroup, DeleteGroupRules, SetGroupEnabled,
   ListProxies, ListXray, BulkUpdateRules, RuleExitIP,
+  DeleteCustomGroup,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import GroupIcon from './GroupIcon.vue';
+import CustomGroupForm from './CustomGroupForm.vue';
+import ExportDialog from './ExportDialog.vue';
 
 // Local shape for a proxy row — same fields as ipc.ProxyDTO; using a
 // local type means the component still type-checks while wailsjs/models
@@ -161,6 +164,54 @@ const filteredGroups = computed<ipc.GroupDTO[]>(() => {
   if (!q) return knownGroups.value;
   return knownGroups.value.filter(g => matchesGroup(g, q));
 });
+
+// Curated (code-defined) vs custom (user-created) split for the two
+// quick-add bars. Custom groups carry the `custom` flag from the daemon.
+const filteredCurated = computed<ipc.GroupDTO[]>(() => filteredGroups.value.filter(g => !g.custom));
+const filteredCustom = computed<ipc.GroupDTO[]>(() => filteredGroups.value.filter(g => g.custom));
+
+// Custom-group create/edit modal. null = closed; {group:null} = create.
+const customGroupForm = ref<{ group: ipc.GroupDTO | null } | null>(null);
+function openNewGroup() { customGroupForm.value = { group: null }; }
+function openEditGroup(g: ipc.GroupDTO) { customGroupForm.value = { group: g }; }
+function closeGroupEditor() { customGroupForm.value = null; }
+async function onGroupSaved() {
+  customGroupForm.value = null;
+  await refresh();
+  emit('changed');
+}
+
+// Pending two-click confirm for deleting a custom group definition.
+const pendingDeleteCustom = ref<string | null>(null);
+let pendingDeleteCustomTimer: number | undefined;
+function askDeleteCustomGroup(g: ipc.GroupDTO) {
+  if (pendingDeleteCustom.value === g.key) { confirmDeleteCustomGroup(g); return; }
+  pendingDeleteCustom.value = g.key;
+  if (pendingDeleteCustomTimer) window.clearTimeout(pendingDeleteCustomTimer);
+  pendingDeleteCustomTimer = window.setTimeout(() => { pendingDeleteCustom.value = null; }, 3000);
+}
+async function confirmDeleteCustomGroup(g: ipc.GroupDTO) {
+  if (pendingDeleteCustomTimer) window.clearTimeout(pendingDeleteCustomTimer);
+  pendingDeleteCustom.value = null;
+  try {
+    // Delete the definition only; rules created from it are left in place.
+    await DeleteCustomGroup(g.key, false);
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  }
+}
+
+// Export dialog. exportSel holds a fixed selection (e.g. selected rule IDs);
+// null fixed with the dialog open shows the scope picker.
+const exportOpen = ref(false);
+const exportFixed = ref<ipc.ExportSelection | null>(null);
+function openExportSelected() {
+  exportFixed.value = { all: false, ruleIds: [...selected.value], curatedKeys: [], customKeys: [] };
+  exportOpen.value = true;
+}
+function closeExport() { exportOpen.value = false; exportFixed.value = null; }
 
 const filteredRules = computed<ipc.RuleDTO[]>(() => {
   const q = search.value.trim().toLowerCase();
@@ -835,7 +886,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         Quick add — one click creates rules for every domain of a service:
       </div>
       <div class="row" style="gap: 6px; flex-wrap: wrap">
-        <button v-for="g in filteredGroups" :key="g.key"
+        <button v-for="g in filteredCurated" :key="g.key"
                 class="group-card"
                 @click="openGroupForm(g)"
                 :title="g.description + '\n\n' + g.patterns.join('\n')">
@@ -845,6 +896,34 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         </button>
         <span v-if="search.trim() && !filteredGroups.length" class="muted" style="font-size: 11px; padding: 6px">
           No groups match "<code>{{ search }}</code>".
+        </span>
+      </div>
+    </div>
+
+    <!-- Custom (user-created) groups: same one-click apply, plus edit/delete -->
+    <div class="groups-bar">
+      <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 8px">
+        <span class="muted" style="font-size: 11px">Your custom groups — define your own bundle of patterns:</span>
+        <button @click="openNewGroup">+ New group</button>
+      </div>
+      <div class="row" style="gap: 6px; flex-wrap: wrap">
+        <div v-for="g in filteredCustom" :key="g.key" class="custom-card"
+             :title="g.description + '\n\n' + g.patterns.join('\n')">
+          <button class="group-card flat" @click="openGroupForm(g)">
+            <GroupIcon :group-key="g.key" :size="20" />
+            <span class="group-name">{{ g.displayName }}</span>
+            <span class="muted" style="font-size: 10px">{{ g.patterns.length }} pattern{{ g.patterns.length === 1 ? '' : 's' }}</span>
+          </button>
+          <button class="icon-btn" title="Edit group" @click="openEditGroup(g)">✎</button>
+          <button class="icon-btn"
+                  :class="{ danger: pendingDeleteCustom === g.key }"
+                  :title="pendingDeleteCustom === g.key ? 'Click again to confirm' : 'Delete group (keeps its rules)'"
+                  @click="askDeleteCustomGroup(g)">
+            {{ pendingDeleteCustom === g.key ? '✓?' : '🗑' }}
+          </button>
+        </div>
+        <span v-if="!filteredCustom.length" class="muted" style="font-size: 11px; padding: 6px">
+          {{ search.trim() ? 'No custom groups match.' : 'No custom groups yet.' }}
         </span>
       </div>
     </div>
@@ -1004,6 +1083,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 :disabled="selectedCount === filteredRules.length"
                 title="Add every rule matching the current search to the selection">
           Select all visible ({{ filteredRules.length }})
+        </button>
+        <button @click="openExportSelected" title="Export the selected rules to an encrypted file">
+          Export selected…
         </button>
         <button @click="clearSelection">Clear</button>
       </div>
@@ -1322,6 +1404,17 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         </tbody>
       </table>
     </div>
+
+    <CustomGroupForm v-if="customGroupForm"
+                     :group="customGroupForm.group"
+                     @saved="onGroupSaved"
+                     @close="closeGroupEditor" />
+
+    <ExportDialog v-if="exportOpen"
+                  :fixed="exportFixed"
+                  label="selected rules"
+                  @close="closeExport"
+                  @done="closeExport" />
   </div>
 </template>
 
@@ -1452,6 +1545,33 @@ tr.edit-row td {
 }
 .group-card:hover { background: var(--border); border-color: var(--accent); }
 .group-card .group-name { font-weight: 600; }
+
+/* Custom-group card: the apply button plus inline edit/delete controls,
+   grouped so they read as one card with a shared border. */
+.custom-card {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.custom-card .group-card.flat {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+.custom-card .icon-btn {
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.custom-card .icon-btn:hover { background: var(--border); color: var(--text); }
+.custom-card .icon-btn.danger { color: var(--danger); }
 
 .chip-rank {
   display: inline-flex;

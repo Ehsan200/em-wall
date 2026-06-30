@@ -359,7 +359,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return out, nil
 	})
 
-	s.Handle(ipc.MethodGroupsList, func(_ context.Context, _ json.RawMessage) (any, error) {
+	s.Handle(ipc.MethodGroupsList, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		registry := groups.KnownGroups()
 		out := make([]ipc.GroupDTO, 0, len(registry))
 		for _, g := range registry {
@@ -371,6 +371,21 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Color:       groups.BrandColor(g.Key),
 			})
 		}
+		// Append user-created groups after the curated registry.
+		custom, err := d.store.ListCustomGroups(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range custom {
+			out = append(out, ipc.GroupDTO{
+				Key:         g.Key,
+				DisplayName: g.DisplayName,
+				Description: g.Description,
+				Patterns:    g.Patterns,
+				Color:       g.Color,
+				Custom:      true,
+			})
+		}
 		return out, nil
 	})
 
@@ -379,14 +394,17 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		pats, err := d.resolveGroupPatterns(ctx, p.Key)
+		if err != nil {
+			return nil, err
+		}
+		if len(pats) == 0 {
+			return ipc.GroupsApplyResult{}, nil
 		}
 		// Validate the action / interface combination once up front so
 		// we don't half-create the group on a bad request.
 		probe := rules.Rule{
-			Pattern: g.Patterns[0], Action: rules.Action(p.Action),
+			Pattern: pats[0], Action: rules.Action(p.Action),
 			Interface: p.Interface, Enabled: p.Enabled,
 		}
 		if _, err := d.store.Add(ctx, probe); err != nil {
@@ -407,9 +425,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if probe.ID > 0 {
 			out.Created = append(out.Created, ruleToDTO(probe))
 		} else if probe.ID == 0 {
-			out.Skipped = append(out.Skipped, g.Patterns[0])
+			out.Skipped = append(out.Skipped, pats[0])
 		}
-		for _, pattern := range g.Patterns[1:] {
+		for _, pattern := range pats[1:] {
 			r := rules.Rule{
 				Pattern: pattern, Action: rules.Action(p.Action),
 				Interface: p.Interface, Enabled: p.Enabled,
@@ -438,11 +456,11 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		pats, err := d.resolveGroupPatterns(ctx, p.Key)
+		if err != nil {
+			return nil, err
 		}
-		ids, err := d.matchingRuleIDs(ctx, g.Patterns)
+		ids, err := d.matchingRuleIDs(ctx, pats)
 		if err != nil {
 			return nil, err
 		}
@@ -470,9 +488,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		g := groups.FindByKey(p.Key)
-		if g == nil {
-			return nil, fmt.Errorf("unknown group: %s", p.Key)
+		pats, err := d.resolveGroupPatterns(ctx, p.Key)
+		if err != nil {
+			return nil, err
 		}
 		all, err := d.store.List(ctx)
 		if err != nil {
@@ -480,7 +498,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		var touched []int64
 		for _, r := range all {
-			if !ruleBelongsToGroup(r.Pattern, g.Patterns) {
+			if !ruleBelongsToGroup(r.Pattern, pats) {
 				continue
 			}
 			if r.Enabled == p.Enabled {
@@ -500,10 +518,24 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return ipc.GroupsBulkResult{Affected: len(touched), RuleIDs: touched}, nil
 	})
 
-	s.Handle(ipc.MethodGroupsIcon, func(_ context.Context, raw json.RawMessage) (any, error) {
+	s.Handle(ipc.MethodGroupsIcon, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p ipc.GroupsIconParams
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
+		}
+		// Custom (user-created) group: synthesize an initials badge from
+		// its display name + color; there's no shipped icon file.
+		if strings.HasPrefix(p.Key, rules.CustomGroupPrefix) {
+			cg, err := d.store.GetCustomGroup(ctx, p.Key)
+			if err != nil {
+				return nil, err
+			}
+			svg := groups.GenericSVG(cg.DisplayName, cg.Color)
+			return ipc.GroupIconDTO{
+				Key:     cg.Key,
+				MIME:    "image/svg+xml",
+				DataB64: base64.StdEncoding.EncodeToString([]byte(svg)),
+			}, nil
 		}
 		g := groups.FindByKey(p.Key)
 		if g == nil {
@@ -950,6 +982,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		return map[string]any{"ok": true}, nil
 	})
+
+	registerCustomGroupHandlers(s, d)
+	registerPortableHandlers(s, d)
 }
 
 // validateProxyRefs checks that every proxy name referenced by a

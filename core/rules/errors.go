@@ -8,4 +8,9 @@ var (
 	ErrInvalidAction  = errors.New("rules: invalid action")
 	ErrNotFound       = errors.New("rules: not found")
 	ErrDuplicate      = errors.New("rules: pattern already exists")
+
+	ErrEmptyGroupKey  = errors.New("rules: empty group key")
+	ErrGroupNotFound  = errors.New("rules: custom group not found")
+	ErrGroupDuplicate = errors.New("rules: custom group key already exists")
+	ErrEmptyGroupName = errors.New("rules: empty group display name")
 )

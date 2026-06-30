@@ -107,7 +107,7 @@ func Open(path string) (*Store, error) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&Rule{}, &Setting{}, &LogEntry{}, &TrafficStat{}); err != nil {
+	if err := db.AutoMigrate(&Rule{}, &Setting{}, &LogEntry{}, &TrafficStat{}, &CustomGroup{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 

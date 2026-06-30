@@ -2,14 +2,34 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/proxy"
 	"github.com/ehsan/em-wall/core/rules"
 	"github.com/ehsan/em-wall/core/xray"
 )
+
+// resolveGroupPatterns returns the pattern list for a group key, looking in
+// the curated registry (core/groups) for bare keys and the DB-backed custom
+// store for "custom:"-prefixed keys. Returns an error if the key is unknown.
+func (d *handlerDeps) resolveGroupPatterns(ctx context.Context, key string) ([]string, error) {
+	if strings.HasPrefix(key, rules.CustomGroupPrefix) {
+		g, err := d.store.GetCustomGroup(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		return g.Patterns, nil
+	}
+	g := groups.FindByKey(key)
+	if g == nil {
+		return nil, fmt.Errorf("unknown group: %s", key)
+	}
+	return g.Patterns, nil
+}
 
 // normalizeGroupPattern lowercases and trims a pattern so comparisons
 // don't depend on user-typed whitespace or trailing dots.

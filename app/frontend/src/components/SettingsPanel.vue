@@ -4,8 +4,11 @@ import {
   GetSetting, SetSetting,
   SystemDNSStatus, ActivateSystemDNS, DeactivateSystemDNS,
   InstallStatus, Install, Uninstall, WaitForDaemon,
+  Groups,
 } from '../../wailsjs/go/main/App';
 import type { ipc, installer } from '../../wailsjs/go/models';
+import ExportDialog from './ExportDialog.vue';
+import ImportDialog from './ImportDialog.vue';
 
 // focusReinstallSeq is bumped by the parent when the user clicks the
 // version-mismatch banner's "Reinstall daemon" button. Each bump scrolls
@@ -39,6 +42,25 @@ const fallbackDns = ref<string>('');
 const fallbackBusy = ref<boolean>(false);
 const fallbackError = ref<string>('');
 const fallbackSaved = ref<boolean>(false);
+
+// ---- Backup & restore (export / import) ----
+const knownGroups = ref<ipc.GroupDTO[]>([]);
+const exportOpen = ref<boolean>(false);
+const exportFixed = ref<ipc.ExportSelection | null>(null);
+const importOpen = ref<boolean>(false);
+async function loadGroups() {
+  try { knownGroups.value = await Groups(); } catch { /* daemon may be down; picker just empty */ }
+}
+function openExportAll() {
+  exportFixed.value = { all: true, ruleIds: [], curatedKeys: [], customKeys: [] };
+  exportOpen.value = true;
+}
+function openExportChoose() {
+  exportFixed.value = null; // null → ExportDialog shows the scope/group picker
+  exportOpen.value = true;
+}
+function closeExport() { exportOpen.value = false; exportFixed.value = null; }
+function onImportDone() { emit('changed'); }
 
 // ---- Uninstall flow state ----
 const installStatus = ref<installer.Status | null>(null);
@@ -265,6 +287,7 @@ onMounted(() => {
   loadSettings();
   refreshStatus();
   loadInstallStatus();
+  loadGroups();
   // If we were mounted *because* the user clicked the banner (tab switch),
   // the prop is already set, so the watch above won't fire — handle it here.
   if (props.focusReinstallSeq) flashReinstall();
@@ -441,6 +464,26 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- Backup & restore -->
+      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+        <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px">
+          <div class="col" style="gap: 4px; flex: 1">
+            <strong>Backup &amp; restore</strong>
+            <span class="muted" style="font-size: 12px; line-height: 1.5">
+              Export your rules and custom groups to an encrypted file, or import
+              one. Files are always encrypted with a passphrase you choose; you'll
+              need that same passphrase to import. Importing only adds new entries —
+              existing rules and groups are left untouched.
+            </span>
+          </div>
+          <div class="row" style="gap: 6px; align-items: flex-start; flex-wrap: wrap; justify-content: flex-end">
+            <button @click="openExportAll">Export everything…</button>
+            <button @click="openExportChoose">Export by group…</button>
+            <button class="primary" @click="importOpen = true">Import…</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Uninstall (danger zone) -->
       <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid rgba(255, 111, 111, 0.3); border-radius: 8px">
         <div class="row" style="justify-content: space-between; cursor: pointer" @click="uninstallExpanded = !uninstallExpanded">
@@ -533,5 +576,16 @@ onUnmounted(() => {
       </div>
 
     </div>
+
+    <ExportDialog v-if="exportOpen"
+                  :fixed="exportFixed"
+                  :groups="knownGroups"
+                  label="backup"
+                  @close="closeExport"
+                  @done="closeExport" />
+
+    <ImportDialog v-if="importOpen"
+                  @close="importOpen = false"
+                  @done="onImportDone" />
   </div>
 </template>

@@ -50,6 +50,11 @@ const (
 	MethodGroupsIcon          = "groups.icon"
 	MethodGroupsDeleteRules   = "groups.delete-rules"
 	MethodGroupsSetEnabled    = "groups.set-enabled"
+	MethodGroupsAdd           = "groups.add"    // create a custom group def
+	MethodGroupsUpdate        = "groups.update" // edit a custom group def
+	MethodGroupsDelete        = "groups.delete" // remove a custom group def
+	MethodExport              = "portable.export"
+	MethodImport              = "portable.import"
 	MethodProxiesList         = "proxies.list"
 	MethodProxiesAdd          = "proxies.add"
 	MethodProxiesUpdate       = "proxies.update"
@@ -173,7 +178,34 @@ type GroupDTO struct {
 	DisplayName string   `json:"displayName"`
 	Description string   `json:"description"`
 	Patterns    []string `json:"patterns"`
-	Color       string   `json:"color"` // brand accent hex, "" if none
+	Color       string   `json:"color"`  // brand accent hex, "" if none
+	Custom      bool     `json:"custom"` // true = user-created (editable/deletable)
+}
+
+// GroupsAddParams creates a custom group. Key is optional — the daemon
+// derives a "custom:"-prefixed slug from DisplayName when empty.
+type GroupsAddParams struct {
+	Key         string   `json:"key"`
+	DisplayName string   `json:"displayName"`
+	Description string   `json:"description"`
+	Patterns    []string `json:"patterns"`
+	Color       string   `json:"color"`
+}
+
+// GroupsUpdateParams edits an existing custom group, matched by Key.
+type GroupsUpdateParams struct {
+	Key         string   `json:"key"`
+	DisplayName string   `json:"displayName"`
+	Description string   `json:"description"`
+	Patterns    []string `json:"patterns"`
+	Color       string   `json:"color"`
+}
+
+// GroupsDeleteParams removes a custom group definition. When DeleteRules is
+// true, rules created from the group's patterns are purged too.
+type GroupsDeleteParams struct {
+	Key         string `json:"key"`
+	DeleteRules bool   `json:"deleteRules"`
 }
 
 type GroupsIconParams struct {
@@ -419,6 +451,51 @@ type UsagePointDTO struct {
 	Key        string `json:"key"`
 	BytesSent  int64  `json:"bytesSent"`
 	BytesRecv  int64  `json:"bytesRecv"`
+}
+
+// ExportSelection picks what goes into an export bundle. When All is true
+// the other fields are ignored and everything (all rules + all custom
+// groups) is exported. Otherwise the bundle is the union of: the rules in
+// RuleIDs, the rules matching each curated group in CuratedKeys, and each
+// custom group in CustomKeys (definition + its matching rules).
+type ExportSelection struct {
+	All         bool     `json:"all"`
+	RuleIDs     []int64  `json:"ruleIds"`
+	CuratedKeys []string `json:"curatedKeys"`
+	CustomKeys  []string `json:"customKeys"`
+}
+
+// ExportParams asks the daemon to build and encrypt a bundle. Passphrase is
+// mandatory — exports are always encrypted.
+type ExportParams struct {
+	Selection  ExportSelection `json:"selection"`
+	Passphrase string          `json:"passphrase"`
+}
+
+// ExportResult carries the encrypted bundle as base64 (the app writes it to
+// a file via a save dialog) plus a suggested filename and a content tally.
+type ExportResult struct {
+	Blob       string `json:"blob"`     // base64 of the encrypted envelope JSON
+	Filename   string `json:"filename"` // suggested file name
+	RuleCount  int    `json:"ruleCount"`
+	GroupCount int    `json:"groupCount"`
+}
+
+// ImportParams carries a base64-encoded encrypted bundle and its passphrase.
+type ImportParams struct {
+	Blob       string `json:"blob"`
+	Passphrase string `json:"passphrase"`
+}
+
+// ImportResult tallies what the import applied. Existing rules (matched by
+// pattern) and existing custom groups (matched by key) are skipped, not
+// overwritten.
+type ImportResult struct {
+	RulesCreated  int      `json:"rulesCreated"`
+	RulesSkipped  int      `json:"rulesSkipped"`
+	GroupsCreated int      `json:"groupsCreated"`
+	GroupsSkipped int      `json:"groupsSkipped"`
+	Warnings      []string `json:"warnings"`
 }
 
 type SystemDNSStatus struct {
