@@ -360,6 +360,23 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	})
 
 	s.Handle(ipc.MethodGroupsList, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		// Fetch rules once so each group can report how many stored rules
+		// match its patterns (used by the UI to hide empty groups from the
+		// export picker).
+		allRules, err := d.store.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		countFor := func(patterns []string) int {
+			n := 0
+			for _, r := range allRules {
+				if ruleBelongsToGroup(r.Pattern, patterns) {
+					n++
+				}
+			}
+			return n
+		}
+
 		registry := groups.KnownGroups()
 		out := make([]ipc.GroupDTO, 0, len(registry))
 		for _, g := range registry {
@@ -369,6 +386,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Description: g.Description,
 				Patterns:    g.Patterns,
 				Color:       groups.BrandColor(g.Key),
+				RuleCount:   countFor(g.Patterns),
 			})
 		}
 		// Append user-created groups after the curated registry.
@@ -384,6 +402,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Patterns:    g.Patterns,
 				Color:       g.Color,
 				Custom:      true,
+				RuleCount:   countFor(g.Patterns),
 			})
 		}
 		return out, nil

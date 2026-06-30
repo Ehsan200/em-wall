@@ -178,8 +178,9 @@ type GroupDTO struct {
 	DisplayName string   `json:"displayName"`
 	Description string   `json:"description"`
 	Patterns    []string `json:"patterns"`
-	Color       string   `json:"color"`  // brand accent hex, "" if none
-	Custom      bool     `json:"custom"` // true = user-created (editable/deletable)
+	Color       string   `json:"color"`     // brand accent hex, "" if none
+	Custom      bool     `json:"custom"`    // true = user-created (editable/deletable)
+	RuleCount   int      `json:"ruleCount"` // how many stored rules match this group's patterns
 }
 
 // GroupsAddParams creates a custom group. Key is optional — the daemon

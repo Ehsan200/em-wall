@@ -11,19 +11,16 @@ const isEdit = computed(() => !!props.group);
 const displayName = ref(props.group?.displayName ?? '');
 const description = ref(props.group?.description ?? '');
 const color = ref(props.group?.color ?? '#6c5ce7');
-// Patterns edited as one-per-line text; split + trimmed on save.
-const patternsText = ref((props.group?.patterns ?? []).join('\n'));
 const busy = ref(false);
 const error = ref('');
 
-const patterns = computed<string[]>(() =>
-  patternsText.value
-    .split('\n')
-    .map(p => p.trim())
-    .filter(p => p.length > 0)
-);
+// Patterns are NOT edited here — a new group starts empty and gains patterns
+// via "Move to group" (selecting existing rules). Edit mode carries the
+// group's current patterns through unchanged so saving name/color never
+// wipes them.
+const patterns = computed<string[]>(() => props.group?.patterns ?? []);
 
-const valid = computed(() => displayName.value.trim().length > 0 && patterns.value.length > 0);
+const valid = computed(() => displayName.value.trim().length > 0);
 
 async function save() {
   if (!valid.value || busy.value) return;
@@ -68,13 +65,12 @@ async function save() {
           </div>
         </label>
 
-        <label class="field">
-          <span class="lbl">Patterns <span class="muted">— one per line ({{ patterns.length }})</span></span>
-          <textarea v-model="patternsText" rows="7"
-                    placeholder="*.example.com&#10;api.example.com&#10;10.0.0.0/8"
-                    style="font-family: ui-monospace, monospace; font-size: 12px"></textarea>
-          <span class="muted" style="font-size: 10px">Domains (wildcards ok) or IP/CIDR — same syntax as rules.</span>
-        </label>
+        <p class="muted" style="font-size: 11px; margin: 2px 0 0; line-height: 1.5">
+          <template v-if="isEdit">This group has {{ patterns.length }} pattern(s). Add more from the
+          Rules list: select rules and use “Move to group”.</template>
+          <template v-else>The group starts empty. Add patterns by selecting rules in the Rules
+          list and choosing “Move to group”.</template>
+        </p>
 
         <div v-if="error" class="err">{{ error }}</div>
 

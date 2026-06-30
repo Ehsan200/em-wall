@@ -10,6 +10,7 @@ import type { ipc } from '../../wailsjs/go/models';
 import GroupIcon from './GroupIcon.vue';
 import CustomGroupForm from './CustomGroupForm.vue';
 import ExportDialog from './ExportDialog.vue';
+import MoveToGroupDialog from './MoveToGroupDialog.vue';
 
 // Local shape for a proxy row — same fields as ipc.ProxyDTO; using a
 // local type means the component still type-checks while wailsjs/models
@@ -175,8 +176,16 @@ const customGroupForm = ref<{ group: ipc.GroupDTO | null } | null>(null);
 function openNewGroup() { customGroupForm.value = { group: null }; }
 function openEditGroup(g: ipc.GroupDTO) { customGroupForm.value = { group: g }; }
 function closeGroupEditor() { customGroupForm.value = null; }
+// Force a groups reload (refresh() only fetches groups when the list is
+// empty, to avoid re-pulling the static curated set on every live tick;
+// custom groups are dynamic, so mutations must reload explicitly).
+async function reloadGroups() {
+  knownGroups.value = (await Groups()) || [];
+}
+
 async function onGroupSaved() {
   customGroupForm.value = null;
+  await reloadGroups();
   await refresh();
   emit('changed');
 }
@@ -196,6 +205,7 @@ async function confirmDeleteCustomGroup(g: ipc.GroupDTO) {
   try {
     // Delete the definition only; rules created from it are left in place.
     await DeleteCustomGroup(g.key, false);
+    await reloadGroups();
     await refresh();
     emit('changed');
   } catch (e: any) {
@@ -212,6 +222,19 @@ function openExportSelected() {
   exportOpen.value = true;
 }
 function closeExport() { exportOpen.value = false; exportFixed.value = null; }
+
+// Move-selected-rules-into-a-group dialog.
+const moveOpen = ref(false);
+const customGroupsList = computed<ipc.GroupDTO[]>(() => knownGroups.value.filter(g => g.custom));
+const selectedRules = computed<ipc.RuleDTO[]>(() => rules.value.filter(r => selected.value.has(r.id)));
+function openMoveToGroup() { moveOpen.value = true; }
+async function onMovedToGroup() {
+  moveOpen.value = false;
+  clearSelection();
+  await reloadGroups();
+  await refresh();
+  emit('changed');
+}
 
 const filteredRules = computed<ipc.RuleDTO[]>(() => {
   const q = search.value.trim().toLowerCase();
@@ -1084,6 +1107,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 title="Add every rule matching the current search to the selection">
           Select all visible ({{ filteredRules.length }})
         </button>
+        <button @click="openMoveToGroup" title="Add the selected rules' patterns to a custom group, then delete the rules">
+          Move to group…
+        </button>
         <button @click="openExportSelected" title="Export the selected rules to an encrypted file">
           Export selected…
         </button>
@@ -1415,6 +1441,12 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                   label="selected rules"
                   @close="closeExport"
                   @done="closeExport" />
+
+    <MoveToGroupDialog v-if="moveOpen"
+                       :rules="selectedRules"
+                       :custom-groups="customGroupsList"
+                       @done="onMovedToGroup"
+                       @close="moveOpen = false" />
   </div>
 </template>
 

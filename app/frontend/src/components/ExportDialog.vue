@@ -29,6 +29,12 @@ function togglePick(key: string) {
   pickedKeys.value = next;
 }
 
+// Only offer groups the user actually has rules for — exporting a group
+// with no matching rules would produce nothing.
+const pickableGroups = computed<ipc.GroupDTO[]>(() =>
+  (props.groups ?? []).filter(g => g.ruleCount > 0)
+);
+
 const passphraseValid = computed(() => pass.value.length >= 4 && pass.value === pass2.value);
 
 const selectionValid = computed(() => {
@@ -44,7 +50,7 @@ function buildSelection(): ipc.ExportSelection {
   }
   const curated: string[] = [];
   const custom: string[] = [];
-  for (const g of props.groups ?? []) {
+  for (const g of pickableGroups.value) {
     if (!pickedKeys.value.has(g.key)) continue;
     if (g.custom) custom.push(g.key); else curated.push(g.key);
   }
@@ -97,13 +103,16 @@ async function doExport() {
             <input type="radio" value="groups" v-model="scope" /> Choose groups
           </label>
           <div v-if="scope === 'groups'" class="picker">
-            <label v-for="g in groups" :key="g.key" class="row pick-row" :title="g.patterns.join('\n')">
+            <label v-for="g in pickableGroups" :key="g.key" class="row pick-row" :title="g.patterns.join('\n')">
               <input type="checkbox" :checked="pickedKeys.has(g.key)" @change="togglePick(g.key)" />
               <span class="dot" :style="{ background: g.color || 'var(--text-dim)' }"></span>
               <span style="flex: 1">{{ g.displayName }}</span>
               <span v-if="g.custom" class="badge">custom</span>
-              <span class="muted" style="font-size: 10px">{{ g.patterns.length }}</span>
+              <span class="muted" style="font-size: 10px">{{ g.ruleCount }} rule{{ g.ruleCount === 1 ? '' : 's' }}</span>
             </label>
+            <span v-if="!pickableGroups.length" class="muted" style="font-size: 11px; padding: 6px">
+              No groups have rules yet. Create rules first, or use “Export everything”.
+            </span>
           </div>
         </div>
 
