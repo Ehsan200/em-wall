@@ -50,7 +50,7 @@ function maskIP(ip?: string): string {
       <div><span class="label">Uptime</span> {{ status.uptime }}</div>
 
       <!-- Public egress: what every site sees for traffic no rule matches. -->
-      <div class="egress" style="margin-left:auto"
+      <div class="egress"
            :title="egress?.probed
              ? `Public IP — ${[egress.city, egress.region, egress.country].filter(Boolean).join(', ')} (default route). Click the IP to reveal.`
              : (egress?.message || 'fetching public IP…')">
