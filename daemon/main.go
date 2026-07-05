@@ -362,6 +362,39 @@ func main() {
 		}
 	}()
 
+	// Event-driven network-change watcher. Parks a scutil subprocess that
+	// wakes only when the default route or DNS config actually changes
+	// (Wi-Fi switch, VPN toggle, wake-from-sleep) — ~zero CPU while idle,
+	// so it's the primary trigger for re-pointing upstream DNS, and the 10s
+	// poll above is just a backstop. On each change it forces a full
+	// re-pick via repickUpstream, NOT the poll's liveness check: the public
+	// fallback resolver (1.1.1.1) stays reachable across networks and would
+	// mask the now-dead local resolver, so an unconditional recompute off
+	// fresh DHCP/scutil state is what actually follows the user onto the new
+	// network without a manual deactivate/activate.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		watchNetworkChanges(ctx, func() {
+			if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref != "true" {
+				return // hijack off — nothing to keep pointed anywhere
+			}
+			if active, _ := deps.sysDNS.IsActive(); !active {
+				if err := deps.activateSystemDNS(ctx); err != nil {
+					log.Printf("em-walld: activation on network change failed: %v", err)
+				} else {
+					log.Printf("em-walld: system DNS hijack activated on network change")
+				}
+				return
+			}
+			if changed, err := deps.repickUpstream(ctx); err != nil {
+				log.Printf("em-walld: upstream repick on network change failed: %v", err)
+			} else if changed {
+				log.Printf("em-walld: network changed → upstream now %s", deps.upstream)
+			}
+		})
+	}()
+
 	// Proxy tunnel: shuttle packets between the daemon-owned utun and
 	// the netstack TCP stack. Only when the utun opened successfully
 	// (needs root) — otherwise proxy: rules are unsupported and there's
