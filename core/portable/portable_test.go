@@ -17,6 +17,43 @@ func sampleBundle() Bundle {
 		CustomGroups: []BundleGroup{
 			{Key: "custom:mine", DisplayName: "Mine", Patterns: []string{"*.x.com"}, Color: "#fff"},
 		},
+		Subscriptions: []BundleSubscription{
+			{Name: "mysub", URL: "https://example.com/sub", UserAgent: "v2rayN/6.23", IntervalSec: 43200, NodeCap: 30, Enabled: true},
+		},
+		Masters: []BundleXray{
+			{Name: "master", Outbound: `{"protocol":"vless"}`, Enabled: true, Dialer: "xraysub:mysub"},
+		},
+	}
+}
+
+func TestSealOpen_SubsAndMasters(t *testing.T) {
+	sealed, err := Seal(sampleBundle(), "pw")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	got, err := Open(sealed, "pw")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(got.Subscriptions) != 1 || got.Subscriptions[0].URL != "https://example.com/sub" {
+		t.Errorf("subscriptions round-trip mismatch: %+v", got.Subscriptions)
+	}
+	if len(got.Masters) != 1 || got.Masters[0].Dialer != "xraysub:mysub" {
+		t.Errorf("masters round-trip mismatch: %+v", got.Masters)
+	}
+}
+
+// An older bundle (no subs/masters keys) must still open cleanly with the
+// new fields absent.
+func TestOpen_BackwardCompatNoSubs(t *testing.T) {
+	b := Bundle{Schema: BundleSchema, Rules: []BundleRule{{Pattern: "a.com", Action: "block", Enabled: true}}}
+	sealed, _ := Seal(b, "pw")
+	got, err := Open(sealed, "pw")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(got.Subscriptions) != 0 || len(got.Masters) != 0 {
+		t.Errorf("expected no subs/masters, got %+v / %+v", got.Subscriptions, got.Masters)
 	}
 }
 

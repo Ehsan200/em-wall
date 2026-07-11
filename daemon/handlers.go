@@ -769,10 +769,14 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
+		if err := d.validateDialer(ctx, 0, p.Name, p.Dialer); err != nil {
+			return nil, err
+		}
 		added, err := d.xrayStore.Add(ctx, xray.Config{
 			Name:     p.Name,
 			Outbound: p.Outbound,
 			Enabled:  p.Enabled,
+			Dialer:   p.Dialer,
 		})
 		if err != nil {
 			return nil, err
@@ -795,11 +799,15 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if existing, gerr := d.xrayStore.Get(ctx, p.ID); gerr == nil {
 			oldName = existing.Name
 		}
+		if err := d.validateDialer(ctx, p.ID, p.Name, p.Dialer); err != nil {
+			return nil, err
+		}
 		if err := d.xrayStore.Update(ctx, xray.Config{
 			ID:       p.ID,
 			Name:     p.Name,
 			Outbound: p.Outbound,
 			Enabled:  p.Enabled,
+			Dialer:   p.Dialer,
 		}); err != nil {
 			return nil, err
 		}
@@ -809,6 +817,11 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			}
 			if err := d.engine.Reload(ctx); err != nil {
 				return nil, fmt.Errorf("xray entry renamed, but engine reload failed: %w", err)
+			}
+			// Also cascade into other masters' Dialer "xray:OLD" refs, else
+			// their dialer would point at a now-nonexistent entry.
+			if _, derr := d.xrayStore.RenameDialerXrayRef(ctx, oldName, p.Name); derr != nil {
+				return nil, fmt.Errorf("xray entry renamed, but cascading dialer references failed: %w", derr)
 			}
 		}
 		if err := d.xraySup.Reconcile(ctx); err != nil {
@@ -835,6 +848,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		if len(refs) > 0 {
 			return nil, fmt.Errorf("xray entry %q is referenced by %d rule(s); remove those references first", stored.Name, len(refs))
+		}
+		// Also block if another master's Dialer references it, else that
+		// dialer would silently lose a member.
+		if dialers, derr := d.mastersReferencingXray(ctx, stored.Name); derr != nil {
+			return nil, derr
+		} else if len(dialers) > 0 {
+			return nil, fmt.Errorf("xray entry %q is used by dialer(s): %s — clear those first", stored.Name, strings.Join(dialers, ", "))
 		}
 		if err := d.xrayStore.Delete(ctx, p.ID); err != nil {
 			return nil, err
@@ -1002,8 +1022,300 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return map[string]any{"ok": true}, nil
 	})
 
+	registerXraySubHandlers(s, d)
 	registerCustomGroupHandlers(s, d)
 	registerPortableHandlers(s, d)
+}
+
+// registerXraySubHandlers wires the subscription CRUD + node ops and the
+// observatory status method.
+func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
+	s.Handle(ipc.MethodXraySubList, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		subs, err := d.xrayStore.ListSubs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		counts, err := d.xrayStore.AllNodeCounts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ipc.XraySubDTO, len(subs))
+		for i, sub := range subs {
+			c := counts[sub.ID]
+			out[i] = subDTOFrom(sub, c[0], c[1])
+		}
+		return out, nil
+	})
+
+	s.Handle(ipc.MethodXraySubAdd, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubAddParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		sub, err := d.xrayStore.AddSub(ctx, xray.Subscription{
+			Name: p.Name, URL: p.URL, UserAgent: p.UserAgent,
+			IntervalSec: p.IntervalSec, NodeCap: p.NodeCap, Enabled: p.Enabled,
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Immediate background fetch so nodes appear without waiting for the
+		// scheduler tick. Uses the daemon-lifetime context so it cancels on
+		// shutdown rather than outliving it (bounded by fetch timeouts anyway).
+		go func(id int64) {
+			if _, ferr := d.subFetch.refreshOne(d.bgContext(), id); ferr != nil {
+				d.subFetch.logger.Printf("subscription add %q: initial fetch failed: %v", p.Name, ferr)
+			}
+		}(sub.ID)
+		total, active, err := d.xrayStore.CountNodes(ctx, sub.ID)
+		if err != nil {
+			return nil, err
+		}
+		return subDTOFrom(sub, total, active), nil
+	})
+
+	s.Handle(ipc.MethodXraySubUpdate, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubUpdateParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		var oldName string
+		if ex, gerr := d.xrayStore.GetSub(ctx, p.ID); gerr == nil {
+			oldName = ex.Name
+		}
+		if err := d.xrayStore.UpdateSub(ctx, xray.Subscription{
+			ID: p.ID, Name: p.Name, URL: p.URL, UserAgent: p.UserAgent,
+			IntervalSec: p.IntervalSec, NodeCap: p.NodeCap, Enabled: p.Enabled,
+		}); err != nil {
+			return nil, err
+		}
+		if oldName != "" && !strings.EqualFold(oldName, p.Name) {
+			if _, cerr := d.xrayStore.RenameDialerSubRef(ctx, oldName, p.Name); cerr != nil {
+				return nil, fmt.Errorf("subscription renamed, but cascading dialer refs failed: %w", cerr)
+			}
+		}
+		// Enable/cap/rename can shift active membership → live-sync (falls
+		// back to a Reconcile on a structural change).
+		if err := d.xraySup.SyncDialerMembers(ctx); err != nil {
+			return nil, fmt.Errorf("subscription updated, but dialer sync failed: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodXraySubDelete, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubDeleteParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		sub, err := d.xrayStore.GetSub(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		refs, err := d.mastersReferencingSub(ctx, sub.Name)
+		if err != nil {
+			return nil, err
+		}
+		if len(refs) > 0 {
+			return nil, fmt.Errorf("subscription %q is used by dialer(s): %s — clear those first", sub.Name, strings.Join(refs, ", "))
+		}
+		if err := d.xrayStore.DeleteSub(ctx, p.ID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodXraySubSetEnabled, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubSetEnabledParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if err := d.xrayStore.SetSubEnabled(ctx, p.ID, p.Enabled); err != nil {
+			return nil, err
+		}
+		if err := d.xraySup.SyncDialerMembers(ctx); err != nil {
+			return nil, fmt.Errorf("subscription toggled, but dialer sync failed: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodXraySubRefresh, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubRefreshParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if p.ID == 0 {
+			d.subFetch.RefreshAll(ctx)
+			return ipc.XraySubRefreshResult{OK: true}, nil
+		}
+		n, err := d.subFetch.refreshOne(ctx, p.ID)
+		if err != nil {
+			return ipc.XraySubRefreshResult{OK: false, Message: err.Error()}, nil
+		}
+		return ipc.XraySubRefreshResult{OK: true, Nodes: n}, nil
+	})
+
+	s.Handle(ipc.MethodXraySubNodes, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubNodesParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		nodes, err := d.xrayStore.ListNodes(ctx, p.SubID)
+		if err != nil {
+			return nil, err
+		}
+		disabled, err := d.xrayStore.DisabledFingerprints(ctx, p.SubID)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ipc.XraySubNodeDTO, len(nodes))
+		for i, n := range nodes {
+			out[i] = ipc.XraySubNodeDTO{
+				Fingerprint: n.Fingerprint, Name: n.Name, Active: n.Active,
+				Disabled: disabled[n.Fingerprint], LatencyMs: n.LastLatencyMs,
+			}
+		}
+		return out, nil
+	})
+
+	s.Handle(ipc.MethodXraySubSetNodeDisabled, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubSetNodeDisabledParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if err := d.xrayStore.SetNodeDisabled(ctx, p.SubID, p.Fingerprint, p.Disabled); err != nil {
+			return nil, err
+		}
+		if err := d.xraySup.SyncDialerMembers(ctx); err != nil {
+			return nil, fmt.Errorf("node toggled, but dialer sync failed: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodXrayObservatory, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		raw, err := d.xraySup.BalancerInfoRaw(ctx)
+		if err != nil {
+			// Soft-fail: no balancers running / api not ready → empty.
+			return ipc.XrayObservatoryResult{}, nil
+		}
+		return ipc.XrayObservatoryResult{
+			Winners: xray.ParseBalancerWinners(string(raw)),
+			Raw:     string(raw),
+		}, nil
+	})
+}
+
+// bgContext returns the daemon-lifetime context for detached background
+// work (cancels on shutdown), falling back to Background when unset.
+func (d *handlerDeps) bgContext() context.Context {
+	if d.bgCtx != nil {
+		return d.bgCtx
+	}
+	return context.Background()
+}
+
+// subDTOFrom builds a subscription DTO from a stored row and its counts.
+func subDTOFrom(sub xray.Subscription, total, active int) ipc.XraySubDTO {
+	last := ""
+	if !sub.LastFetched.IsZero() {
+		last = sub.LastFetched.Format(time.RFC3339)
+	}
+	return ipc.XraySubDTO{
+		ID: sub.ID, Name: sub.Name, URL: sub.URL, UserAgent: sub.UserAgent,
+		IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
+		LastFetched: last, LastError: sub.LastError,
+		NodeCount: total, ActiveCount: active,
+		CreatedAt: sub.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: sub.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+// mastersReferencingSub / mastersReferencingXray return the names of
+// master entries whose Dialer references the named subscription / xray
+// entry — used to block a delete that would leave a dangling dialer ref.
+func (d *handlerDeps) mastersReferencingSub(ctx context.Context, subName string) ([]string, error) {
+	return d.mastersReferencingDialer(ctx, xray.DialerKindXraysub, subName)
+}
+
+func (d *handlerDeps) mastersReferencingXray(ctx context.Context, entryName string) ([]string, error) {
+	return d.mastersReferencingDialer(ctx, xray.DialerKindXray, entryName)
+}
+
+func (d *handlerDeps) mastersReferencingDialer(ctx context.Context, kind, name string) ([]string, error) {
+	all, err := d.xrayStore.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	var out []string
+	for _, c := range all {
+		refs, perr := xray.ParseDialer(c.Dialer)
+		if perr != nil {
+			continue
+		}
+		for _, r := range refs {
+			if r.Kind == kind && r.Name == name {
+				out = append(out, c.Name)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// validateDialer checks that a master's dialer refs all resolve and that
+// the resulting master-dialer graph has no cycle involving this entry.
+// selfID is 0 on add. Empty dialer is always valid.
+func (d *handlerDeps) validateDialer(ctx context.Context, selfID int64, selfName, dialer string) error {
+	refs, err := xray.ParseDialer(dialer)
+	if err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	xNames, subNames, pNames := xray.RefsByKind(refs)
+	if len(xNames) > 0 {
+		missing, err := d.xrayStore.NamesExist(ctx, xNames)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("dialer references unknown xray entr(ies): %s", strings.Join(missing, ", "))
+		}
+	}
+	if len(subNames) > 0 {
+		missing, err := d.xrayStore.SubNamesExist(ctx, subNames)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("dialer references unknown subscription(s): %s", strings.Join(missing, ", "))
+		}
+	}
+	if len(pNames) > 0 {
+		missing, err := d.proxyStore.NamesExist(ctx, pNames)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("dialer references unknown proxy(ies): %s", strings.Join(missing, ", "))
+		}
+	}
+	return d.checkDialerCycle(ctx, selfID, selfName, dialer)
+}
+
+// checkDialerCycle detects a cycle in the master-dialer graph formed by
+// xray: refs (only entries can loop; sub/proxy refs are leaves). The graph
+// logic lives in core/xray so it is unit-testable without daemon deps.
+func (d *handlerDeps) checkDialerCycle(ctx context.Context, selfID int64, selfName, dialer string) error {
+	all, err := d.xrayStore.List(ctx)
+	if err != nil {
+		return err
+	}
+	if xray.DetectDialerCycle(all, selfID, selfName, dialer) {
+		return xray.ErrDialerCycle
+	}
+	return nil
 }
 
 // validateProxyRefs checks that every proxy name referenced by a

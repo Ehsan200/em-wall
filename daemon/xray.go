@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -61,6 +64,13 @@ type xraySupervisor struct {
 	version  string        // xray version string, captured once at startup
 	tail     *xrayLineRing // last N stdout/stderr lines, surfaced via RecentLines
 	lastExit string        // most recent unexpected exit description (empty until one happens)
+
+	// loadedSlots snapshots the dialer slots baked into the currently
+	// running config (seeded on every successful (re)start). SyncDialer-
+	// Members diffs desired-vs-loaded to drive live xray-api add/remove of
+	// slot members without a restart; a change to the *set* of slotted
+	// masters instead forces a full Reconcile.
+	loadedSlots []xray.DialerSlot
 }
 
 // newXraySupervisor probes the binary and returns a supervisor in
@@ -161,6 +171,7 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 	}
 	if !hasEnabled {
 		s.stopLocked()
+		s.loadedSlots = nil
 		return nil
 	}
 
@@ -168,9 +179,14 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("xray supervisor: get routing rules: %w", err)
 	}
+	slots, err := s.resolveDialerSlots(ctx, entries)
+	if err != nil {
+		return fmt.Errorf("xray supervisor: resolve dialer slots: %w", err)
+	}
 	cfg, err := xray.Generate(entries, xray.GenerateOptions{
 		LogDir:       s.logDir,
 		RoutingRules: routing,
+		DialerSlots:  slots,
 	})
 	if err != nil {
 		return fmt.Errorf("xray supervisor: generate: %w", err)
@@ -183,7 +199,120 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("xray supervisor: write config: %w", err)
 	}
 
-	return s.restartLocked(cfgPath)
+	if err := s.restartLocked(cfgPath); err != nil {
+		return err
+	}
+	s.loadedSlots = slots
+	return nil
+}
+
+// resolveDialerSlots turns every enabled master entry (one with a
+// non-empty Dialer) into a fully-resolved DialerSlot: the referenced
+// nodes are looked up now (xray entries by name, subscription active
+// nodes, proxies as synth outbounds) and become the slot's balancer
+// members. Slot indices are assigned by sorted master name for
+// determinism. A master whose dialer currently resolves to zero
+// reachable members gets no slot — its outbound then routes directly
+// until a refresh populates the pool (next reconcile picks it up).
+func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.Config) ([]xray.DialerSlot, error) {
+	byName := make(map[string]xray.Config, len(entries))
+	var masters []xray.Config
+	for _, e := range entries {
+		byName[strings.ToLower(e.Name)] = e
+		if e.Enabled && strings.TrimSpace(e.Dialer) != "" {
+			masters = append(masters, e)
+		}
+	}
+	sort.Slice(masters, func(i, j int) bool { return masters[i].Name < masters[j].Name })
+
+	var slots []xray.DialerSlot
+	for idx, m := range masters {
+		if idx >= xray.SlotCount {
+			s.logger.Printf("xray supervisor: %d masters exceed slot pool of %d — %q and later route direct",
+				len(masters), xray.SlotCount, m.Name)
+			break
+		}
+		refs, err := xray.ParseDialer(m.Dialer)
+		if err != nil {
+			s.logger.Printf("xray supervisor: master %q has invalid dialer %q: %v", m.Name, m.Dialer, err)
+			continue
+		}
+		members, err := s.resolveDialerMembers(ctx, refs, byName)
+		if err != nil {
+			return nil, err
+		}
+		if len(members) == 0 {
+			s.logger.Printf("xray supervisor: master %q dialer has no reachable members yet — routing direct", m.Name)
+			continue
+		}
+		slots = append(slots, xray.DialerSlot{Master: m.Name, Index: idx, Members: members})
+	}
+	return slots, nil
+}
+
+// resolveDialerMembers expands a master's dialer refs into concrete
+// member outbounds, deduped by stable key. xray refs pull the named
+// entry's outbound (skipped if missing/disabled); xraysub refs pull the
+// subscription's active nodes; proxy refs synthesize a socks/http
+// outbound.
+func (s *xraySupervisor) resolveDialerMembers(ctx context.Context, refs []xray.DialerRef, byName map[string]xray.Config) ([]xray.DialerMember, error) {
+	seen := make(map[string]bool)
+	var out []xray.DialerMember
+	add := func(key, ob string) {
+		if key == "" || strings.TrimSpace(ob) == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, xray.DialerMember{Key: key, Outbound: json.RawMessage(ob)})
+	}
+	for _, r := range refs {
+		switch r.Kind {
+		case xray.DialerKindXray:
+			if e, ok := byName[r.Name]; ok && e.Enabled {
+				add("xray-"+r.Name, e.Outbound)
+			}
+		case xray.DialerKindXraysub:
+			nodes, err := s.xrayStore.ActiveNodesForSubs(ctx, []string{r.Name})
+			if err != nil {
+				return nil, err
+			}
+			for _, n := range nodes {
+				add(n.Fingerprint, n.Outbound)
+			}
+		case xray.DialerKindProxy:
+			p, err := s.proxyStore.GetByName(ctx, r.Name)
+			if err != nil {
+				continue
+			}
+			if ob, oerr := proxyToOutbound(p); oerr == nil {
+				add("proxy-"+r.Name, ob)
+			}
+		}
+	}
+	return out, nil
+}
+
+// proxyToOutbound renders a user proxy as an xray socks/http outbound
+// JSON block so it can join a dialer balancer.
+func proxyToOutbound(p proxy.Proxy) (string, error) {
+	server := map[string]any{"address": p.Host, "port": p.Port}
+	if p.Username != "" || p.Password != "" {
+		server["users"] = []any{map[string]any{"user": p.Username, "pass": p.Password}}
+	}
+	var proto string
+	switch p.Protocol {
+	case proxy.ProtocolSOCKS5:
+		proto = "socks"
+	case proxy.ProtocolHTTP:
+		proto = "http"
+	default:
+		return "", fmt.Errorf("unsupported proxy protocol %q", p.Protocol)
+	}
+	b, err := json.Marshal(map[string]any{
+		"protocol": proto,
+		"settings": map[string]any{"servers": []any{server}},
+	})
+	return string(b), err
 }
 
 // syncProxies aligns hidden proxy.Proxy rows (_xray_*) with the

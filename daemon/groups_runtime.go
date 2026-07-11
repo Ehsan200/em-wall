@@ -128,6 +128,7 @@ func xrayToDTO(c xray.Config) ipc.XrayDTO {
 		Outbound:  c.Outbound,
 		SocksPort: c.SocksPort,
 		Enabled:   c.Enabled,
+		Dialer:    c.Dialer,
 		CreatedAt: c.CreatedAt.Format(time.RFC3339),
 		UpdatedAt: c.UpdatedAt.Format(time.RFC3339),
 	}

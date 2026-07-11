@@ -53,13 +53,42 @@ var (
 	ErrBadSchema = errors.New("portable: unsupported bundle schema")
 )
 
-// Bundle is the plaintext export payload.
+// Bundle is the plaintext export payload. Subscriptions and Masters are
+// added additively (omitempty) so a v1 reader of an older bundle simply
+// sees them absent.
 type Bundle struct {
 	Schema       string        `json:"schema"`
 	ExportedAt   string        `json:"exportedAt"` // RFC3339, stamped by the caller
 	AppVersion   string        `json:"appVersion"`
 	Rules        []BundleRule  `json:"rules"`
 	CustomGroups []BundleGroup `json:"customGroups"`
+	// Subscriptions carry the URL/config only — the node pool is re-fetched
+	// on the importing machine.
+	Subscriptions []BundleSubscription `json:"subscriptions,omitempty"`
+	// Masters are xray entries with a non-empty Dialer, so the dialer
+	// feature is portable. Ordinary (non-master) xray entries are NOT
+	// exported — their outbound secrets stay machine-local, same as before.
+	Masters []BundleXray `json:"masters,omitempty"`
+}
+
+// BundleSubscription is a subscription stripped of DB identity + volatile
+// fetch state.
+type BundleSubscription struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	UserAgent   string `json:"userAgent"`
+	IntervalSec int    `json:"intervalSec"`
+	NodeCap     int    `json:"nodeCap"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// BundleXray is a master xray entry: its outbound JSON plus the Dialer
+// ref list that makes it a master.
+type BundleXray struct {
+	Name     string `json:"name"`
+	Outbound string `json:"outbound"`
+	Enabled  bool   `json:"enabled"`
+	Dialer   string `json:"dialer"`
 }
 
 // BundleRule is a rule stripped of DB identity (ID/timestamps). Interface

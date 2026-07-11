@@ -3,8 +3,11 @@ import { ref, computed, onMounted } from 'vue';
 import {
   XrayStatus, ListXray, AddXray, UpdateXray, DeleteXray, SetXrayEnabled,
   XrayRouting, SetXrayRouting, ParseXrayLink, TestXray,
+  ListXraySubs, ListProxies,
 } from '../../wailsjs/go/main/App';
 import MonacoJsonEditor from './MonacoJsonEditor.vue';
+import DialerPicker from './DialerPicker.vue';
+import XraySubscriptionsPanel from './XraySubscriptionsPanel.vue';
 
 // Local mirrors of the DTOs so the file compiles even before
 // `make run-app` regenerates wailsjs/models.ts.
@@ -14,6 +17,7 @@ type XrayRow = {
   outbound: string;
   socksPort: number;
   enabled: boolean;
+  dialer: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -28,10 +32,14 @@ type XrayStatusRow = {
   recentLogs: string[];
 };
 
-type SubTab = 'outbounds' | 'routing' | 'status';
+type SubTab = 'outbounds' | 'subscriptions' | 'routing' | 'status';
 
 const status = ref<XrayStatusRow | null>(null);
 const entries = ref<XrayRow[]>([]);
+// Names available to the Dialer picker (loaded alongside entries).
+const subNames = ref<string[]>([]);
+const proxyNames = ref<string[]>([]);
+const entryNames = computed(() => entries.value.map((e) => e.name));
 const error = ref<string>('');
 const busy = ref<boolean>(false);
 const testing = ref<boolean>(false);
@@ -46,11 +54,11 @@ const defaultOutbound = `{
   "settings": {}
 }`;
 
-const draft = ref<{ open: boolean; name: string; outbound: string; enabled: boolean }>({
-  open: false, name: '', outbound: defaultOutbound, enabled: true,
+const draft = ref<{ open: boolean; name: string; outbound: string; enabled: boolean; dialer: string }>({
+  open: false, name: '', outbound: defaultOutbound, enabled: true, dialer: '',
 });
 
-type EditState = { id: number; name: string; outbound: string; enabled: boolean };
+type EditState = { id: number; name: string; outbound: string; enabled: boolean; dialer: string };
 const editing = ref<EditState | null>(null);
 
 const pendingDelete = ref<number | null>(null);
@@ -104,6 +112,12 @@ async function refresh() {
   try {
     status.value = (await XrayStatus()) as unknown as XrayStatusRow;
     entries.value = ((await ListXray()) || []) as unknown as XrayRow[];
+    // Names for the Dialer picker. Proxy list excludes the hidden internal
+    // rows the supervisor mints (names start with "_").
+    try {
+      subNames.value = (((await ListXraySubs()) || []) as any[]).map((s) => s.name);
+      proxyNames.value = (((await ListProxies()) || []) as any[]).map((p) => p.name).filter((n: string) => !n.startsWith('_'));
+    } catch { /* non-fatal for the picker */ }
     if (!routing.value.dirty) {
       const r = await XrayRouting();
       routing.value.raw = r?.rules || '';
@@ -117,7 +131,7 @@ async function refresh() {
 // ---------- Outbound CRUD ----------
 
 function openDraft() {
-  draft.value = { open: true, name: '', outbound: defaultOutbound, enabled: true };
+  draft.value = { open: true, name: '', outbound: defaultOutbound, enabled: true, dialer: '' };
 }
 
 function cancelDraft() {
@@ -128,7 +142,7 @@ async function submitDraft() {
   if (!draftIsValid.value || busy.value) return;
   busy.value = true;
   try {
-    await AddXray(draft.value.name.trim().toLowerCase(), draft.value.outbound, draft.value.enabled);
+    await AddXray(draft.value.name.trim().toLowerCase(), draft.value.outbound, draft.value.enabled, draft.value.dialer.trim());
     draft.value.open = false;
     await refresh();
   } catch (e: any) {
@@ -139,7 +153,7 @@ async function submitDraft() {
 }
 
 function beginEdit(row: XrayRow) {
-  editing.value = { id: row.id, name: row.name, outbound: row.outbound, enabled: row.enabled };
+  editing.value = { id: row.id, name: row.name, outbound: row.outbound, enabled: row.enabled, dialer: row.dialer || '' };
 }
 
 function cancelEdit() {
@@ -151,7 +165,7 @@ async function saveEdit() {
   if (!e || !editingIsValid.value || busy.value) return;
   busy.value = true;
   try {
-    await UpdateXray(e.id, e.name.trim().toLowerCase(), e.outbound, e.enabled);
+    await UpdateXray(e.id, e.name.trim().toLowerCase(), e.outbound, e.enabled, e.dialer.trim());
     editing.value = null;
     await refresh();
   } catch (err: any) {
@@ -339,7 +353,7 @@ async function applyImport() {
   if (!linkDialog.value.link.trim()) return;
   try {
     const r = await ParseXrayLink(linkDialog.value.link.trim());
-    draft.value = { open: true, name: r.name, outbound: r.outbound, enabled: true };
+    draft.value = { open: true, name: r.name, outbound: r.outbound, enabled: true, dialer: '' };
     linkDialog.value.open = false;
     linkDialog.value.link = '';
     subTab.value = 'outbounds';
@@ -391,6 +405,10 @@ defineExpose({ refresh });
         Outbounds
         <span class="subtab-badge">{{ entries.length }}</span>
       </button>
+      <button class="subtab" :class="{ active: subTab === 'subscriptions' }" @click="subTab = 'subscriptions'">
+        Subscriptions
+        <span v-if="subNames.length" class="subtab-badge">{{ subNames.length }}</span>
+      </button>
       <button class="subtab" :class="{ active: subTab === 'routing' }" @click="subTab = 'routing'">
         Routing
         <span v-if="routing.dirty" class="subtab-dot" style="background: var(--warn)" title="unsaved changes"></span>
@@ -429,6 +447,8 @@ defineExpose({ refresh });
               <span class="tag" :class="row.enabled ? 'tag-route' : 'tag-off'" style="font-size: 11px">
                 {{ row.enabled ? 'enabled' : 'disabled' }}
               </span>
+              <span v-if="row.dialer" class="tag" style="font-size: 11px; background: rgba(110,168,255,0.15); color: var(--accent)"
+                    :title="'dialer: ' + row.dialer">master · {{ row.dialer }}</span>
               <code style="font-size: 11px; color: var(--text-dim)">127.0.0.1:{{ row.socksPort }}</code>
               <span v-if="testingIds.has(row.id)" class="tag" style="font-size: 11px">testing…</span>
               <span v-else-if="testResults[row.id]" class="tag"
@@ -486,6 +506,8 @@ defineExpose({ refresh });
           <span class="muted" style="font-size: 11px">
             The <code>tag</code> field is auto-managed (forced to <code>out-{{ editing.name || 'NAME' }}</code> on save) — any value you set here is overwritten.
           </span>
+          <DialerPicker v-model="editing.dialer" :xray-names="entryNames" :sub-names="subNames"
+                        :proxy-names="proxyNames" :self-name="editing.name" />
           <MonacoJsonEditor v-model="editing.outbound" height="380px" />
         </template>
       </div>
@@ -507,6 +529,8 @@ defineExpose({ refresh });
         <span class="muted" style="font-size: 11px">
           The <code>tag</code> field is auto-managed (forced to <code>out-{{ draft.name || 'NAME' }}</code> on save) — any value you set here is overwritten.
         </span>
+        <DialerPicker v-model="draft.dialer" :xray-names="entryNames" :sub-names="subNames"
+                      :proxy-names="proxyNames" :self-name="draft.name" />
         <MonacoJsonEditor v-model="draft.outbound" height="380px" />
       </div>
 
@@ -530,6 +554,11 @@ defineExpose({ refresh });
           <button class="primary" @click="applyImport" :disabled="!linkDialog.link.trim() || busy">Parse</button>
         </div>
       </div>
+    </template>
+
+    <!-- ============ Subscriptions tab ============ -->
+    <template v-else-if="subTab === 'subscriptions'">
+      <XraySubscriptionsPanel @changed="refresh" />
     </template>
 
     <!-- ============ Routing tab ============ -->

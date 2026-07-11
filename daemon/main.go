@@ -90,6 +90,13 @@ func main() {
 	}
 	defer xraySup.Stop()
 
+	// Subscription fetcher: pulls remote node lists on a schedule. Node
+	// rows are pure data here; materializing them into the running xray
+	// process happens live (no restart) via the reconcile path.
+	subFetch := newSubFetcher(xrayStore, proxyStore, log.Default())
+	// A successful refresh live-syncs dialer slot membership (no restart).
+	subFetch.onChange = xraySup.SyncDialerMembers
+
 	// IP→proxy mapping populated by the DNS layer, consumed by the
 	// netstack TCP handler. minTTL keeps a mapping alive long enough
 	// that a connection opened right after resolution isn't orphaned
@@ -156,6 +163,7 @@ func main() {
 		proxyTable:    proxyTable,
 		xrayStore:     xrayStore,
 		xraySup:       xraySup,
+		subFetch:      subFetch,
 		xrayDataDir:   *xrayDataDir,
 		engine:        engine,
 		router:        router,
@@ -202,6 +210,9 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Detached handler-spawned background work (e.g. a new subscription's
+	// initial fetch) should cancel on daemon shutdown.
+	deps.bgCtx = ctx
 
 	var wg sync.WaitGroup
 	wg.Add(6)
@@ -293,6 +304,15 @@ func main() {
 				xraySup.RotateLogsIfTooLarge()
 			}
 		}
+	}()
+
+	// Subscription refresh scheduler: fetches due subscriptions on start
+	// and on a ticker (per-subscription interval, with a shorter retry
+	// window after a failed fetch).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		subFetch.runSubScheduler(ctx)
 	}()
 
 	// Upstream watcher: every 10s, validate that the current upstream
@@ -460,6 +480,7 @@ type handlerDeps struct {
 	proxyTable  *proxy.Table
 	xrayStore   *xray.Store
 	xraySup     *xraySupervisor
+	subFetch    *subFetcher
 	xrayDataDir string // path to dir containing geoip.dat + geosite.dat
 	engine      *decision.Engine
 	router      *routing.Manager
@@ -476,6 +497,11 @@ type handlerDeps struct {
 	// -proxy-test-target flag. host may be an IP literal or a DNS name.
 	proxyTestHost string
 	proxyTestPort int
+
+	// bgCtx is the daemon-lifetime context for detached background work
+	// spawned from handlers (e.g. a subscription's initial fetch), set once
+	// the run context exists. Nil-safe via bgContext().
+	bgCtx context.Context
 
 	mu sync.Mutex // guards upstream
 }
@@ -583,4 +609,3 @@ func parseTestTarget(s, fallbackHost string, fallbackPort int) (host string, por
 	}
 	return h, n, nil
 }
-

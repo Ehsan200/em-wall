@@ -306,15 +306,15 @@ func TestGenerateHealsXHTTPExtraString(t *testing.T) {
 
 func TestValidateRoutingRules(t *testing.T) {
 	cases := map[string]bool{
-		"":                           true,
-		"[]":                         true,
-		`[{"type":"field"}]`:         true,
-		`[{"a":1},{"b":2}]`:          true,
-		`not-json`:                   false,
-		`{}`:                         false, // object, not array
-		`[1, 2, 3]`:                  false,
-		`["string"]`:                 false,
-		`[{"ok":true}, "bad"]`:       false,
+		"":                     true,
+		"[]":                   true,
+		`[{"type":"field"}]`:   true,
+		`[{"a":1},{"b":2}]`:    true,
+		`not-json`:             false,
+		`{}`:                   false, // object, not array
+		`[1, 2, 3]`:            false,
+		`["string"]`:           false,
+		`[{"ok":true}, "bad"]`: false,
 	}
 	for in, ok := range cases {
 		err := ValidateRoutingRules(in)

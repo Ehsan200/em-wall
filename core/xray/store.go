@@ -36,7 +36,8 @@ func Open(path string) (*Store, error) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&Config{}, &kvSetting{}); err != nil {
+	if err := db.AutoMigrate(&Config{}, &kvSetting{},
+		&Subscription{}, &SubNode{}, &SubNodeOverride{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &Store{db: db}, nil
@@ -170,6 +171,7 @@ func (s *Store) Update(ctx context.Context, c Config) error {
 		"name":       c.Name,
 		"outbound":   c.Outbound,
 		"enabled":    c.Enabled,
+		"dialer":     c.Dialer,
 		"updated_at": c.UpdatedAt,
 	}
 
@@ -284,6 +286,21 @@ func validate(c *Config) error {
 		return err
 	}
 	c.Outbound = rewritten
+
+	refs, err := ParseDialer(c.Dialer)
+	if err != nil {
+		return err
+	}
+	for _, r := range refs {
+		// A master dialing its own entry would route its transport through
+		// itself — reject at the syntax layer. (Cross-entry cycles that
+		// span two masters are caught daemon-side where the full graph is
+		// visible.)
+		if r.Kind == DialerKindXray && r.Name == c.Name {
+			return ErrDialerCycle
+		}
+	}
+	c.Dialer = FormatDialer(refs)
 	return nil
 }
 

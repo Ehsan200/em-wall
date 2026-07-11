@@ -28,51 +28,60 @@ type ErrorBody struct {
 
 // Method names. Keep this list as the single source of truth.
 const (
-	MethodStatus              = "status"
-	MethodRulesList           = "rules.list"
-	MethodRulesAdd            = "rules.add"
-	MethodRulesUpdate         = "rules.update"
-	MethodRulesBulkUpdate     = "rules.bulk-update"
-	MethodRulesDelete         = "rules.delete"
-	MethodSettingsGet         = "settings.get"
-	MethodSettingsSet         = "settings.set"
-	MethodLogsRecent          = "logs.recent"
-	MethodLogsClear           = "logs.clear"
-	MethodRoutesActive        = "routes.active"
-	MethodInterfacesList      = "interfaces.list"
-	MethodReload              = "reload"
-	MethodSystemDNSStatus     = "system.dns.status"
-	MethodSystemDNSActivate   = "system.dns.activate"
-	MethodSystemDNSDeactivate = "system.dns.deactivate"
-	MethodSystemRoutesList    = "system.routes.list"
-	MethodGroupsList          = "groups.list"
-	MethodGroupsApply         = "groups.apply"
-	MethodGroupsIcon          = "groups.icon"
-	MethodGroupsDeleteRules   = "groups.delete-rules"
-	MethodGroupsSetEnabled    = "groups.set-enabled"
-	MethodGroupsAdd           = "groups.add"    // create a custom group def
-	MethodGroupsUpdate        = "groups.update" // edit a custom group def
-	MethodGroupsDelete        = "groups.delete" // remove a custom group def
-	MethodExport              = "portable.export"
-	MethodImport              = "portable.import"
-	MethodProxiesList         = "proxies.list"
-	MethodProxiesAdd          = "proxies.add"
-	MethodProxiesUpdate       = "proxies.update"
-	MethodProxiesDelete       = "proxies.delete"
-	MethodProxiesTest         = "proxies.test"
-	MethodXrayList            = "xray.list"
-	MethodXrayAdd             = "xray.add"
-	MethodXrayUpdate          = "xray.update"
-	MethodXrayDelete          = "xray.delete"
-	MethodXraySetEnabled      = "xray.setEnabled"
-	MethodXrayStatus          = "xray.status"
-	MethodXrayGetRouting      = "xray.getRouting"
-	MethodXraySetRouting      = "xray.setRouting"
-	MethodXrayParseLink       = "xray.parseLink"
-	MethodXrayTest            = "xray.test"
-	MethodPublicIP            = "net.public-ip"
-	MethodRuleExitIP          = "rules.exit-ip"
-	MethodUsageQuery          = "usage.query"
+	MethodStatus                 = "status"
+	MethodRulesList              = "rules.list"
+	MethodRulesAdd               = "rules.add"
+	MethodRulesUpdate            = "rules.update"
+	MethodRulesBulkUpdate        = "rules.bulk-update"
+	MethodRulesDelete            = "rules.delete"
+	MethodSettingsGet            = "settings.get"
+	MethodSettingsSet            = "settings.set"
+	MethodLogsRecent             = "logs.recent"
+	MethodLogsClear              = "logs.clear"
+	MethodRoutesActive           = "routes.active"
+	MethodInterfacesList         = "interfaces.list"
+	MethodReload                 = "reload"
+	MethodSystemDNSStatus        = "system.dns.status"
+	MethodSystemDNSActivate      = "system.dns.activate"
+	MethodSystemDNSDeactivate    = "system.dns.deactivate"
+	MethodSystemRoutesList       = "system.routes.list"
+	MethodGroupsList             = "groups.list"
+	MethodGroupsApply            = "groups.apply"
+	MethodGroupsIcon             = "groups.icon"
+	MethodGroupsDeleteRules      = "groups.delete-rules"
+	MethodGroupsSetEnabled       = "groups.set-enabled"
+	MethodGroupsAdd              = "groups.add"    // create a custom group def
+	MethodGroupsUpdate           = "groups.update" // edit a custom group def
+	MethodGroupsDelete           = "groups.delete" // remove a custom group def
+	MethodExport                 = "portable.export"
+	MethodImport                 = "portable.import"
+	MethodProxiesList            = "proxies.list"
+	MethodProxiesAdd             = "proxies.add"
+	MethodProxiesUpdate          = "proxies.update"
+	MethodProxiesDelete          = "proxies.delete"
+	MethodProxiesTest            = "proxies.test"
+	MethodXrayList               = "xray.list"
+	MethodXrayAdd                = "xray.add"
+	MethodXrayUpdate             = "xray.update"
+	MethodXrayDelete             = "xray.delete"
+	MethodXraySetEnabled         = "xray.setEnabled"
+	MethodXrayStatus             = "xray.status"
+	MethodXrayGetRouting         = "xray.getRouting"
+	MethodXraySetRouting         = "xray.setRouting"
+	MethodXrayParseLink          = "xray.parseLink"
+	MethodXrayTest               = "xray.test"
+	MethodXrayObservatory        = "xray.observatory" // live balancer/winner status (raw `xray api bi`)
+	MethodXraySubList            = "xraysub.list"
+	MethodXraySubAdd             = "xraysub.add"
+	MethodXraySubUpdate          = "xraysub.update"
+	MethodXraySubDelete          = "xraysub.delete"
+	MethodXraySubSetEnabled      = "xraysub.setEnabled"
+	MethodXraySubRefresh         = "xraysub.refresh" // fetch now (ID, or 0 = all due)
+	MethodXraySubNodes           = "xraysub.nodes"
+	MethodXraySubSetNodeDisabled = "xraysub.setNodeDisabled"
+	MethodPublicIP               = "net.public-ip"
+	MethodRuleExitIP             = "rules.exit-ip"
+	MethodUsageQuery             = "usage.query"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -319,6 +328,10 @@ type XrayDTO struct {
 	Outbound  string `json:"outbound"`
 	SocksPort int    `json:"socksPort"`
 	Enabled   bool   `json:"enabled"`
+	// Dialer, when non-empty, marks this entry a "master": its sockopt is
+	// tunneled through a leastPing balancer over the referenced nodes.
+	// Comma-separated typed refs: xray:NAME / xraysub:NAME / proxy:NAME.
+	Dialer    string `json:"dialer"`
 	CreatedAt string `json:"createdAt"`
 	UpdatedAt string `json:"updatedAt"`
 }
@@ -327,6 +340,7 @@ type XrayAddParams struct {
 	Name     string `json:"name"`
 	Outbound string `json:"outbound"`
 	Enabled  bool   `json:"enabled"`
+	Dialer   string `json:"dialer"`
 }
 
 type XrayUpdateParams struct {
@@ -334,6 +348,93 @@ type XrayUpdateParams struct {
 	Name     string `json:"name"`
 	Outbound string `json:"outbound"`
 	Enabled  bool   `json:"enabled"`
+	Dialer   string `json:"dialer"`
+}
+
+// XraySubDTO is the public view of a subscription plus its node counts.
+type XraySubDTO struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	UserAgent   string `json:"userAgent"`
+	IntervalSec int    `json:"intervalSec"`
+	NodeCap     int    `json:"nodeCap"`
+	Enabled     bool   `json:"enabled"`
+	LastFetched string `json:"lastFetched"` // RFC3339, empty if never
+	LastError   string `json:"lastError"`
+	NodeCount   int    `json:"nodeCount"`
+	ActiveCount int    `json:"activeCount"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+type XraySubAddParams struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	UserAgent   string `json:"userAgent"`
+	IntervalSec int    `json:"intervalSec"`
+	NodeCap     int    `json:"nodeCap"`
+	Enabled     bool   `json:"enabled"`
+}
+
+type XraySubUpdateParams struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	UserAgent   string `json:"userAgent"`
+	IntervalSec int    `json:"intervalSec"`
+	NodeCap     int    `json:"nodeCap"`
+	Enabled     bool   `json:"enabled"`
+}
+
+type XraySubDeleteParams struct {
+	ID int64 `json:"id"`
+}
+
+type XraySubSetEnabledParams struct {
+	ID      int64 `json:"id"`
+	Enabled bool  `json:"enabled"`
+}
+
+// XraySubRefreshParams triggers an immediate fetch. ID 0 refreshes every
+// subscription that is due.
+type XraySubRefreshParams struct {
+	ID int64 `json:"id"`
+}
+
+type XraySubRefreshResult struct {
+	OK      bool   `json:"ok"`
+	Nodes   int    `json:"nodes"`
+	Message string `json:"message"`
+}
+
+type XraySubNodesParams struct {
+	SubID int64 `json:"subId"`
+}
+
+// XraySubNodeDTO is one node in a subscription's pool. Disabled is the
+// durable manual toggle; Active reflects enabled∧¬disabled∧within-cap.
+type XraySubNodeDTO struct {
+	Fingerprint string `json:"fingerprint"`
+	Name        string `json:"name"`
+	Active      bool   `json:"active"`
+	Disabled    bool   `json:"disabled"`
+	LatencyMs   int    `json:"latencyMs"` // -1 = unknown
+}
+
+type XraySubSetNodeDisabledParams struct {
+	SubID       int64  `json:"subId"`
+	Fingerprint string `json:"fingerprint"`
+	Disabled    bool   `json:"disabled"`
+}
+
+// XrayObservatoryResult carries the current balancer winners (fingerprints
+// of the fastest node each master dialer is routing through), parsed daemon-
+// side from `xray api bi` text. Raw is kept for debugging. Empty when no
+// dialer slots are running.
+type XrayObservatoryResult struct {
+	Winners []string `json:"winners"`
+	Raw     string   `json:"raw"`
 }
 
 type XrayDeleteParams struct {
@@ -476,10 +577,12 @@ type ExportParams struct {
 // ExportResult carries the encrypted bundle as base64 (the app writes it to
 // a file via a save dialog) plus a suggested filename and a content tally.
 type ExportResult struct {
-	Blob       string `json:"blob"`     // base64 of the encrypted envelope JSON
-	Filename   string `json:"filename"` // suggested file name
-	RuleCount  int    `json:"ruleCount"`
-	GroupCount int    `json:"groupCount"`
+	Blob        string `json:"blob"`     // base64 of the encrypted envelope JSON
+	Filename    string `json:"filename"` // suggested file name
+	RuleCount   int    `json:"ruleCount"`
+	GroupCount  int    `json:"groupCount"`
+	SubCount    int    `json:"subCount"`
+	MasterCount int    `json:"masterCount"`
 }
 
 // ImportParams carries a base64-encoded encrypted bundle and its passphrase.
@@ -492,11 +595,15 @@ type ImportParams struct {
 // pattern) and existing custom groups (matched by key) are skipped, not
 // overwritten.
 type ImportResult struct {
-	RulesCreated  int      `json:"rulesCreated"`
-	RulesSkipped  int      `json:"rulesSkipped"`
-	GroupsCreated int      `json:"groupsCreated"`
-	GroupsSkipped int      `json:"groupsSkipped"`
-	Warnings      []string `json:"warnings"`
+	RulesCreated   int      `json:"rulesCreated"`
+	RulesSkipped   int      `json:"rulesSkipped"`
+	GroupsCreated  int      `json:"groupsCreated"`
+	GroupsSkipped  int      `json:"groupsSkipped"`
+	SubsCreated    int      `json:"subsCreated"`
+	SubsSkipped    int      `json:"subsSkipped"`
+	MastersCreated int      `json:"mastersCreated"`
+	MastersSkipped int      `json:"mastersSkipped"`
+	Warnings       []string `json:"warnings"`
 }
 
 type SystemDNSStatus struct {

@@ -19,6 +19,18 @@ import (
 type GenerateOptions struct {
 	LogDir       string
 	RoutingRules string
+
+	// DialerSlots, when non-empty, emits a per-master leastPing balancer
+	// slot for each entry (see dialer.go). Each master entry's outbound
+	// gains streamSettings.sockopt.dialerProxy pointing at its dialer
+	// socks outbound → slot inbound → balancer over the slot members. A
+	// single top-level observatory (prefix ObservatorySelectorPrefix)
+	// feeds every slot's leastPing strategy.
+	DialerSlots []DialerSlot
+	// Observatory probe tuning; empty falls back to DefaultProbeURL /
+	// DefaultProbeInterval. Only emitted when DialerSlots is non-empty.
+	ObservatoryProbeURL string
+	ObservatoryInterval string
 }
 
 // Generate produces a full xray-core JSON config from entries.
@@ -53,13 +65,25 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		Settings map[string]any `json:"settings"`
 	}
 	type cfg struct {
-		Log       map[string]any    `json:"log,omitempty"`
-		Inbounds  []inbound         `json:"inbounds"`
-		Outbounds []json.RawMessage `json:"outbounds"`
-		Routing   struct {
+		Log         map[string]any    `json:"log,omitempty"`
+		API         json.RawMessage   `json:"api,omitempty"`
+		Stats       json.RawMessage   `json:"stats,omitempty"`
+		Inbounds    []inbound         `json:"inbounds"`
+		Outbounds   []json.RawMessage `json:"outbounds"`
+		Observatory json.RawMessage   `json:"observatory,omitempty"`
+		Routing     struct {
 			DomainStrategy string            `json:"domainStrategy"`
 			Rules          []json.RawMessage `json:"rules"`
+			Balancers      []json.RawMessage `json:"balancers,omitempty"`
 		} `json:"routing"`
+	}
+
+	hasSlots := len(opt.DialerSlots) > 0
+
+	// Index masters so the entry loop can inject sockopt.dialerProxy.
+	masters := make(map[string]DialerSlot, len(opt.DialerSlots))
+	for _, s := range opt.DialerSlots {
+		masters[normalizeName(s.Master)] = s
 	}
 
 	out := cfg{Inbounds: []inbound{}, Outbounds: []json.RawMessage{}}
@@ -71,6 +95,28 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		}
 	}
 	out.Routing.DomainStrategy = "AsIs"
+
+	// gRPC API (only when dialer slots exist): a dokodemo inbound + the
+	// service list the supervisor's live AddOutbound/RemoveOutbound and
+	// balancer-info calls need. The api routing rule is added first so
+	// api traffic can't be swallowed by a user catch-all rule.
+	if hasSlots {
+		out.API = json.RawMessage(`{"tag":"` + ApiTag + `","services":["HandlerService","RoutingService","ObservatoryService","StatsService"]}`)
+		out.Stats = json.RawMessage(`{}`)
+		out.Inbounds = append(out.Inbounds, inbound{
+			Tag:      ApiTag,
+			Listen:   "127.0.0.1",
+			Port:     ApiPort,
+			Protocol: "dokodemo-door",
+			Settings: map[string]any{"address": "127.0.0.1"},
+		})
+		apiRule, _ := json.Marshal(map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{ApiTag},
+			"outboundTag": ApiTag,
+		})
+		out.Routing.Rules = append(out.Routing.Rules, apiRule)
+	}
 
 	// User rules first — they take precedence over per-entry pairs.
 	if r := strings.TrimSpace(opt.RoutingRules); r != "" && r != "[]" {
@@ -99,6 +145,10 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			return nil, fmt.Errorf("xray: entry %q: outbound JSON: %w", e.Name, err)
 		}
 		ob["tag"] = OutboundTag(e.Name)
+		// Master entry: tunnel its own transport through the dialer chain.
+		if _, ok := masters[normalizeName(e.Name)]; ok {
+			injectDialerProxy(ob, DialerOutboundTag(e.Name))
+		}
 		// Auto-heal a known-bad shape we used to ship: xhttp's "extra"
 		// must be a JSON object (xray's conf.SplitHTTPConfig), but an
 		// earlier link-import build stored it as a string. Decode it
@@ -120,6 +170,77 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		out.Routing.Rules = append(out.Routing.Rules, pair)
 	}
 
+	// Per-master dialer slots: inbound + dialer socks outbound + member
+	// outbounds (prefix-tagged) + balancer + inbound→balancer rule. Sorted
+	// by slot index for deterministic output.
+	slots := append([]DialerSlot(nil), opt.DialerSlots...)
+	sort.Slice(slots, func(i, j int) bool { return slots[i].Index < slots[j].Index })
+	for _, slot := range slots {
+		out.Inbounds = append(out.Inbounds, inbound{
+			Tag:      SlotInboundTag(slot.Index),
+			Listen:   "127.0.0.1",
+			Port:     SlotPort(slot.Index),
+			Protocol: "socks",
+			Settings: map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
+		})
+
+		dialerOut, _ := json.Marshal(map[string]any{
+			"tag":      DialerOutboundTag(slot.Master),
+			"protocol": "socks",
+			"settings": map[string]any{
+				"servers": []any{map[string]any{"address": "127.0.0.1", "port": SlotPort(slot.Index)}},
+			},
+		})
+		out.Outbounds = append(out.Outbounds, dialerOut)
+
+		for _, m := range slot.Members {
+			var mob map[string]any
+			if err := json.Unmarshal(m.Outbound, &mob); err != nil {
+				return nil, fmt.Errorf("xray: slot %d member %q: outbound JSON: %w", slot.Index, m.Key, err)
+			}
+			mob["tag"] = SlotMemberTag(slot.Index, m.Key)
+			healXHTTPExtra(mob)
+			raw, err := json.Marshal(mob)
+			if err != nil {
+				return nil, fmt.Errorf("xray: slot %d member %q: re-marshal: %w", slot.Index, m.Key, err)
+			}
+			out.Outbounds = append(out.Outbounds, raw)
+		}
+
+		bal, _ := json.Marshal(map[string]any{
+			"tag":      SlotBalancerTag(slot.Index),
+			"selector": []string{SlotOutboundPrefix(slot.Index)},
+			"strategy": map[string]any{"type": "leastPing"},
+		})
+		out.Routing.Balancers = append(out.Routing.Balancers, bal)
+
+		rule, _ := json.Marshal(map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{SlotInboundTag(slot.Index)},
+			"balancerTag": SlotBalancerTag(slot.Index),
+		})
+		out.Routing.Rules = append(out.Routing.Rules, rule)
+	}
+
+	// One shared observatory feeds every slot's leastPing strategy. Its
+	// prefix selector matches all slot member outbounds.
+	if len(slots) > 0 {
+		probeURL := strings.TrimSpace(opt.ObservatoryProbeURL)
+		if probeURL == "" {
+			probeURL = DefaultProbeURL
+		}
+		interval := strings.TrimSpace(opt.ObservatoryInterval)
+		if interval == "" {
+			interval = DefaultProbeInterval
+		}
+		out.Observatory, _ = json.Marshal(map[string]any{
+			"subjectSelector":   []string{ObservatorySelectorPrefix},
+			"probeURL":          probeURL,
+			"probeInterval":     interval,
+			"enableConcurrency": true,
+		})
+	}
+
 	// Always-present outbounds so user rules can reference them.
 	out.Outbounds = append(out.Outbounds,
 		json.RawMessage(`{"tag":"`+TagDirect+`","protocol":"freedom"}`),
@@ -127,6 +248,23 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	)
 
 	return json.MarshalIndent(out, "", "  ")
+}
+
+// injectDialerProxy sets streamSettings.sockopt.dialerProxy on an outbound
+// map, creating the nested objects as needed. This is what makes a master
+// entry dial its own server through the balancer slot.
+func injectDialerProxy(ob map[string]any, dialerTag string) {
+	ss, _ := ob["streamSettings"].(map[string]any)
+	if ss == nil {
+		ss = map[string]any{}
+		ob["streamSettings"] = ss
+	}
+	sock, _ := ss["sockopt"].(map[string]any)
+	if sock == nil {
+		sock = map[string]any{}
+		ss["sockopt"] = sock
+	}
+	sock["dialerProxy"] = dialerTag
 }
 
 // healXHTTPExtra mutates ob in place if it carries a stream-settings

@@ -22,11 +22,16 @@ import (
 // the supervisor binds for this entry's SOCKS5 inbound — stable for
 // the lifetime of the row so existing connections don't move.
 type Config struct {
-	ID        int64     `gorm:"primaryKey;column:id"`
-	Name      string    `gorm:"not null;uniqueIndex;column:name"`
-	Outbound  string    `gorm:"not null;column:outbound;type:text"`
-	SocksPort int       `gorm:"not null;uniqueIndex;column:socks_port"`
-	Enabled   bool      `gorm:"not null;default:true;column:enabled"`
+	ID        int64  `gorm:"primaryKey;column:id"`
+	Name      string `gorm:"not null;uniqueIndex;column:name"`
+	Outbound  string `gorm:"not null;column:outbound;type:text"`
+	SocksPort int    `gorm:"not null;uniqueIndex;column:socks_port"`
+	Enabled   bool   `gorm:"not null;default:true;column:enabled"`
+	// Dialer, when non-empty, makes this a "master" entry: its outbound's
+	// streamSettings.sockopt.dialerProxy is wired through a per-master
+	// leastPing balancer over the referenced nodes. Comma-separated typed
+	// refs — see ParseDialer. Empty for an ordinary entry.
+	Dialer    string    `gorm:"column:dialer;type:text;not null;default:''"`
 	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
 	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }

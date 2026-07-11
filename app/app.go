@@ -438,17 +438,17 @@ func (a *App) ListXray() ([]ipc.XrayDTO, error) {
 	return out, err
 }
 
-func (a *App) AddXray(name, outbound string, enabled bool) (ipc.XrayDTO, error) {
+func (a *App) AddXray(name, outbound string, enabled bool, dialer string) (ipc.XrayDTO, error) {
 	var out ipc.XrayDTO
 	err := a.call(ipc.MethodXrayAdd, ipc.XrayAddParams{
-		Name: name, Outbound: outbound, Enabled: enabled,
+		Name: name, Outbound: outbound, Enabled: enabled, Dialer: dialer,
 	}, &out)
 	return out, err
 }
 
-func (a *App) UpdateXray(id int64, name, outbound string, enabled bool) error {
+func (a *App) UpdateXray(id int64, name, outbound string, enabled bool, dialer string) error {
 	return a.call(ipc.MethodXrayUpdate, ipc.XrayUpdateParams{
-		ID: id, Name: name, Outbound: outbound, Enabled: enabled,
+		ID: id, Name: name, Outbound: outbound, Enabled: enabled, Dialer: dialer,
 	}, nil)
 }
 
@@ -490,6 +490,66 @@ func (a *App) TestXray(id int64, target string) (ipc.XrayTestResult, error) {
 	var out ipc.XrayTestResult
 	err := a.call(ipc.MethodXrayTest, ipc.XrayTestParams{ID: id, Target: target}, &out)
 	return out, err
+}
+
+// XrayObservatory returns the raw `xray api bi` JSON (balancer health +
+// current fastest node per master dialer). Empty when no dialer slots run.
+func (a *App) XrayObservatory() (ipc.XrayObservatoryResult, error) {
+	var out ipc.XrayObservatoryResult
+	err := a.call(ipc.MethodXrayObservatory, nil, &out)
+	return out, err
+}
+
+// ---- Xray subscriptions ----
+
+func (a *App) ListXraySubs() ([]ipc.XraySubDTO, error) {
+	var out []ipc.XraySubDTO
+	err := a.call(ipc.MethodXraySubList, nil, &out)
+	return out, err
+}
+
+func (a *App) AddXraySub(name, url, userAgent string, intervalSec, nodeCap int, enabled bool) (ipc.XraySubDTO, error) {
+	var out ipc.XraySubDTO
+	err := a.call(ipc.MethodXraySubAdd, ipc.XraySubAddParams{
+		Name: name, URL: url, UserAgent: userAgent,
+		IntervalSec: intervalSec, NodeCap: nodeCap, Enabled: enabled,
+	}, &out)
+	return out, err
+}
+
+func (a *App) UpdateXraySub(id int64, name, url, userAgent string, intervalSec, nodeCap int, enabled bool) error {
+	return a.call(ipc.MethodXraySubUpdate, ipc.XraySubUpdateParams{
+		ID: id, Name: name, URL: url, UserAgent: userAgent,
+		IntervalSec: intervalSec, NodeCap: nodeCap, Enabled: enabled,
+	}, nil)
+}
+
+func (a *App) DeleteXraySub(id int64) error {
+	return a.call(ipc.MethodXraySubDelete, ipc.XraySubDeleteParams{ID: id}, nil)
+}
+
+func (a *App) SetXraySubEnabled(id int64, enabled bool) error {
+	return a.call(ipc.MethodXraySubSetEnabled, ipc.XraySubSetEnabledParams{ID: id, Enabled: enabled}, nil)
+}
+
+// RefreshXraySub fetches a subscription now. Pass id 0 to refresh all
+// enabled subscriptions.
+func (a *App) RefreshXraySub(id int64) (ipc.XraySubRefreshResult, error) {
+	var out ipc.XraySubRefreshResult
+	err := a.call(ipc.MethodXraySubRefresh, ipc.XraySubRefreshParams{ID: id}, &out)
+	return out, err
+}
+
+func (a *App) XraySubNodes(subID int64) ([]ipc.XraySubNodeDTO, error) {
+	var out []ipc.XraySubNodeDTO
+	err := a.call(ipc.MethodXraySubNodes, ipc.XraySubNodesParams{SubID: subID}, &out)
+	return out, err
+}
+
+func (a *App) SetXraySubNodeDisabled(subID int64, fingerprint string, disabled bool) error {
+	return a.call(ipc.MethodXraySubSetNodeDisabled, ipc.XraySubSetNodeDisabledParams{
+		SubID: subID, Fingerprint: fingerprint, Disabled: disabled,
+	}, nil)
 }
 
 // ---- Install / uninstall (local, no daemon needed) ----

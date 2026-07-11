@@ -14,6 +14,7 @@ import (
 	"github.com/ehsan/em-wall/core/portable"
 	"github.com/ehsan/em-wall/core/rules"
 	"github.com/ehsan/em-wall/core/version"
+	"github.com/ehsan/em-wall/core/xray"
 )
 
 // registerCustomGroupHandlers wires the CRUD for user-created groups. These
@@ -114,10 +115,12 @@ func registerPortableHandlers(s *ipc.Server, d *handlerDeps) {
 			return nil, err
 		}
 		return ipc.ExportResult{
-			Blob:       base64.StdEncoding.EncodeToString(sealed),
-			Filename:   fmt.Sprintf("em-wall-export-%s.embackup", time.Now().UTC().Format("20060102-150405")),
-			RuleCount:  len(bundle.Rules),
-			GroupCount: len(bundle.CustomGroups),
+			Blob:        base64.StdEncoding.EncodeToString(sealed),
+			Filename:    fmt.Sprintf("em-wall-export-%s.embackup", time.Now().UTC().Format("20060102-150405")),
+			RuleCount:   len(bundle.Rules),
+			GroupCount:  len(bundle.CustomGroups),
+			SubCount:    len(bundle.Subscriptions),
+			MasterCount: len(bundle.Masters),
 		}, nil
 	})
 
@@ -175,6 +178,30 @@ func (d *handlerDeps) buildBundle(ctx context.Context, sel ipc.ExportSelection) 
 		}
 		for _, g := range cgs {
 			bundle.CustomGroups = append(bundle.CustomGroups, customGroupToBundle(g))
+		}
+		// Subscriptions (config only — nodes re-fetched on import) and master
+		// entries (xray entries with a Dialer) travel with a full export.
+		subs, err := d.xrayStore.ListSubs(ctx)
+		if err != nil {
+			return portable.Bundle{}, err
+		}
+		for _, sub := range subs {
+			bundle.Subscriptions = append(bundle.Subscriptions, portable.BundleSubscription{
+				Name: sub.Name, URL: sub.URL, UserAgent: sub.UserAgent,
+				IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
+			})
+		}
+		xs, err := d.xrayStore.List(ctx)
+		if err != nil {
+			return portable.Bundle{}, err
+		}
+		for _, e := range xs {
+			if strings.TrimSpace(e.Dialer) == "" {
+				continue
+			}
+			bundle.Masters = append(bundle.Masters, portable.BundleXray{
+				Name: e.Name, Outbound: e.Outbound, Enabled: e.Enabled, Dialer: e.Dialer,
+			})
 		}
 		return bundle, nil
 	}
@@ -278,10 +305,55 @@ func (d *handlerDeps) applyBundle(ctx context.Context, b portable.Bundle) (ipc.I
 		}
 	}
 
+	// Subscriptions (before masters so an xraysub: dialer ref resolves).
+	importedSub := false
+	for _, sub := range b.Subscriptions {
+		_, err := d.xrayStore.AddSub(ctx, xray.Subscription{
+			Name: sub.Name, URL: sub.URL, UserAgent: sub.UserAgent,
+			IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
+		})
+		switch {
+		case err == nil:
+			res.SubsCreated++
+			importedSub = true
+		case errors.Is(err, xray.ErrDuplicate):
+			res.SubsSkipped++
+		default:
+			res.Warnings = append(res.Warnings, fmt.Sprintf("subscription %q: %v", sub.Name, err))
+		}
+	}
+
+	// Master xray entries.
+	importedMaster := false
+	for _, m := range b.Masters {
+		_, err := d.xrayStore.Add(ctx, xray.Config{
+			Name: m.Name, Outbound: m.Outbound, Enabled: m.Enabled, Dialer: m.Dialer,
+		})
+		switch {
+		case err == nil:
+			res.MastersCreated++
+			importedMaster = true
+		case errors.Is(err, xray.ErrDuplicate):
+			res.MastersSkipped++
+		default:
+			res.Warnings = append(res.Warnings, fmt.Sprintf("master %q: %v", m.Name, err))
+		}
+	}
+
 	if err := d.engine.Reload(ctx); err != nil {
 		return res, fmt.Errorf("import applied, but engine reload failed: %w", err)
 	}
 	d.reconcileIPRoutes(ctx)
+
+	// Bake any imported master slots and pull fresh nodes for imported subs.
+	if importedMaster {
+		if err := d.xraySup.Reconcile(ctx); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("xray reconcile after import: %v", err))
+		}
+	}
+	if importedSub {
+		go d.subFetch.RefreshAll(d.bgContext())
+	}
 	return res, nil
 }
 
