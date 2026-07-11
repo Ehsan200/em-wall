@@ -10,6 +10,8 @@ A macOS firewall that works at the DNS layer. Every domain lookup on your machin
 - Optional toggle to block encrypted DNS (DoH/DoT), which would otherwise bypass the firewall entirely.
 - Live log of every DNS query with the decision that was applied.
 - Embedded [xray-core](https://github.com/XTLS/Xray-core): manage outbounds, import VLESS/VMess/Trojan links, edit raw JSON in a Monaco editor, per-entry latency test, capped rolling log.
+- **Subscriptions**: add base64 share-link subscription URLs; em-wall fetches them on a schedule into a node pool (direct, falling back through a working node when the URL is censored), with per-node disable that survives refresh.
+- **Master-config dialer**: turn any Xray entry into a "master" whose own transport is tunneled through the *fastest* of a chosen set of nodes/subscriptions — a live `leastPing` balancer that re-picks the winner and absorbs node-list changes **without restarting Xray**.
 
 ## How it works
 
@@ -37,6 +39,14 @@ The daemon owns everything — the UI is a thin client that forwards calls over 
 - **allow** with no interface → forward upstream as normal.
 - **allow/route** with `Interface = "utunN"` → forward, then install `route -host <ip> -interface utunN` for every A/AAAA in the answer.
 - **route** with `Interface = "proxy:NAME"` or `"xray:NAME"` → install routes that point at em-wall's userspace TUN, which forwards matched flows into the configured SOCKS/HTTP proxy or Xray outbound. Comma-separated lists (`proxy:work,backup`) fall back to the first reachable member, ranked lowest-latency first.
+
+### Subscriptions & master-config dialer
+
+A **subscription** is a remote URL that returns a base64 list of share links. The daemon fetches it on a schedule (default 12h, plus manual + on-start), parses the links into a pool of nodes, and keeps them fingerprinted so a manually-disabled node stays disabled across refreshes. Subscriptions are never a rule target on their own.
+
+A **master** is an ordinary Xray entry with a `Dialer` field — a list of `xraysub:NAME` / `xray:NAME` / `proxy:NAME` refs. Every referenced node (all active nodes of each subscription, plus any individual entries/proxies) is thrown into one Xray `leastPing` balancer, and the master's outbound is wired to it via `streamSettings.sockopt.dialerProxy`. So the master's own server connection is tunneled through whichever node is currently fastest — useful when the master's server is itself reachable only through a working relay.
+
+The "fastest" choice lives entirely inside Xray's balancer + observatory, so it re-picks the winner and survives node deaths mid-connection. Node churn (refresh, enable/disable, cap changes) is applied to the running Xray process **live over its gRPC API** (`ado`/`rmo`), never by a restart — so long-lived connections aren't dropped. Rules reach a master the normal way, with `xray:MASTER`.
 
 ## Repo layout
 
