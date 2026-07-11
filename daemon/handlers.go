@@ -1224,8 +1224,12 @@ func subDTOFrom(sub xray.Subscription, total, active int) ipc.XraySubDTO {
 		IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
 		LastFetched: last, LastError: sub.LastError,
 		NodeCount: total, ActiveCount: active,
-		CreatedAt: sub.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: sub.UpdatedAt.Format(time.RFC3339),
+		UsageUpload:   sub.Upload,
+		UsageDownload: sub.Download,
+		UsageTotal:    sub.Total,
+		UsageExpire:   sub.Expire,
+		CreatedAt:     sub.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:     sub.UpdatedAt.Format(time.RFC3339),
 	}
 }
 

@@ -14,6 +14,7 @@ type Sub = {
   id: number; name: string; url: string; userAgent: string;
   intervalSec: number; nodeCap: number; enabled: boolean;
   lastFetched: string; lastError: string; nodeCount: number; activeCount: number;
+  usageUpload: number; usageDownload: number; usageTotal: number; usageExpire: number;
 };
 type Node = {
   fingerprint: string; name: string; active: boolean; disabled: boolean; latencyMs: number;
@@ -54,6 +55,36 @@ function fmtTime(iso: string): string {
   if (!iso) return 'never';
   const d = new Date(iso);
   return isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+// ---- Data-quota display (Subscription-Userinfo header, v2rayN-style) ----
+
+// fmtBytes renders a byte count in binary units (GiB is what providers and
+// v2rayN report). One decimal for GB and up, whole numbers below.
+function fmtBytes(n: number): string {
+  if (!isFinite(n) || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i >= 3 ? 1 : 0)} ${units[i]}`;
+}
+function usageUsed(s: Sub): number { return (s.usageUpload || 0) + (s.usageDownload || 0); }
+// A subscription reports quota only when at least one counter is non-zero.
+function hasUsage(s: Sub): boolean {
+  return usageUsed(s) > 0 || (s.usageTotal || 0) > 0 || (s.usageExpire || 0) > 0;
+}
+function usagePct(s: Sub): number {
+  if (!s.usageTotal || s.usageTotal <= 0) return 0;
+  return Math.min(100, Math.round((usageUsed(s) / s.usageTotal) * 100));
+}
+function usageRemaining(s: Sub): number {
+  return Math.max(0, (s.usageTotal || 0) - usageUsed(s));
+}
+function fmtExpire(unix: number): string {
+  if (!unix || unix <= 0) return '';
+  const d = new Date(unix * 1000);
+  return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
 }
 
 async function refresh() {
@@ -315,6 +346,24 @@ defineExpose({ refresh });
       </div>
       <div v-if="s.lastError" class="muted" style="font-size: 11px; color: var(--danger)">✗ {{ s.lastError }}</div>
 
+      <!-- Data quota (only when the provider reports Subscription-Userinfo) -->
+      <div v-if="hasUsage(s)" class="col" style="gap: 4px; margin-top: 2px">
+        <div class="row" style="justify-content: space-between; font-size: 11px; color: var(--text-dim); gap: 8px; flex-wrap: wrap">
+          <span>
+            <strong style="color: var(--text)">{{ fmtBytes(usageRemaining(s)) }}</strong> left
+            <span v-if="s.usageTotal > 0" style="opacity: 0.8">
+              · {{ fmtBytes(usageUsed(s)) }} / {{ fmtBytes(s.usageTotal) }} used
+            </span>
+            <span v-else style="opacity: 0.8">· {{ fmtBytes(usageUsed(s)) }} used (unlimited)</span>
+          </span>
+          <span v-if="s.usageExpire > 0">expires {{ fmtExpire(s.usageExpire) }}</span>
+        </div>
+        <div v-if="s.usageTotal > 0" class="usage-bar">
+          <div class="usage-bar-fill" :class="{ 'usage-bar-hot': usagePct(s) >= 90 }"
+               :style="{ width: usagePct(s) + '%' }"></div>
+        </div>
+      </div>
+
       <!-- Node table -->
       <div v-if="expanded.has(s.id)" class="col" style="gap: 4px; margin-top: 4px">
         <div v-if="(nodesBySub[s.id]?.length || 0) === 0" class="muted" style="font-size: 12px; padding: 6px 0">
@@ -338,3 +387,21 @@ defineExpose({ refresh });
     </div>
   </div>
 </template>
+
+<style scoped>
+.usage-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.usage-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+.usage-bar-fill.usage-bar-hot {
+  background: var(--danger);
+}
+</style>

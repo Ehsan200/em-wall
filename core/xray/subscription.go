@@ -43,8 +43,17 @@ type Subscription struct {
 	Enabled     bool      `gorm:"not null;default:true;column:enabled"`
 	LastFetched time.Time `gorm:"column:last_fetched"`
 	LastError   string    `gorm:"column:last_error;type:text;not null;default:''"`
-	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt   time.Time `gorm:"column:updated_at;autoUpdateTime"`
+	// Data-quota accounting reported by the provider via the
+	// Subscription-Userinfo header (byte counters; Expire is a Unix
+	// timestamp, 0 = never). Zero across all four means the provider never
+	// reported quota. Refreshed only when a fetch carries the header, so a
+	// later fetch without it keeps the last known figures.
+	Upload    int64     `gorm:"not null;default:0;column:usage_upload"`
+	Download  int64     `gorm:"not null;default:0;column:usage_download"`
+	Total     int64     `gorm:"not null;default:0;column:usage_total"`
+	Expire    int64     `gorm:"not null;default:0;column:usage_expire"`
+	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
 func (Subscription) TableName() string { return "xray_subscriptions" }
@@ -277,6 +286,26 @@ func (s *Store) SetSubFetchResult(ctx context.Context, id int64, errMsg string) 
 		Updates(map[string]any{
 			"last_fetched": time.Now().UTC(),
 			"last_error":   strings.TrimSpace(errMsg),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetSubUsage records the data-quota counters parsed from a
+// Subscription-Userinfo header. Only called when a fetch actually carried
+// the header, so a header-less fetch leaves prior figures intact.
+func (s *Store) SetSubUsage(ctx context.Context, id int64, info SubUserInfo) error {
+	res := s.db.WithContext(ctx).Model(&Subscription{}).Where("id = ?", id).
+		Updates(map[string]any{
+			"usage_upload":   info.Upload,
+			"usage_download": info.Download,
+			"usage_total":    info.Total,
+			"usage_expire":   info.Expire,
 		})
 	if res.Error != nil {
 		return res.Error

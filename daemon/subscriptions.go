@@ -45,7 +45,7 @@ func newSubFetcher(xs *xray.Store, ps *proxy.Store, logger *log.Logger) *subFetc
 // and LastError are recorded regardless of outcome. Returns the number of
 // nodes stored on success.
 func (f *subFetcher) Refresh(ctx context.Context, sub xray.Subscription) (int, error) {
-	body, via, err := f.fetchBody(ctx, sub)
+	body, info, via, err := f.fetchBody(ctx, sub)
 	if err != nil {
 		_ = f.xrayStore.SetSubFetchResult(ctx, sub.ID, err.Error())
 		return 0, err
@@ -58,6 +58,11 @@ func (f *subFetcher) Refresh(ctx context.Context, sub xray.Subscription) (int, e
 	if err := f.xrayStore.ReplaceNodes(ctx, sub.ID, nodes); err != nil {
 		_ = f.xrayStore.SetSubFetchResult(ctx, sub.ID, err.Error())
 		return 0, err
+	}
+	// Persist quota only when the provider actually reported it, so a
+	// header-less fetch doesn't wipe the last known figures.
+	if info.HasData {
+		_ = f.xrayStore.SetSubUsage(ctx, sub.ID, info)
 	}
 	_ = f.xrayStore.SetSubFetchResult(ctx, sub.ID, "")
 	f.logger.Printf("subscription %q: %d nodes%s", sub.Name, len(nodes), via)
@@ -74,12 +79,12 @@ func (f *subFetcher) Refresh(ctx context.Context, sub xray.Subscription) (int, e
 // (user proxies, then hidden _xray_ inbounds). The first that returns a
 // body wins. Returns a " (via NAME)" suffix for logging when a fallback
 // was used.
-func (f *subFetcher) fetchBody(ctx context.Context, sub xray.Subscription) ([]byte, string, error) {
+func (f *subFetcher) fetchBody(ctx context.Context, sub xray.Subscription) ([]byte, xray.SubUserInfo, string, error) {
 	dctx, cancel := context.WithTimeout(ctx, subDirectTimeout)
-	body, err := xray.FetchSubscriptionBody(dctx, directHTTPClient(subDirectTimeout), sub.URL, sub.UserAgent)
+	body, info, err := xray.FetchSubscriptionBody(dctx, directHTTPClient(subDirectTimeout), sub.URL, sub.UserAgent)
 	cancel()
 	if err == nil {
-		return body, "", nil
+		return body, info, "", nil
 	}
 	firstErr := err
 
@@ -92,13 +97,13 @@ func (f *subFetcher) fetchBody(ctx context.Context, sub xray.Subscription) ([]by
 			continue
 		}
 		vctx, cancel := context.WithTimeout(ctx, subViaTimeout)
-		body, err := xray.FetchSubscriptionBody(vctx, cli, sub.URL, sub.UserAgent)
+		body, info, err := xray.FetchSubscriptionBody(vctx, cli, sub.URL, sub.UserAgent)
 		cancel()
 		if err == nil {
-			return body, " (via " + p.Name + ")", nil
+			return body, info, " (via " + p.Name + ")", nil
 		}
 	}
-	return nil, "", fmt.Errorf("direct fetch failed (%v); no fallback outbound succeeded", firstErr)
+	return nil, xray.SubUserInfo{}, "", fmt.Errorf("direct fetch failed (%v); no fallback outbound succeeded", firstErr)
 }
 
 // fallbackProxies orders candidate via-outbounds: user proxies first,

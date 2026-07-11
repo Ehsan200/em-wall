@@ -364,8 +364,15 @@ type XraySubDTO struct {
 	LastError   string `json:"lastError"`
 	NodeCount   int    `json:"nodeCount"`
 	ActiveCount int    `json:"activeCount"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	// Data-quota accounting from the provider's Subscription-Userinfo
+	// header, byte counters. Expire is a Unix timestamp (0 = never). All
+	// zero means the provider never reported quota — frontend hides the bar.
+	UsageUpload   int64  `json:"usageUpload"`
+	UsageDownload int64  `json:"usageDownload"`
+	UsageTotal    int64  `json:"usageTotal"`
+	UsageExpire   int64  `json:"usageExpire"`
+	CreatedAt     string `json:"createdAt"`
+	UpdatedAt     string `json:"updatedAt"`
 }
 
 type XraySubAddParams struct {

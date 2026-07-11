@@ -30,6 +30,34 @@ const packaged = ref<boolean>(true);
 const reinstalling = ref<boolean>(false);
 const updateInfo = ref<main.UpdateInfo | null>(null);
 const updateDismissed = ref(false);
+// Version the user dismissed. Dismiss silences one specific version; a
+// later periodic check that finds a *newer* version un-dismisses so the
+// banner reappears without needing an app restart.
+const dismissedVersion = ref('');
+// How often the running app re-polls GitHub for a newer release. GitHub's
+// unauthenticated API allows 60 req/hr/IP; 30 min = 2/hr, negligible.
+const UPDATE_POLL_MS = 30 * 60 * 1000;
+let updateTimer: number | undefined;
+
+function dismissUpdate() {
+  updateDismissed.value = true;
+  dismissedVersion.value = updateInfo.value?.version || '';
+}
+
+// Poll for a newer release on the fly (no app restart needed). Skips while
+// a download is mid-flight so it can't clobber the in-progress banner.
+async function checkUpdate() {
+  if (updating.value) return;
+  try {
+    const info = await CheckForUpdate();
+    if (info.hasUpdate) {
+      updateInfo.value = info;
+      if (info.version !== dismissedVersion.value) updateDismissed.value = false;
+    } else {
+      updateInfo.value = null;
+    }
+  } catch { /* transient; keep last known state */ }
+}
 // Self-update download state. `updating` gates the banner buttons while
 // the .dmg streams down; `updateProgress` (0..1) drives the bar. On
 // success the app quits and relaunches itself, so these never reset —
@@ -144,14 +172,18 @@ onMounted(async () => {
   await refresh();
   timer = window.setInterval(refresh, 2000);
   refreshEgress(); // self-schedules its own next run
-  // Check for updates once on startup; runs in background so it never
-  // delays the initial UI render.
-  CheckForUpdate().then(info => { if (info.hasUpdate) updateInfo.value = info; }).catch(() => {});
+  // Check for updates on startup, then keep re-checking on a slow cadence
+  // so a release published while the app is open surfaces on the fly — no
+  // close-and-reopen needed. The first call runs in the background so it
+  // never delays the initial UI render.
+  checkUpdate();
+  updateTimer = window.setInterval(checkUpdate, UPDATE_POLL_MS);
   EventsOn('update:progress', (p: number) => { updateProgress.value = p; });
 });
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
   if (egressTimer) window.clearTimeout(egressTimer);
+  if (updateTimer) window.clearInterval(updateTimer);
   EventsOff('update:progress');
 });
 </script>
@@ -186,7 +218,7 @@ onUnmounted(() => {
     <div v-if="!updating" class="row" style="gap: 8px">
       <button v-if="updateInfo.downloadUrl" class="primary" @click="startUpdate">Download &amp; install</button>
       <button :class="{ primary: !updateInfo.downloadUrl }" @click="BrowserOpenURL(updateInfo!.url)">View release</button>
-      <button @click="updateDismissed = true">Dismiss</button>
+      <button @click="dismissUpdate">Dismiss</button>
     </div>
     <div v-else class="update-progress">
       <div class="update-progress-fill" :style="{ width: (updateProgress * 100) + '%' }"></div>
