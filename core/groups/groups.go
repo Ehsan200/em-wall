@@ -347,6 +347,21 @@ func KnownGroups() []Group {
 			Icon: svgAndroidStudio(),
 		},
 		{
+			Key:         "notion",
+			DisplayName: "Notion",
+			Description: "Notion app/web, published sites, static + user-content CDNs",
+			Patterns: []string{
+				"*.notion.so",
+				"*.notion.com",
+				"*.notion.site",
+				"*.notion-static.com",
+				"*.notionusercontent.com",
+				"*.makenotion.com",
+				"*.cron.com", // Notion Calendar (formerly Cron)
+			},
+			Icon: svgNotion(),
+		},
+		{
 			Key:         "telemetry-common",
 			DisplayName: "Common telemetry / analytics",
 			Description: "Sentry, Mixpanel, Segment, Amplitude, Datadog browser",
@@ -544,6 +559,21 @@ func svgMeta() string {
 		`<path fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" ` +
 		`d="M14 40 C 14 26 22 22 28 28 C 32 32 36 38 42 38 C 50 38 52 30 50 25 C 48 21 42 21 38 26 C 32 33 28 41 22 41 C 16 41 14 36 14 40 Z"/>` +
 		`</svg>`
+}
+
+// svgNotion: white badge with the black Notion "N" (angular serif N with
+// the diagonal stroke, framed like the app icon).
+func svgNotion() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#e6e6e6" stroke-width="1.5"/>` +
+		`<g fill="#000000">` +
+		// left vertical stem
+		`<rect x="19" y="17" width="6" height="30"/>` +
+		// right vertical stem
+		`<rect x="39" y="17" width="6" height="30"/>` +
+		// diagonal connecting the two stems
+		`<path d="M19 17 L27 17 L45 41 L45 47 L37 47 L19 23 Z"/>` +
+		`</g></svg>`
 }
 
 // svgAndroidStudio: dark navy badge with the green Android bugdroid head.
