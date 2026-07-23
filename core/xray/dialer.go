@@ -8,21 +8,34 @@ import (
 
 // A master entry's Dialer field is a comma-separated list of typed refs
 // naming the outbounds its sockopt.dialerProxy chain draws from. All
-// referenced nodes are merged into one per-master leastPing balancer, so
+// referenced nodes are merged into one per-master leastLoad balancer, so
 // the master's own server connection is tunneled through whichever of
-// them the observatory currently rates fastest.
+// them the burst observatory currently rates fastest+healthiest.
 const (
 	DialerKindXray    = "xray"    // a single user xray entry
 	DialerKindXraysub = "xraysub" // all active nodes of a subscription
 	DialerKindProxy   = "proxy"   // a user proxy upstream
 )
 
-// Observatory probe defaults (user-overridable via GenerateOptions).
+// Burst-observatory probe defaults (user-overridable via GenerateOptions).
+// The burst observatory health-pings each node every DefaultProbeInterval
+// and keeps a rolling window of DefaultProbeSampling results. A node whose
+// ping FAILS (dial error / timeout) is demoted by leastLoad on that single
+// sample — no slow 60s average like the classic observatory — so a bad
+// node is switched away from within ~one interval.
+//
+// The interval is deliberately gentle (10s, not a few seconds): each ping
+// is a full outbound dial through the node, so the CPU/heat cost scales
+// with pool_size / interval. 10s keeps that near-zero even for a large
+// pool, while still being ~6x faster than the old 60s cycle. The pool is
+// further bounded by each subscription's EffectiveCap, capping probe fan-out.
 const (
 	DefaultProbeURL      = "http://www.gstatic.com/generate_204"
-	DefaultProbeInterval = "60s"
+	DefaultProbeInterval = "10s" // per-node health-ping cadence (gentle on CPU)
+	DefaultProbeSampling = 2     // rolling window of samples per node
+	DefaultProbeTimeout  = "3s"  // a ping past this counts as a failure
 	// ObservatorySelectorPrefix matches every slot member outbound so a
-	// single top-level observatory feeds all per-master balancers.
+	// single top-level burst observatory feeds all per-master balancers.
 	ObservatorySelectorPrefix = "slot"
 )
 

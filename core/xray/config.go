@@ -20,17 +20,19 @@ type GenerateOptions struct {
 	LogDir       string
 	RoutingRules string
 
-	// DialerSlots, when non-empty, emits a per-master leastPing balancer
+	// DialerSlots, when non-empty, emits a per-master leastLoad balancer
 	// slot for each entry (see dialer.go). Each master entry's outbound
 	// gains streamSettings.sockopt.dialerProxy pointing at its dialer
 	// socks outbound → slot inbound → balancer over the slot members. A
-	// single top-level observatory (prefix ObservatorySelectorPrefix)
-	// feeds every slot's leastPing strategy.
+	// single top-level burst observatory (prefix ObservatorySelectorPrefix)
+	// feeds every slot's leastLoad strategy.
 	DialerSlots []DialerSlot
-	// Observatory probe tuning; empty falls back to DefaultProbeURL /
-	// DefaultProbeInterval. Only emitted when DialerSlots is non-empty.
+	// Burst-observatory probe tuning; empty/zero falls back to the
+	// Default* probe constants. Only emitted when DialerSlots is non-empty.
 	ObservatoryProbeURL string
 	ObservatoryInterval string
+	ObservatorySampling int
+	ObservatoryTimeout  string
 }
 
 // Generate produces a full xray-core JSON config from entries.
@@ -70,7 +72,7 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		Stats       json.RawMessage   `json:"stats,omitempty"`
 		Inbounds    []inbound         `json:"inbounds"`
 		Outbounds   []json.RawMessage `json:"outbounds"`
-		Observatory json.RawMessage   `json:"observatory,omitempty"`
+		BurstObservatory json.RawMessage `json:"burstObservatory,omitempty"`
 		Routing     struct {
 			DomainStrategy string            `json:"domainStrategy"`
 			Rules          []json.RawMessage `json:"rules"`
@@ -207,10 +209,19 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			out.Outbounds = append(out.Outbounds, raw)
 		}
 
+		// leastLoad reads the burst observatory's live health-ping window
+		// and picks the single (expected:1) lowest-RTT healthy member; a
+		// node whose recent pings fail sinks immediately, so the balancer
+		// switches off a degraded node within a ping or two. No maxRTT cap
+		// is set on purpose: if EVERY node is slow (local network down) we
+		// still want the least-bad one rather than a total blackout.
 		bal, _ := json.Marshal(map[string]any{
 			"tag":      SlotBalancerTag(slot.Index),
 			"selector": []string{SlotOutboundPrefix(slot.Index)},
-			"strategy": map[string]any{"type": "leastPing"},
+			"strategy": map[string]any{
+				"type":     "leastLoad",
+				"settings": map[string]any{"expected": 1},
+			},
 		})
 		out.Routing.Balancers = append(out.Routing.Balancers, bal)
 
@@ -222,8 +233,11 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		out.Routing.Rules = append(out.Routing.Rules, rule)
 	}
 
-	// One shared observatory feeds every slot's leastPing strategy. Its
-	// prefix selector matches all slot member outbounds.
+	// One shared burst observatory feeds every slot's leastLoad strategy.
+	// Its prefix selector matches all slot member outbounds. Unlike the
+	// classic observatory (periodic averaged probe), burst keeps a rolling
+	// health-ping window per node, so leastLoad reacts to a failing node on
+	// the next ping instead of waiting out a 60s average.
 	if len(slots) > 0 {
 		probeURL := strings.TrimSpace(opt.ObservatoryProbeURL)
 		if probeURL == "" {
@@ -233,11 +247,22 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		if interval == "" {
 			interval = DefaultProbeInterval
 		}
-		out.Observatory, _ = json.Marshal(map[string]any{
-			"subjectSelector":   []string{ObservatorySelectorPrefix},
-			"probeURL":          probeURL,
-			"probeInterval":     interval,
-			"enableConcurrency": true,
+		sampling := opt.ObservatorySampling
+		if sampling <= 0 {
+			sampling = DefaultProbeSampling
+		}
+		timeout := strings.TrimSpace(opt.ObservatoryTimeout)
+		if timeout == "" {
+			timeout = DefaultProbeTimeout
+		}
+		out.BurstObservatory, _ = json.Marshal(map[string]any{
+			"subjectSelector": []string{ObservatorySelectorPrefix},
+			"pingConfig": map[string]any{
+				"destination": probeURL,
+				"interval":    interval,
+				"sampling":    sampling,
+				"timeout":     timeout,
+			},
 		})
 	}
 

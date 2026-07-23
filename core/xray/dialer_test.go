@@ -135,11 +135,16 @@ func TestGenerate_DialerSlot(t *testing.T) {
 			Tag  string `json:"tag"`
 			Port int    `json:"port"`
 		} `json:"inbounds"`
-		Outbounds   []map[string]any `json:"outbounds"`
-		Observatory struct {
-			ProbeURL        string   `json:"probeURL"`
+		Outbounds        []map[string]any `json:"outbounds"`
+		BurstObservatory struct {
 			SubjectSelector []string `json:"subjectSelector"`
-		} `json:"observatory"`
+			PingConfig      struct {
+				Destination string `json:"destination"`
+				Interval    string `json:"interval"`
+				Sampling    int    `json:"sampling"`
+				Timeout     string `json:"timeout"`
+			} `json:"pingConfig"`
+		} `json:"burstObservatory"`
 		Routing struct {
 			Balancers []struct {
 				Tag      string   `json:"tag"`
@@ -194,7 +199,7 @@ func TestGenerate_DialerSlot(t *testing.T) {
 		t.Errorf("missing slot member outbound %q", SlotMemberTag(0, "fp1"))
 	}
 
-	// Balancer with the slot's prefix selector + leastPing.
+	// Balancer with the slot's prefix selector + leastLoad.
 	var haveBal bool
 	for _, b := range cfg.Routing.Balancers {
 		if b.Tag == SlotBalancerTag(0) {
@@ -202,8 +207,8 @@ func TestGenerate_DialerSlot(t *testing.T) {
 			if len(b.Selector) != 1 || b.Selector[0] != SlotOutboundPrefix(0) {
 				t.Errorf("balancer selector = %v, want [%q]", b.Selector, SlotOutboundPrefix(0))
 			}
-			if b.Strategy.Type != "leastPing" {
-				t.Errorf("balancer strategy = %q, want leastPing", b.Strategy.Type)
+			if b.Strategy.Type != "leastLoad" {
+				t.Errorf("balancer strategy = %q, want leastLoad", b.Strategy.Type)
 			}
 		}
 	}
@@ -211,12 +216,18 @@ func TestGenerate_DialerSlot(t *testing.T) {
 		t.Errorf("missing balancer %q", SlotBalancerTag(0))
 	}
 
-	// Shared observatory with the default probe URL + prefix selector.
-	if cfg.Observatory.ProbeURL != DefaultProbeURL {
-		t.Errorf("observatory probeURL = %q, want %q", cfg.Observatory.ProbeURL, DefaultProbeURL)
+	// Shared burst observatory with the default ping config + prefix selector.
+	if cfg.BurstObservatory.PingConfig.Destination != DefaultProbeURL {
+		t.Errorf("burst pingConfig destination = %q, want %q", cfg.BurstObservatory.PingConfig.Destination, DefaultProbeURL)
 	}
-	if len(cfg.Observatory.SubjectSelector) != 1 || cfg.Observatory.SubjectSelector[0] != ObservatorySelectorPrefix {
-		t.Errorf("observatory selector = %v, want [%q]", cfg.Observatory.SubjectSelector, ObservatorySelectorPrefix)
+	if cfg.BurstObservatory.PingConfig.Interval != DefaultProbeInterval {
+		t.Errorf("burst pingConfig interval = %q, want %q", cfg.BurstObservatory.PingConfig.Interval, DefaultProbeInterval)
+	}
+	if cfg.BurstObservatory.PingConfig.Sampling != DefaultProbeSampling {
+		t.Errorf("burst pingConfig sampling = %d, want %d", cfg.BurstObservatory.PingConfig.Sampling, DefaultProbeSampling)
+	}
+	if len(cfg.BurstObservatory.SubjectSelector) != 1 || cfg.BurstObservatory.SubjectSelector[0] != ObservatorySelectorPrefix {
+		t.Errorf("burst observatory selector = %v, want [%q]", cfg.BurstObservatory.SubjectSelector, ObservatorySelectorPrefix)
 	}
 }
 
@@ -272,14 +283,14 @@ func TestGenerate_NoSlotsNoObservatory(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 	var cfg struct {
-		Observatory json.RawMessage `json:"observatory"`
-		Routing     struct {
+		BurstObservatory json.RawMessage `json:"burstObservatory"`
+		Routing          struct {
 			Balancers json.RawMessage `json:"balancers"`
 		} `json:"routing"`
 	}
 	_ = json.Unmarshal(raw, &cfg)
-	if len(cfg.Observatory) != 0 {
-		t.Errorf("observatory emitted with no slots: %s", cfg.Observatory)
+	if len(cfg.BurstObservatory) != 0 {
+		t.Errorf("burst observatory emitted with no slots: %s", cfg.BurstObservatory)
 	}
 	if len(cfg.Routing.Balancers) != 0 {
 		t.Errorf("balancers emitted with no slots: %s", cfg.Routing.Balancers)
