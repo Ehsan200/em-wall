@@ -139,3 +139,23 @@ func TestMostSpecific(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchKey(t *testing.T) {
+	cases := []struct {
+		pattern, key string
+		want         bool
+	}{
+		{"149.154.160.0/20", "149.154.167.41", true}, // IP in CIDR
+		{"149.154.160.0/20", "8.8.8.8", false},       // IP outside CIDR
+		{"1.2.3.4", "1.2.3.4", true},                 // bare IP host route
+		{"1.2.3.4", "1.2.3.5", false},                // different IP
+		{"*.telegram.org", "api.telegram.org", true}, // domain wildcard
+		{"*.telegram.org", "149.154.167.41", false},  // domain pattern vs IP key
+		{"149.154.160.0/20", "t.me", false},          // CIDR pattern vs domain key
+	}
+	for _, c := range cases {
+		if got := MatchKey(c.pattern, c.key); got != c.want {
+			t.Errorf("MatchKey(%q, %q) = %v, want %v", c.pattern, c.key, got, c.want)
+		}
+	}
+}

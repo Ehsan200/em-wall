@@ -35,19 +35,26 @@ var brandColors = map[string]string{
 // assigned color (the UI falls back to a rotating palette).
 func BrandColor(key string) string { return brandColors[key] }
 
-// GroupForDomain returns the first known group that owns host, matching
-// each group's patterns with the same wildcard semantics as the rule
-// engine (rules.Match: `*.x.com` matches the apex and any subdomain).
-// Groups are tried in KnownGroups order, so earlier (more specific
-// product) groups win over broader ones. Returns ok=false when no group
-// claims the host.
-func GroupForDomain(host string) (key, display string, ok bool) {
+// GroupForKey returns the first known group that owns key — a hostname or a
+// destination IP string — matching each group's patterns via rules.MatchKey
+// (`*.x.com` covers the apex and any subdomain; an IP/CIDR pattern covers a
+// contained IP key). Groups are tried in KnownGroups order, so earlier (more
+// specific product) groups win over broader ones. Returns ok=false when no
+// group claims the key. This is what attributes IP-routed traffic (e.g.
+// Telegram MTProto DC IPs) to its group on the usage dashboard.
+func GroupForKey(key string) (gkey, display string, ok bool) {
 	for _, g := range KnownGroups() {
 		for _, pat := range g.Patterns {
-			if rules.Match(pat, host) {
+			if rules.MatchKey(pat, key) {
 				return g.Key, g.DisplayName, true
 			}
 		}
 	}
 	return "", "", false
+}
+
+// GroupForDomain is GroupForKey specialised to hostnames; kept for callers
+// that only ever pass a DNS name.
+func GroupForDomain(host string) (key, display string, ok bool) {
+	return GroupForKey(host)
 }

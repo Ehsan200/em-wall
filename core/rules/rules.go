@@ -89,6 +89,20 @@ func Match(pattern, name string) bool {
 	return p == n
 }
 
+// MatchKey reports whether key — a hostname or a destination IP string —
+// belongs to pattern. An IP/CIDR pattern tests containment of an IP key; a
+// domain pattern uses Match's wildcard semantics. Mixed kinds (IP pattern
+// vs domain key, or vice versa) never match. This lets a caller attribute a
+// key to a group whose patterns mix domains and IP/CIDR ranges (e.g. a group
+// carrying both service hostnames and its data-center IP blocks).
+func MatchKey(pattern, key string) bool {
+	if n, ok := ParseCIDR(pattern); ok {
+		ip := net.ParseIP(normalize(key))
+		return ip != nil && n.Contains(ip)
+	}
+	return Match(pattern, key)
+}
+
 // Specificity returns a comparable score for resolving rule conflicts.
 // Higher is more specific. Score = 2*literal_label_count + (exact ? 1 : 0).
 // An exact rule outranks any wildcard match at the same depth; deeper

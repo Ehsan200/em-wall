@@ -77,7 +77,10 @@ func (a *trafficAggregator) Record(domain, proxy string, sent, recv int64) {
 }
 
 // drain swaps out the buffer and writes each entry to the store, resolving
-// the domain→group attribution at write time.
+// the key→group attribution at write time. The key is a hostname for
+// DNS-routed flows or a destination IP for IP/CIDR-routed flows; both are
+// attributed via groupForKey so IP traffic (e.g. Telegram MTProto DCs) and
+// user-defined custom groups land under their group rather than "ungrouped".
 func (a *trafficAggregator) drain(ctx context.Context) {
 	a.mu.Lock()
 	if len(a.buf) == 0 {
@@ -88,12 +91,37 @@ func (a *trafficAggregator) drain(ctx context.Context) {
 	a.buf = make(map[trafficKey]*trafficSum)
 	a.mu.Unlock()
 
+	// Custom groups live in the DB (unlike the code-defined curated groups);
+	// fetch them once per drain and reuse across every pending key.
+	custom, err := a.store.ListCustomGroups(ctx)
+	if err != nil {
+		a.logger.Printf("em-walld: traffic group attribution: list custom groups failed: %v", err)
+		custom = nil
+	}
+
 	for k, s := range pending {
-		groupKey, _, _ := groups.GroupForDomain(k.domain)
+		groupKey := a.groupForKey(k.domain, custom)
 		if err := a.store.AddTraffic(ctx, k.bucketTS, k.domain, k.proxy, groupKey, s.sent, s.recv); err != nil {
 			a.logger.Printf("em-walld: traffic stat write failed: %v", err)
 		}
 	}
+}
+
+// groupForKey resolves key (hostname or IP string) to a group key: curated
+// groups first (so a built-in product group wins), then user custom groups.
+// Returns "" (ungrouped) when nothing claims it.
+func (a *trafficAggregator) groupForKey(key string, custom []rules.CustomGroup) string {
+	if gkey, _, ok := groups.GroupForKey(key); ok {
+		return gkey
+	}
+	for _, g := range custom {
+		for _, pat := range g.Patterns {
+			if rules.MatchKey(pat, key) {
+				return g.Key
+			}
+		}
+	}
+	return ""
 }
 
 // Run drives the periodic drain until ctx is cancelled, then flushes once
