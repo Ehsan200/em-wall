@@ -191,7 +191,7 @@ func KnownGroups() []Group {
 		{
 			Key:         "telegram",
 			DisplayName: "Telegram",
-			Description: "Telegram web/app, Telegram CDN, t.me links",
+			Description: "Telegram web/app, Telegram CDN, t.me links, MTProto data-center IPs (Desktop)",
 			Patterns: []string{
 				"*.telegram.org",
 				"*.telegram.me",
@@ -202,6 +202,21 @@ func KnownGroups() []Group {
 				"*.telesco.pe",
 				"*.telegra.ph",
 				"*.graph.org",
+				// Telegram Desktop dials its MTProto data centers by hardcoded
+				// IP and never issues a DNS query for them, so the domain
+				// patterns above can't catch the app's core traffic. These are
+				// Telegram's published DC ranges (AS62041/AS62014/AS59930);
+				// as IP/CIDR route rules they pin the app through the proxy.
+				// IPv4 only — v6 egress via the proxy utun isn't guaranteed.
+				"149.154.160.0/20",
+				"91.108.4.0/22",
+				"91.108.8.0/22",
+				"91.108.12.0/22",
+				"91.108.16.0/22",
+				"91.108.20.0/22",
+				"91.108.56.0/22",
+				"91.105.192.0/23",
+				"95.161.64.0/20",
 			},
 			Icon: svgTelegram(),
 		},

@@ -462,6 +462,12 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			out.Created = append(out.Created, ruleToDTO(added))
 		}
 		_ = d.engine.Reload(ctx)
+		// A group may carry IP/CIDR patterns (e.g. Telegram's MTProto DC
+		// ranges). Those become IP route rules that need a kernel static
+		// route installed before traffic is pinned — Reload alone only
+		// refreshes the in-memory rule cache. Idempotent, so harmless for
+		// domain-only groups.
+		d.reconcileIPRoutes(ctx)
 		return out, nil
 	})
 
