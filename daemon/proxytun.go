@@ -23,6 +23,21 @@ import (
 // chatty QUIC, short enough that one-shot DNS lookups don't linger.
 const proxyUDPIdleTimeout = 60 * time.Second
 
+// proxyUDPNoReplyTimeout bounds how long a flow may send without ever hearing
+// back. An association can come up dead — same host, same proxy, seconds
+// apart, one carries traffic and one silently doesn't — and holding that one
+// open just lets the client retransmit into it until it gives up (~90s for
+// QUIC, which reads as "Gmail is slow"). Tearing down early frees the
+// netstack endpoint, so the client's next retransmit arrives as a FRESH flow
+// and gets a FRESH association, which in practice works. Generous enough that
+// a merely slow first reply isn't mistaken for a dead one.
+const proxyUDPNoReplyTimeout = 6 * time.Second
+
+// proxyUDPMonitorTick is how often a flow's watchdog re-evaluates. It has to
+// be well under proxyUDPNoReplyTimeout to be useful, so byte-accounting
+// flushes ride a counter rather than the tick itself.
+const proxyUDPMonitorTick = time.Second
+
 // proxyUTUNAddr is the point-to-point address assigned to the daemon's
 // utun. The address itself isn't routed — proxy-bound traffic reaches
 // the utun via the per-host routes the DNS layer installs (by interface
@@ -408,23 +423,43 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 		shutdown()
 	}()
 
-	// Idle monitor: tear down after total-silence exceeds the timeout.
-	// Also flushes byte deltas each tick so long-lived flows (QUIC) show
-	// up on the dashboard before they end.
+	// Flow watchdog. Two independent teardown conditions:
+	//
+	//   - no-reply: we've sent, nothing has ever come back, and the grace
+	//     period is up. The association is dead; cut it so the client's next
+	//     retransmit gets a fresh one.
+	//   - idle: silence in BOTH directions for the full idle timeout. UDP has
+	//     no FIN, so this is what reclaims a finished flow.
+	//
+	// Byte deltas are flushed on a slower cadence than the tick so long-lived
+	// flows (QUIC) register on the usage dashboard before they end.
+	var noReply atomic.Bool
 	stop := make(chan struct{})
 	go func() {
-		t := time.NewTicker(proxyUDPIdleTimeout / 2)
+		t := time.NewTicker(proxyUDPMonitorTick)
 		defer t.Stop()
-		for {
+		flushEvery := int(proxyUDPIdleTimeout / 2 / proxyUDPMonitorTick)
+		if flushEvery < 1 {
+			flushEvery = 1
+		}
+		for ticks := 1; ; ticks++ {
 			select {
 			case <-stop:
 				return
 			case <-t.C:
+			}
+			if ticks%flushEvery == 0 {
 				flush()
-				if time.Since(time.Unix(0, lastActive.Load())) >= proxyUDPIdleTimeout {
-					shutdown()
-					return
-				}
+			}
+			if recvBytes.Load() == 0 && sentBytes.Load() > 0 &&
+				time.Since(startedAt) >= proxyUDPNoReplyTimeout {
+				noReply.Store(true)
+				shutdown()
+				return
+			}
+			if time.Since(time.Unix(0, lastActive.Load())) >= proxyUDPIdleTimeout {
+				shutdown()
+				return
 			}
 		}
 	}()
@@ -440,8 +475,12 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	sent, recv := sentBytes.Load(), recvBytes.Load()
 	dur := time.Since(startedAt).Round(time.Millisecond)
 	if sent > 0 && recv == 0 {
-		pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, RECEIVED NOTHING in %s (relay black hole?)",
-			target, local.Port, used, humanBytes(sent), dur)
+		why := "relay black hole?"
+		if noReply.Load() {
+			why = "dead association, cut early so the client retries on a fresh one"
+		}
+		pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, RECEIVED NOTHING in %s (%s)",
+			target, local.Port, used, humanBytes(sent), dur, why)
 		return
 	}
 	pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, recv %s in %s",
