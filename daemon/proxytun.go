@@ -27,16 +27,24 @@ const proxyUDPIdleTimeout = 60 * time.Second
 // back. An association can come up dead — same host, same proxy, seconds
 // apart, one carries traffic and one silently doesn't — and holding that one
 // open just lets the client retransmit into it until it gives up (~90s for
-// QUIC, which reads as "Gmail is slow"). Tearing down early frees the
-// netstack endpoint, so the client's next retransmit arrives as a FRESH flow
-// and gets a FRESH association, which in practice works. Generous enough that
-// a merely slow first reply isn't mistaken for a dead one.
-const proxyUDPNoReplyTimeout = 6 * time.Second
-
+// QUIC, which reads as "Gmail is slow"). Generous enough that a merely slow
+// first reply isn't mistaken for a dead one.
+//
 // proxyUDPMonitorTick is how often a flow's watchdog re-evaluates. It has to
 // be well under proxyUDPNoReplyTimeout to be useful, so byte-accounting
 // flushes ride a counter rather than the tick itself.
-const proxyUDPMonitorTick = time.Second
+//
+// Both are vars rather than consts so tests can compress the timeline.
+var (
+	proxyUDPNoReplyTimeout = 6 * time.Second
+	proxyUDPMonitorTick    = time.Second
+)
+
+// proxyUDPMaxReassoc caps how many times one flow may be moved to another
+// association before we give up and let it die. Two is enough to clear a
+// single bad association or a single bad upstream; beyond that the problem
+// isn't the association and retrying just delays the client's TCP fallback.
+const proxyUDPMaxReassoc = 2
 
 // proxyUTUNAddr is the point-to-point address assigned to the daemon's
 // utun. The address itself isn't routed — proxy-bound traffic reaches
@@ -327,13 +335,24 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	}
 
 	dctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
-	session, used, err := pf.associateUDP(dctx, entry)
+	session, used, err := pf.associateUDP(dctx, entry, nil)
 	cancel()
 	if session == nil {
 		pf.logger.Printf("proxytun/udp: %s:%d — no usable proxy: %v", target, local.Port, err)
 		return
 	}
-	defer session.Close()
+
+	// The session can be replaced mid-flow when it turns out to be dead (see
+	// the watchdog below), so the pumps read it from cur instead of closing
+	// over one pointer. Publish order on a swap is always: store the new
+	// session, THEN close the old one — that's what lets a pump tell "we were
+	// swapped, keep going" apart from "this flow is over".
+	var cur atomic.Pointer[proxy.UDPSession]
+	cur.Store(session)
+
+	// Snapshot the watchdog tuning once per flow rather than re-reading the
+	// globals on every tick: one flow then runs on one consistent timeline.
+	noReplyAfter, monitorTick := proxyUDPNoReplyTimeout, proxyUDPMonitorTick
 
 	stopKeepalive := pf.keepRouteAlive(local.IP)
 	defer stopKeepalive()
@@ -341,13 +360,22 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	startedAt := time.Now()
 	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", target, local.Port, used)
 
+	// usedName is the proxy currently carrying the flow (byte accounting
+	// follows it); chain is the human-readable history for the closing log.
+	var nameMu sync.Mutex
+	usedName, chain := used, used
+	currentName := func() string { nameMu.Lock(); defer nameMu.Unlock(); return usedName }
+	nameChain := func() string { nameMu.Lock(); defer nameMu.Unlock(); return chain }
+
 	// Single idempotent teardown. Closing both ends unblocks every pump's
 	// blocking Read so they error out and exit — no per-read deadlines.
+	var closed atomic.Bool
 	var once sync.Once
 	shutdown := func() {
 		once.Do(func() {
+			closed.Store(true)
 			_ = conn.Close()
-			_ = session.Close()
+			_ = cur.Load().Close()
 		})
 	}
 	defer shutdown()
@@ -363,13 +391,29 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	// once more after teardown, mirroring the TCP splice accounting.
 	var sentBytes, recvBytes atomic.Int64
 	var flushedSent, flushedRecv int64
+	var flushMu sync.Mutex
 	flush := func() {
+		flushMu.Lock()
+		defer flushMu.Unlock()
 		s, r := sentBytes.Load(), recvBytes.Load()
 		dS, dR := s-flushedSent, r-flushedRecv
 		flushedSent, flushedRecv = s, r
 		if dS != 0 || dR != 0 {
-			pf.recordTraffic(entry.Hostname, used, dS, dR)
+			pf.recordTraffic(entry.Hostname, currentName(), dS, dR)
 		}
+	}
+
+	// watchCtrl tears the flow down when a session's SOCKS5 control conn
+	// closes (the proxy dropped the association). One per session: after a
+	// swap the retired session's watcher must NOT kill the live flow, which
+	// it detects by no longer being the current session.
+	watchCtrl := func(s *proxy.UDPSession) {
+		b := make([]byte, 1)
+		_, _ = s.CtrlConn().Read(b)
+		if closed.Load() || cur.Load() != s {
+			return
+		}
+		shutdown()
 	}
 
 	var wg sync.WaitGroup
@@ -384,8 +428,17 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 			n, rerr := conn.Read(buf)
 			if n > 0 {
 				lastActive.Store(time.Now().UnixNano())
-				if werr := session.WriteTo(buf[:n], target, local.Port); werr != nil {
-					return
+				s := cur.Load()
+				if werr := s.WriteTo(buf[:n], target, local.Port); werr != nil {
+					// A swap can close this session out from under us. Resend
+					// through the replacement instead of dropping the flow.
+					ns := cur.Load()
+					if closed.Load() || ns == s {
+						return
+					}
+					if werr := ns.WriteTo(buf[:n], target, local.Port); werr != nil {
+						return
+					}
 				}
 				sentBytes.Add(int64(n))
 			}
@@ -401,7 +454,8 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 		defer shutdown()
 		buf := make([]byte, 64*1024)
 		for {
-			n, rerr := session.Read(buf)
+			s := cur.Load()
+			n, rerr := s.Read(buf)
 			if n > 0 {
 				lastActive.Store(time.Now().UnixNano())
 				if _, werr := conn.Write(buf[:n]); werr != nil {
@@ -410,18 +464,17 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 				recvBytes.Add(int64(n))
 			}
 			if rerr != nil {
-				return
+				// Same distinction as the writer: a swapped-out session errors
+				// by design, and the flow continues on its replacement.
+				if closed.Load() || cur.Load() == s {
+					return
+				}
+				continue
 			}
 		}
 	}()
 
-	// Watch the SOCKS5 control conn: its close means the proxy dropped the
-	// association. Exits when shutdown closes ctrl.
-	go func() {
-		b := make([]byte, 1)
-		_, _ = session.CtrlConn().Read(b)
-		shutdown()
-	}()
+	go watchCtrl(session)
 
 	// Flow watchdog. Two independent teardown conditions:
 	//
@@ -434,11 +487,56 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	// Byte deltas are flushed on a slower cadence than the tick so long-lived
 	// flows (QUIC) register on the usage dashboard before they end.
 	var noReply atomic.Bool
+	// noReplySince is the clock the no-reply rule measures against. It restarts
+	// on every re-association so a replacement gets its own full grace period.
+	var noReplySince atomic.Int64
+	noReplySince.Store(startedAt.UnixNano())
+
+	// reassociate moves the flow onto another association — a different proxy
+	// from the binding when there is one, otherwise a fresh association on the
+	// same proxy (a dead association is per-association, not per-proxy: the
+	// same upstream serves a sibling flow fine seconds later). Only ever
+	// called while nothing has been received, so there's no QUIC connection
+	// state to lose — the client's retransmits simply take the new path.
+	tried := map[string]struct{}{used: {}}
+	swaps := 0
+	reassociate := func() bool {
+		if swaps >= proxyUDPMaxReassoc {
+			return false
+		}
+		old := cur.Load()
+		prev := currentName()
+		flush() // bill what we sent to the association that swallowed it
+
+		actx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
+		ns, nname, aerr := pf.associateUDP(actx, entry, tried)
+		cancel()
+		if ns == nil {
+			pf.logger.Printf("proxytun/udp: %s:%d — re-associate failed: %v", target, local.Port, aerr)
+			return false
+		}
+
+		swaps++
+		tried[nname] = struct{}{}
+		nameMu.Lock()
+		usedName = nname
+		chain += " → " + nname
+		nameMu.Unlock()
+
+		cur.Store(ns) // publish first…
+		_ = old.Close()
+		go watchCtrl(ns)
+		noReplySince.Store(time.Now().UnixNano())
+		pf.logger.Printf("proxytun/udp: %s:%d silent via %q after %s — re-associated via %q",
+			target, local.Port, prev, noReplyAfter, nname)
+		return true
+	}
+
 	stop := make(chan struct{})
 	go func() {
-		t := time.NewTicker(proxyUDPMonitorTick)
+		t := time.NewTicker(monitorTick)
 		defer t.Stop()
-		flushEvery := int(proxyUDPIdleTimeout / 2 / proxyUDPMonitorTick)
+		flushEvery := int(proxyUDPIdleTimeout / 2 / monitorTick)
 		if flushEvery < 1 {
 			flushEvery = 1
 		}
@@ -452,7 +550,10 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 				flush()
 			}
 			if recvBytes.Load() == 0 && sentBytes.Load() > 0 &&
-				time.Since(startedAt) >= proxyUDPNoReplyTimeout {
+				time.Since(time.Unix(0, noReplySince.Load())) >= noReplyAfter {
+				if reassociate() {
+					continue
+				}
 				noReply.Store(true)
 				shutdown()
 				return
@@ -477,14 +578,14 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	if sent > 0 && recv == 0 {
 		why := "relay black hole?"
 		if noReply.Load() {
-			why = "dead association, cut early so the client retries on a fresh one"
+			why = "every association stayed silent; client falls back to TCP"
 		}
 		pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, RECEIVED NOTHING in %s (%s)",
-			target, local.Port, used, humanBytes(sent), dur, why)
+			target, local.Port, nameChain(), humanBytes(sent), dur, why)
 		return
 	}
 	pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, recv %s in %s",
-		target, local.Port, used, humanBytes(sent), humanBytes(recv), dur)
+		target, local.Port, nameChain(), humanBytes(sent), humanBytes(recv), dur)
 }
 
 // humanBytes renders a byte count for log lines. Binary units — these are
@@ -505,9 +606,26 @@ func humanBytes(n int64) string {
 // associateUDP walks the rule's proxy binding and returns the first
 // SOCKS5 proxy for which a UDP ASSOCIATE succeeds. HTTP proxies are
 // skipped (no UDP support). Returns (nil, "", lastErr) if none work.
-func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry) (*proxy.UDPSession, string, error) {
+//
+// Names in tried are pushed to the back rather than excluded: they've already
+// produced a dead association for this flow, so prefer anything else — but a
+// second association on the same proxy usually works, so it beats no relay at
+// all when the binding has a single name.
+func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, tried map[string]struct{}) (*proxy.UDPSession, string, error) {
 	var lastErr error
 	names := pf.orderedNames(entry)
+	if len(tried) > 0 {
+		fresh := make([]string, 0, len(names))
+		stale := make([]string, 0, len(names))
+		for _, n := range names {
+			if _, ok := tried[n]; ok {
+				stale = append(stale, n)
+			} else {
+				fresh = append(fresh, n)
+			}
+		}
+		names = append(fresh, stale...)
+	}
 	for round := 1; round <= proxyDialMaxRounds; round++ {
 		for _, name := range names {
 			p, err := pf.store.GetByName(ctx, name)
