@@ -14,6 +14,10 @@ type Group struct {
 	Description string   `json:"description"`
 	Patterns    []string `json:"patterns"`
 	Icon        string   `json:"icon"` // inline SVG
+	// Dynamic, when set, means Patterns is only a seed: the live list is
+	// fetched from the vendor's published feed and cached by the daemon.
+	// See dynamic.go.
+	Dynamic *DynamicSource `json:"dynamic,omitempty"`
 }
 
 // KnownGroups returns the curated registry. Order is the recommended
@@ -104,6 +108,44 @@ func KnownGroups() []Group {
 				"*.doubleclick.net",
 			},
 			Icon: svgGoogle(),
+		},
+		{
+			Key:         "google-media",
+			DisplayName: "Google Media (Meet / WebRTC)",
+			Description: "Google Meet, WebRTC and QUIC media endpoints. These are dialed by raw IP straight out of the SDP — no DNS query is ever made for them, so the domain patterns in the Google groups cannot catch them. Auto-refreshed from Google's published range list.",
+			// Seed = Google's long-standing service netblocks (the Meet media
+			// ranges Workspace documents are inside these). Replaced wholesale
+			// by the live feed on the first successful refresh. IPv4 only:
+			// v6 egress via the proxy utun isn't guaranteed, same as Telegram.
+			Patterns: []string{
+				"64.233.160.0/19",
+				"66.102.0.0/20",
+				"66.249.80.0/20",
+				"72.14.192.0/18",
+				"74.125.0.0/16",
+				"108.177.0.0/17",
+				"142.250.0.0/15",
+				"172.217.0.0/16",
+				"172.253.0.0/16",
+				"173.194.0.0/16",
+				"209.85.128.0/17",
+				"216.58.192.0/19",
+				"216.239.32.0/19",
+			},
+			Dynamic: &DynamicSource{
+				URL: "https://www.gstatic.com/ipranges/goog.json",
+				// Subtract the GCP-customer ranges: goog.json is a superset
+				// that includes them, and routing every GCP-hosted third
+				// party through the proxy is not what this group is for.
+				ExcludeURL: "https://www.gstatic.com/ipranges/cloud.json",
+				Format:     FormatGoogleIPRanges,
+				IPv4Only:   true,
+				// Google Public DNS. The daemon may be forwarding to 8.8.8.8;
+				// pinning that through the proxy utun would put every upstream
+				// lookup behind the proxy's availability.
+				Exclude: []string{"8.8.8.0/24", "8.8.4.0/24"},
+			},
+			Icon: svgBranded("M", "#00832d", "#ffffff", "#ffffff"),
 		},
 		{
 			Key:         "github-copilot",

@@ -262,6 +262,15 @@ func (a *App) ApplyGroup(key, action, iface string, enabled bool) (ipc.GroupsApp
 	return out, err
 }
 
+// RefreshDynamicGroups re-fetches the vendor feeds behind dynamic groups
+// (Google's published IP ranges) and reconciles any rules those groups own.
+// The daemon also does this on a timer; this is the manual path.
+func (a *App) RefreshDynamicGroups() ([]ipc.DynamicGroupDTO, error) {
+	var out []ipc.DynamicGroupDTO
+	err := a.call(ipc.MethodGroupsRefresh, nil, &out)
+	return out, err
+}
+
 func (a *App) GroupIcon(key string) (ipc.GroupIconDTO, error) {
 	var out ipc.GroupIconDTO
 	err := a.call(ipc.MethodGroupsIcon, ipc.GroupsIconParams{Key: key}, &out)

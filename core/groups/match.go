@@ -11,6 +11,7 @@ var brandColors = map[string]string{
 	"openai":           "#10a37f", // OpenAI green
 	"google-ai":        "#4285f4", // Google blue
 	"google":           "#ea4335", // Google red
+	"google-media":     "#00832d", // Google Meet green
 	"github-copilot":   "#8957e5", // Copilot purple
 	"cursor":           "#b6b6c2", // Cursor neutral (black brand, lightened for dark bg)
 	"perplexity":       "#22b8cd", // Perplexity teal

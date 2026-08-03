@@ -28,7 +28,9 @@ func (d *handlerDeps) resolveGroupPatterns(ctx context.Context, key string) ([]s
 	if g == nil {
 		return nil, fmt.Errorf("unknown group: %s", key)
 	}
-	return g.Patterns, nil
+	// Dynamic groups resolve to their cached live feed once we've fetched
+	// one; the baked-in list is only the seed. See daemon/dynamic_groups.go.
+	return d.effectiveGroupPatterns(ctx, *g), nil
 }
 
 // normalizeGroupPattern lowercases and trims a pattern so comparisons

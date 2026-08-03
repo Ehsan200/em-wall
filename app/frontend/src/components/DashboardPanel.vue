@@ -107,7 +107,7 @@ const PALETTE = [
 // Kept in sync with core/groups/match.go brandColors.
 const BRAND: Record<string, string> = {
   'anthropic': '#d97757', 'openai': '#10a37f', 'google-ai': '#4285f4',
-  'google': '#ea4335', 'github-copilot': '#8957e5', 'cursor': '#b6b6c2',
+  'google': '#ea4335', 'google-media': '#00832d', 'github-copilot': '#8957e5', 'cursor': '#b6b6c2',
   'perplexity': '#22b8cd', 'huggingface': '#ffd21e', 'mistral': '#ff7000',
   'grok': '#e7e9ea', 'x': '#1d9bf0', 'telegram': '#229ed9', 'meta': '#0866ff',
   'youtube': '#ff0000', 'spotify': '#1db954', 'soundcloud': '#ff5500',

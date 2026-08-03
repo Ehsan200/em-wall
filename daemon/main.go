@@ -315,6 +315,16 @@ func main() {
 		subFetch.runSubScheduler(ctx)
 	}()
 
+	// Dynamic group scheduler: re-fetches vendor-published pattern feeds
+	// (Google's IP ranges) and reconciles the rules an applied group owns,
+	// so a vendor adding/removing a prefix doesn't silently leave media
+	// traffic off-proxy.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deps.runDynamicGroupScheduler(ctx)
+	}()
+
 	// Upstream watcher: every 10s, validate that the current upstream
 	// still answers. When the user switches Wi-Fi, sleeps/wakes the
 	// laptop, or toggles a VPN, the DHCP-supplied resolver we picked at

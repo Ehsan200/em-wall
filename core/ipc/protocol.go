@@ -52,7 +52,8 @@ const (
 	MethodGroupsSetEnabled       = "groups.set-enabled"
 	MethodGroupsAdd              = "groups.add"    // create a custom group def
 	MethodGroupsUpdate           = "groups.update" // edit a custom group def
-	MethodGroupsDelete           = "groups.delete" // remove a custom group def
+	MethodGroupsDelete           = "groups.delete"  // remove a custom group def
+	MethodGroupsRefresh          = "groups.refresh" // re-fetch dynamic groups' vendor feeds
 	MethodExport                 = "portable.export"
 	MethodImport                 = "portable.import"
 	MethodProxiesList            = "proxies.list"
@@ -190,6 +191,19 @@ type GroupDTO struct {
 	Color       string   `json:"color"`     // brand accent hex, "" if none
 	Custom      bool     `json:"custom"`    // true = user-created (editable/deletable)
 	RuleCount   int      `json:"ruleCount"` // how many stored rules match this group's patterns
+}
+
+// DynamicGroupDTO reports one dynamic group's refresh outcome: how many
+// prefixes its vendor feed now yields, and how many stored rules that
+// changed. Error is set when the fetch/parse failed — the group then keeps
+// whatever pattern list it had.
+type DynamicGroupDTO struct {
+	Key       string `json:"key"`
+	Patterns  int    `json:"patterns"`
+	Added     int    `json:"added"`
+	Removed   int    `json:"removed"`
+	FetchedAt string `json:"fetchedAt"`
+	Error     string `json:"error,omitempty"`
 }
 
 // GroupsAddParams creates a custom group. Key is optional — the daemon

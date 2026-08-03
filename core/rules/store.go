@@ -143,12 +143,27 @@ func (s *Store) Add(ctx context.Context, r Rule) (Rule, error) {
 	now := time.Now().UTC()
 	r.CreatedAt = now
 	r.UpdatedAt = now
+	// Remember the caller's intent: Create both skips the zero value AND
+	// writes the column default back into the struct, so r.Enabled is true
+	// by the time the insert returns regardless of what was asked for.
+	wantEnabled := r.Enabled
 
 	if err := s.db.WithContext(ctx).Create(&r).Error; err != nil {
 		if isUniqueErr(err) {
 			return Rule{}, ErrDuplicate
 		}
 		return Rule{}, fmt.Errorf("insert rule: %w", err)
+	}
+	// GORM omits a zero-valued field whose column carries a `default:` tag,
+	// so `Enabled: false` on insert would silently land as enabled=true —
+	// i.e. adding a rule (or applying a group) as disabled would still route
+	// traffic. Force the column when the caller asked for disabled.
+	if !wantEnabled {
+		if err := s.db.WithContext(ctx).Model(&Rule{}).
+			Where("id = ?", r.ID).Update("enabled", false).Error; err != nil {
+			return Rule{}, fmt.Errorf("insert rule (disable): %w", err)
+		}
+		r.Enabled = false
 	}
 	return r, nil
 }

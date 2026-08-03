@@ -308,3 +308,25 @@ func TestStore_LogsFilter(t *testing.T) {
 		}
 	}
 }
+
+// A rule added as disabled must stay disabled. GORM skips zero-valued
+// fields on columns with a `default:` tag, which used to flip these to
+// enabled on insert — so "apply this group, disabled" routed traffic.
+func TestAdd_DisabledStaysDisabled(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	added, err := s.Add(ctx, Rule{Pattern: "example.com", Action: ActionBlock, Enabled: false})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if added.Enabled {
+		t.Error("returned rule should be disabled")
+	}
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Enabled {
+		t.Fatalf("stored rule should be disabled, got %+v", list)
+	}
+}

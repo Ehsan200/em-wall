@@ -199,6 +199,16 @@ func parseSOCKSUDPDatagram(d []byte) (*net.UDPAddr, []byte, error) {
 	case socks5ATYPv6:
 		ip = net.IP(d[off : off+16])
 		off += 16
+	case socks5ATYPdomn:
+		l := int(d[off])
+		off++
+		host := string(d[off : off+l])
+		off += l
+		resolved, err := net.ResolveIPAddr("ip", host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve %q: %w", host, err)
+		}
+		ip = resolved.IP
 	default:
 		return nil, nil, fmt.Errorf("bad atyp 0x%02x", atyp)
 	}
@@ -229,11 +239,11 @@ func discardSOCKSAddr(c net.Conn, atyp byte) error {
 	}
 }
 
-// udpRoundTrip sends "ping" to dst through the session and asserts it
-// gets "PING" back.
-func udpRoundTrip(t *testing.T, s *UDPSession, dst *net.UDPAddr) {
+// udpRoundTrip sends "ping" to host:port through the session and asserts
+// it gets "PING" back. host may be an IP literal or a domain name.
+func udpRoundTrip(t *testing.T, s *UDPSession, host string, port int) {
 	t.Helper()
-	if err := s.WriteTo([]byte("ping"), dst); err != nil {
+	if err := s.WriteTo([]byte("ping"), host, port); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
 	_ = s.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -264,7 +274,28 @@ func TestUDP_Associate_EndToEnd(t *testing.T) {
 		t.Fatalf("DialUDPAssociate: %v", err)
 	}
 	defer sess.Close()
-	udpRoundTrip(t, sess, echoAddr)
+	udpRoundTrip(t, sess, echoAddr.IP.String(), echoAddr.Port)
+}
+
+// Fake-IP routed flows relay by hostname, not by the synthetic IP the
+// client dialed — the proxy must receive ATYP=DOMAINNAME and resolve it
+// on its own side.
+func TestUDP_Associate_DomainDestination(t *testing.T) {
+	echo := startUDPEcho(t)
+	echoAddr, err := net.ResolveUDPAddr("udp", echo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port := startSOCKS5UDPProxy(t, "", "")
+
+	sess, err := DialUDPAssociate(context.Background(), Proxy{
+		Protocol: ProtocolSOCKS5, Host: host, Port: port,
+	})
+	if err != nil {
+		t.Fatalf("DialUDPAssociate: %v", err)
+	}
+	defer sess.Close()
+	udpRoundTrip(t, sess, "localhost", echoAddr.Port)
 }
 
 func TestUDP_Associate_Auth(t *testing.T) {
@@ -286,7 +317,7 @@ func TestUDP_Associate_Auth(t *testing.T) {
 		t.Fatalf("DialUDPAssociate with creds: %v", err)
 	}
 	defer sess.Close()
-	udpRoundTrip(t, sess, echoAddr)
+	udpRoundTrip(t, sess, echoAddr.IP.String(), echoAddr.Port)
 }
 
 func TestUDP_RejectsHTTPProxy(t *testing.T) {

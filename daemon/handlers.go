@@ -380,13 +380,14 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		registry := groups.KnownGroups()
 		out := make([]ipc.GroupDTO, 0, len(registry))
 		for _, g := range registry {
+			pats := d.effectiveGroupPatterns(ctx, g)
 			out = append(out, ipc.GroupDTO{
 				Key:         g.Key,
 				DisplayName: g.DisplayName,
 				Description: g.Description,
-				Patterns:    g.Patterns,
+				Patterns:    pats,
 				Color:       groups.BrandColor(g.Key),
-				RuleCount:   countFor(g.Patterns),
+				RuleCount:   countFor(pats),
 			})
 		}
 		// Append user-created groups after the curated registry.
@@ -541,6 +542,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		_ = d.engine.Reload(ctx)
 		return ipc.GroupsBulkResult{Affected: len(touched), RuleIDs: touched}, nil
+	})
+
+	// Force a re-fetch of every dynamic group's vendor feed (Google's
+	// published IP ranges today). The scheduler does this on its own
+	// interval; this is the "refresh now" button's path.
+	s.Handle(ipc.MethodGroupsRefresh, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return d.refreshAllDynamicGroups(ctx), nil
 	})
 
 	s.Handle(ipc.MethodGroupsIcon, func(ctx context.Context, raw json.RawMessage) (any, error) {

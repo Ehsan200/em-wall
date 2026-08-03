@@ -303,14 +303,18 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 		}
 	}
 
+	// Relay to the ORIGINAL hostname, not local.IP — for a fake-IP routed
+	// name local.IP is a 198.18.x.x handle that only means something on this
+	// machine, so a datagram addressed to it dies at the proxy's egress.
+	target := entry.Hostname
+	if target == "" {
+		target = local.IP.String()
+	}
+
 	dctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
 	session, used, err := pf.associateUDP(dctx, entry)
 	cancel()
 	if session == nil {
-		target := entry.Hostname
-		if target == "" {
-			target = local.IP.String()
-		}
 		pf.logger.Printf("proxytun/udp: %s:%d — no usable proxy: %v", target, local.Port, err)
 		return
 	}
@@ -319,7 +323,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	stopKeepalive := pf.keepRouteAlive(local.IP)
 	defer stopKeepalive()
 
-	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", local.IP, local.Port, used)
+	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", target, local.Port, used)
 
 	// Single idempotent teardown. Closing both ends unblocks every pump's
 	// blocking Read so they error out and exit — no per-read deadlines.
@@ -359,13 +363,12 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	go func() {
 		defer wg.Done()
 		defer shutdown()
-		dst := &net.UDPAddr{IP: local.IP, Port: local.Port}
 		buf := make([]byte, 64*1024)
 		for {
 			n, rerr := conn.Read(buf)
 			if n > 0 {
 				lastActive.Store(time.Now().UnixNano())
-				if werr := session.WriteTo(buf[:n], dst); werr != nil {
+				if werr := session.WriteTo(buf[:n], target, local.Port); werr != nil {
 					return
 				}
 				sentBytes.Add(int64(n))

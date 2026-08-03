@@ -98,12 +98,28 @@ func DialUDPAssociate(ctx context.Context, p Proxy) (*UDPSession, error) {
 	return &UDPSession{ctrl: ctrl, relay: relay}, nil
 }
 
-// WriteTo sends payload to dst through the relay, prefixed with the
-// SOCKS5 UDP request header (RSV=0, FRAG=0).
-func (s *UDPSession) WriteTo(payload []byte, dst *net.UDPAddr) error {
-	buf := make([]byte, 0, 3+1+len(dst.IP)+2+len(payload))
+// WriteTo sends payload to (host, port) through the relay, prefixed with
+// the SOCKS5 UDP request header (RSV=0, FRAG=0).
+//
+// host may be a domain name or an IP literal. Domains are encoded as
+// ATYP=DOMAINNAME so the proxy resolves them at its own egress — this is
+// required for fake-IP routing: the 198.18.x.x address the DNS layer handed
+// the client is a local routing handle with no meaning off-box, so relaying
+// it as the destination sends every datagram into a black hole.
+func (s *UDPSession) WriteTo(payload []byte, host string, port int) error {
+	if host == "" {
+		return fmt.Errorf("socks5 udp: empty destination host")
+	}
+	if len(host) > 255 {
+		return fmt.Errorf("socks5 udp: destination host too long (%d bytes)", len(host))
+	}
+	buf := make([]byte, 0, 3+1+1+len(host)+2+len(payload))
 	buf = append(buf, 0x00, 0x00, 0x00) // RSV(2) + FRAG(1)
-	buf = appendSOCKSAddr(buf, dst.IP, "", dst.Port)
+	if ip := net.ParseIP(host); ip != nil {
+		buf = appendSOCKSAddr(buf, ip, "", port)
+	} else {
+		buf = appendSOCKSAddr(buf, nil, host, port)
+	}
 	buf = append(buf, payload...)
 	_, err := s.relay.Write(buf)
 	return err
