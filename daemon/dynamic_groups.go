@@ -31,12 +31,18 @@ const (
 	dynGroupSettingPrefix = "dynamic_group:"
 
 	dynGroupFetchTimeout = 30 * time.Second
+	// Wait before the first fetch. At boot the daemon is up seconds before
+	// the network settles and before the xray inbounds are listening, so an
+	// immediate attempt loses both the direct fetch AND every via-proxy
+	// fallback (connection refused on a port nothing has bound yet).
+	dynGroupStartDelay = 90 * time.Second
 	// How often the scheduler wakes to see whether any group is due. Due-ness
-	// itself is per-group (DynamicSource.EffectiveInterval).
-	dynGroupSchedTick = 30 * time.Minute
+	// itself is per-group (DynamicSource.EffectiveInterval), so a short tick
+	// costs one settings read — it exists so a failed fetch retries soon.
+	dynGroupSchedTick = 5 * time.Minute
 	// After a failed fetch, retry sooner than the full interval — a failure
 	// at boot usually just means the network wasn't up yet.
-	dynGroupRetryAfter = 15 * time.Minute
+	dynGroupRetryAfter = 10 * time.Minute
 	// Cap the via-proxy fallback attempts when a direct fetch fails.
 	dynGroupMaxFallback = 4
 )
@@ -102,6 +108,11 @@ func (d *handlerDeps) effectiveGroupPatterns(ctx context.Context, g groups.Group
 // runDynamicGroupScheduler refreshes due dynamic groups on start and then on
 // a ticker until ctx is cancelled.
 func (d *handlerDeps) runDynamicGroupScheduler(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(dynGroupStartDelay):
+	}
 	d.refreshDueDynamicGroups(ctx)
 	t := time.NewTicker(dynGroupSchedTick)
 	defer t.Stop()

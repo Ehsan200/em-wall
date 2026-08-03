@@ -323,6 +323,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	stopKeepalive := pf.keepRouteAlive(local.IP)
 	defer stopKeepalive()
 
+	startedAt := time.Now()
 	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", target, local.Port, used)
 
 	// Single idempotent teardown. Closing both ends unblocks every pump's
@@ -431,6 +432,35 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	wg.Wait()
 	close(stop)
 	flush() // final delta after teardown
+
+	// Per-flow summary. "Flow opened" says nothing about whether the relay
+	// actually carried anything — a black-holed QUIC flow opens fine, sends,
+	// and never hears back. recv=0 after a real send is exactly that failure
+	// signature, so it's called out rather than left to be eyeballed.
+	sent, recv := sentBytes.Load(), recvBytes.Load()
+	dur := time.Since(startedAt).Round(time.Millisecond)
+	if sent > 0 && recv == 0 {
+		pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, RECEIVED NOTHING in %s (relay black hole?)",
+			target, local.Port, used, humanBytes(sent), dur)
+		return
+	}
+	pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, recv %s in %s",
+		target, local.Port, used, humanBytes(sent), humanBytes(recv), dur)
+}
+
+// humanBytes renders a byte count for log lines. Binary units — these are
+// transfer sizes, not disk marketing.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
 }
 
 // associateUDP walks the rule's proxy binding and returns the first
