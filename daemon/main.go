@@ -164,7 +164,6 @@ func main() {
 		xrayStore:     xrayStore,
 		xraySup:       xraySup,
 		subFetch:      subFetch,
-		xrayDataDir:   *xrayDataDir,
 		engine:        engine,
 		router:        router,
 		pf:            pf,
@@ -491,7 +490,6 @@ type handlerDeps struct {
 	xrayStore   *xray.Store
 	xraySup     *xraySupervisor
 	subFetch    *subFetcher
-	xrayDataDir string // path to dir containing geoip.dat + geosite.dat
 	engine      *decision.Engine
 	router      *routing.Manager
 	pf          *pfctl.Manager

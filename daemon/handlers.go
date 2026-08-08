@@ -942,11 +942,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		elapsed := r.Latency
 
-		// Determine exit country. Try geoip.dat lookup on the server's
-		// configured address first (no network needed). Fall back to
-		// an HTTP probe through the same SOCKS5 inbound, which returns
-		// the actual public exit IP from ip-api.com.
-		exitIP, country, region, city := xrayExitCountry(ctx, d.xrayDataDir, entry.Outbound, dialer)
+		// Exit identity comes from a live probe through the entry's own
+		// SOCKS5 inbound and nothing else: ip-api.com sees the real public
+		// exit IP after the whole chain. There is deliberately no fallback
+		// to the configured server address — it is only the first hop, it
+		// can be a CDN hostname, and resolving it locally can hand back one
+		// of our own FakeIPs. Unknown is reported as empty, never guessed.
+		exitIP, country, region, city, _ := probeExitIPVia(ctx, proxyDialContext(dialer))
 
 		return ipc.XrayTestResult{
 			OK:        true,
@@ -1418,77 +1420,3 @@ func (d *handlerDeps) rulesReferencingXray(ctx context.Context, name string) ([]
 	return ids, nil
 }
 
-// xrayExitCountry determines the exit country for an xray entry.
-//
-// Primary path: HTTP GET to ip-api.com through the entry's SOCKS5 inbound.
-// ip-api.com sees the actual public exit IP (not just the configured server
-// address), so this gives the correct country even with multi-hop chains.
-//
-// Fallback: resolve the configured server address and look it up in the
-// local geoip.dat (offline, no extra round-trip).
-func xrayExitCountry(ctx context.Context, dataDir, outboundJSON string, dialer proxy.Dialer) (exitIP, country, region, city string) {
-	// Primary: probe real exit IP through the proxy. ip-api.com sees the
-	// actual public exit IP, not just the configured server address, so
-	// country/region/city reflect the real exit location. Shares the same
-	// probe path as the per-rule / default-route exit-IP lookups.
-	if ip, cc, region, city, ok := probeExitIPVia(ctx, proxyDialContext(dialer)); ok {
-		return ip, cc, region, city
-	}
-
-	// Fallback: geoip.dat lookup on the configured server address.
-	// City/region are not available in this path.
-	addr := xrayServerAddr(outboundJSON)
-	if addr == "" {
-		return "", "", "", ""
-	}
-	rctx, cancel2 := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel2()
-	ip := resolveIP(rctx, addr)
-	if ip == nil {
-		return "", "", "", ""
-	}
-	cc := lookupCountry(dataDir+"/geoip.dat", ip)
-	return ip.String(), cc, "", ""
-}
-
-// xrayServerAddr extracts the server address from a raw xray outbound
-// JSON block. Handles vless/vmess (settings.vnext) and
-// trojan/shadowsocks (settings.servers).
-func xrayServerAddr(outboundJSON string) string {
-	var raw struct {
-		Settings struct {
-			Vnext []struct {
-				Address string `json:"address"`
-			} `json:"vnext"`
-			Servers []struct {
-				Address string `json:"address"`
-			} `json:"servers"`
-		} `json:"settings"`
-	}
-	if err := json.Unmarshal([]byte(outboundJSON), &raw); err != nil {
-		return ""
-	}
-	if len(raw.Settings.Vnext) > 0 {
-		return raw.Settings.Vnext[0].Address
-	}
-	if len(raw.Settings.Servers) > 0 {
-		return raw.Settings.Servers[0].Address
-	}
-	return ""
-}
-
-// resolveIP resolves a hostname or IP string to a net.IP. Returns nil
-// if the string is empty, resolution fails, or the context expires.
-func resolveIP(ctx context.Context, host string) net.IP {
-	if host == "" {
-		return nil
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip
-	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil || len(addrs) == 0 {
-		return nil
-	}
-	return addrs[0].IP
-}

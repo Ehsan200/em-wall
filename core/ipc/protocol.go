@@ -519,9 +519,11 @@ type XrayTestParams struct {
 
 // XrayTestResult mirrors ProxiesTestResult. OK=true means the
 // connect+handshake completed; Message is human-readable (success
-// path includes the round-trip duration). Country and ExitIP are
-// populated on success: Country from the local geoip.dat lookup on
-// the server's IP, with ip-api.com (through the proxy) as fallback.
+// path includes the round-trip duration). ExitIP/Country/Region/City
+// come solely from an ip-api.com probe dialed through the entry's own
+// SOCKS5 inbound, so they describe the real exit. There is no fallback:
+// if the probe fails they are all empty, never the configured server
+// address (that is just the first hop, and may resolve to a FakeIP).
 type XrayTestResult struct {
 	OK        bool   `json:"ok"`
 	Message   string `json:"message"`
