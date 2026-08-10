@@ -419,6 +419,18 @@ func KnownGroups() []Group {
 			Icon: svgNotion(),
 		},
 		{
+			Key:         "figma",
+			DisplayName: "Figma",
+			Description: "Figma design/FigJam app, desktop client, asset CDN, published Sites",
+			Patterns: []string{
+				"*.figma.com",
+				"*.figmausercontent.com", // file thumbnails, exported assets
+				"*.figma.site",           // Figma Sites publishing domain
+				"*.figma-alpha-api.s3.us-west-2.amazonaws.com",
+			},
+			Icon: svgFigma(),
+		},
+		{
 			Key:         "telemetry-common",
 			DisplayName: "Common telemetry / analytics",
 			Description: "Sentry, Mixpanel, Segment, Amplitude, Datadog browser",
@@ -630,6 +642,25 @@ func svgNotion() string {
 		`<rect x="39" y="17" width="6" height="30"/>` +
 		// diagonal connecting the two stems
 		`<path d="M19 17 L27 17 L45 41 L45 47 L37 47 L19 23 Z"/>` +
+		`</g></svg>`
+}
+
+// svgFigma: white badge with the five-shape Figma mark (38x57 source
+// paths, scaled and centred inside the 64x64 badge).
+func svgFigma() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#e6e6e6" stroke-width="1.5"/>` +
+		`<g transform="translate(18.7,12) scale(0.7)">` +
+		// mid-right circle
+		`<path fill="#1abcfe" d="M19 28.5a9.5 9.5 0 1 1 19 0 9.5 9.5 0 0 1-19 0z"/>` +
+		// bottom-left
+		`<path fill="#0acf83" d="M0 47.5A9.5 9.5 0 0 1 9.5 38H19v9.5a9.5 9.5 0 1 1-19 0z"/>` +
+		// top-right
+		`<path fill="#ff7262" d="M19 0v19h9.5a9.5 9.5 0 1 0 0-19H19z"/>` +
+		// top-left
+		`<path fill="#f24e1e" d="M0 9.5A9.5 9.5 0 0 0 9.5 19H19V0H9.5A9.5 9.5 0 0 0 0 9.5z"/>` +
+		// mid-left
+		`<path fill="#a259ff" d="M0 28.5A9.5 9.5 0 0 0 9.5 38H19V19H9.5A9.5 9.5 0 0 0 0 28.5z"/>` +
 		`</g></svg>`
 }
 
