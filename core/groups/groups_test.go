@@ -68,12 +68,31 @@ func TestGoogleAI_CoversGeminiBackends(t *testing.T) {
 		return false
 	}
 	mustCover := []string{
-		"signaler-pa.clients6.google.com",       // the reported 403
-		"ogads-pa.clients6.google.com",          // the reported 403
+		"signaler-pa.clients6.google.com",         // the reported 403
+		"ogads-pa.clients6.google.com",            // the reported 403
 		"alkalimakersuite-pa.clients6.google.com", // AI Studio backend
 		"gemini.google.com",
 		"generativelanguage.googleapis.com",
 		"proactivebackend-pa.googleapis.com",
+		// Labs / non-google.com product surfaces. Any experiment on
+		// withgoogle.com or on the .google TLD must be covered without
+		// naming the product.
+		"stitch.withgoogle.com",
+		"aitestkitchen.withgoogle.com",
+		"opal.withgoogle.com",
+		"labs.google",
+		"jules.google",
+		"notebooklm.google",
+		"flow.google",
+		"opal.google",
+		"deepmind.google",
+		"illuminate.google.com",
+		// Shared app-shell / auth backends they all call.
+		"www.gstatic.com",
+		"accounts.google.com",
+		"oauth2.googleapis.com",
+		"identitytoolkit.googleapis.com",
+		"aisandbox-pa.googleapis.com",
 	}
 	for _, h := range mustCover {
 		if !covered(h) {

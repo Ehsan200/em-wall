@@ -54,7 +54,7 @@ func KnownGroups() []Group {
 		{
 			Key:         "google-ai",
 			DisplayName: "Google AI",
-			Description: "Gemini, NotebookLM, AI Studio, AntiGravity + the Google backend hosts they call",
+			Description: "Gemini, NotebookLM, AI Studio, AntiGravity, every Google Labs experiment + the shared Google backends they call",
 			Patterns: []string{
 				// Product front-ends.
 				"*.gemini.google.com",
@@ -72,6 +72,28 @@ func KnownGroups() []Group {
 				"apis.google.com",
 				"ogs.google.com",
 				"*.googleusercontent.com",
+				// Google ships its AI products on two surfaces that are not
+				// under google.com, so none of the patterns above reach them:
+				//   withgoogle.com — every Labs/experiment front-end
+				//   the .google TLD — Google's own TLD, so a bare wildcard is
+				//     safe here and covers each new product without a code
+				//     change. Lowest specificity of any pattern in the group,
+				//     so a hand-written rule always outranks it.
+				"*.withgoogle.com",
+				"*.google",
+				// Labs tools that kept a google.com host instead.
+				"illuminate.google.com",
+				// Shared backends every one of these web apps needs. Without
+				// them the front-end is proxied but its app shell, sign-in or
+				// API calls are not, so the page half-loads or login loops.
+				"accounts.google.com",            // sign-in / OAuth consent
+				"oauth2.googleapis.com",          // token exchange + refresh
+				"identitytoolkit.googleapis.com", // Firebase auth (Labs apps)
+				"securetoken.googleapis.com",     // Firebase token refresh
+				"waa-pa.googleapis.com",          // abuse/attestation gate
+				"aisandbox-pa.googleapis.com",    // Labs model backend
+				"*.gstatic.com",                  // app-shell JS/CSS/fonts
+				"fonts.googleapis.com",
 			},
 			Icon: svgBranded("G", "#4285f4", "#34a853", "#ffffff"),
 		},
@@ -92,7 +114,8 @@ func KnownGroups() []Group {
 				"*.gvt1.com",
 				"*.gvt2.com",
 				"*.gvt3.com",
-				"*.goog", // pki.goog, *.gke.goog
+				"*.goog",   // pki.goog, *.gke.goog
+				"*.google", // Google's own TLD: blog.google, jules.google, …
 				"*.googlesource.com",
 				"*.recaptcha.net",
 				// Shorteners / brand domains.
