@@ -93,6 +93,11 @@ func TestGoogleAI_CoversGeminiBackends(t *testing.T) {
 		"oauth2.googleapis.com",
 		"identitytoolkit.googleapis.com",
 		"aisandbox-pa.googleapis.com",
+		// Hosting surfaces the Labs experiments ship on.
+		"stitch-prod.appspot.com",
+		"opal-labs.web.app",
+		"aistudio-x.firebaseapp.com",
+		"lh3.usercontent.goog",
 	}
 	for _, h := range mustCover {
 		if !covered(h) {
@@ -137,6 +142,14 @@ func TestGoogle_CoversAllOfGoogle(t *testing.T) {
 		"accounts.google.com",
 		"lh3.googleusercontent.com",
 		"fonts.gstatic.com",
+		"myapp.appspot.com",
+		"myapp.web.app",
+		"myapp.firebaseapp.com",
+		"myapp-123.cloudfunctions.net",
+		"myservice-abc.run.app",
+		"lh3.usercontent.goog",
+		"blogspot.com",
+		"www.waze.com",
 	} {
 		if !covered(h) {
 			t.Errorf("google group must cover %q but does not", h)

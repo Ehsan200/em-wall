@@ -94,6 +94,17 @@ func KnownGroups() []Group {
 				"aisandbox-pa.googleapis.com",    // Labs model backend
 				"*.gstatic.com",                  // app-shell JS/CSS/fonts
 				"fonts.googleapis.com",
+				// Google's own hosting surfaces. Labs experiments and the
+				// AI product front-ends are served off App Engine / Firebase
+				// Hosting, and Gemini/AI Studio serve uploads + generated
+				// media from usercontent.goog. These are shared GCP hosting
+				// domains, so enabling this group also routes third parties
+				// that happen to sit on them — accepted: without them the
+				// experiments load half their assets off the default route.
+				"*.appspot.com",
+				"*.web.app",
+				"*.firebaseapp.com",
+				"*.usercontent.goog",
 			},
 			Icon: svgBranded("G", "#4285f4", "#34a853", "#ffffff"),
 		},
@@ -118,10 +129,35 @@ func KnownGroups() []Group {
 				"*.google", // Google's own TLD: blog.google, jules.google, …
 				"*.googlesource.com",
 				"*.recaptcha.net",
+				"*.usercontent.goog", // Gemini/AI Studio uploads + generated media
+				// Google-run hosting: App Engine, Firebase Hosting, Cloud
+				// Functions, Cloud Run. Shared with GCP customers, so this
+				// pulls some third-party apps in too — the price of covering
+				// every Google product that ships on them.
+				"*.appspot.com",
+				"*.web.app",
+				"*.firebaseapp.com",
+				"*.firebaseio.com",
+				"*.firebasestorage.app",
+				"*.cloudfunctions.net",
+				"*.run.app",
+				"*.firebase.com",
+				"*.firebase.google.com", // redundant with *.google.com, kept explicit
 				// Shorteners / brand domains.
 				"*.withgoogle.com",
 				"*.goo.gl",
 				"*.g.co",
+				"*.abc.xyz", // Alphabet
+				// Other Google-owned properties that are not under google.com.
+				"*.blogger.com",
+				"*.blogspot.com",
+				"*.android.com",
+				"*.chromium.org",
+				"*.waze.com",
+				"*.fitbit.com",
+				"*.nest.com",
+				"*.googledomains.com",
+				"*.gmodules.com",
 				// Analytics / tag / ads (Google-owned).
 				"*.google-analytics.com",
 				"*.googletagmanager.com",
@@ -129,6 +165,8 @@ func KnownGroups() []Group {
 				"*.googlesyndication.com",
 				"*.googleadservices.com",
 				"*.doubleclick.net",
+				"*.2mdn.net",
+				"*.admob.com",
 			},
 			Icon: svgGoogle(),
 		},
