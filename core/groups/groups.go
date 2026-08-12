@@ -447,6 +447,155 @@ func KnownGroups() []Group {
 			},
 			Icon: svgHomebrew(),
 		},
+		// Developer package registries / toolchains. These sit before
+		// android-studio deliberately: android-studio also lists the Maven and
+		// Gradle hosts, and GroupForKey takes the first match, so the more
+		// specific "maven" group should own repo1.maven.org / gradle.org while
+		// android-studio keeps the AOSP/SDK hosts.
+		{
+			Key:         "python",
+			DisplayName: "Python / pip",
+			Description: "PyPI + the wheel CDN, python.org downloads, uv/ruff, conda/Anaconda",
+			Patterns: []string{
+				"*.pypi.org",
+				"*.pythonhosted.org", // files.pythonhosted.org — where wheels/sdists actually download from
+				"*.python.org",
+				"*.pypa.io",
+				"*.astral.sh", // uv, ruff
+				"*.anaconda.com",
+				"*.anaconda.org",
+				"*.conda.io",
+				"*.continuum.io",
+				"*.readthedocs.io",
+				"*.readthedocs.org",
+			},
+			Icon: svgPython(),
+		},
+		{
+			Key:         "golang",
+			DisplayName: "Go",
+			Description: "Module proxy + checksum DB, go.dev / pkg.go.dev, toolchain downloads, common GOPROXY mirrors",
+			Patterns: []string{
+				"*.golang.org", // proxy.golang.org, sum.golang.org, index.golang.org
+				"*.go.dev",     // go.dev, pkg.go.dev
+				"*.golang.dev",
+				"*.gopkg.in",
+				"*.goproxy.io",
+				"*.goproxy.cn",
+				"dl.google.com", // go.dev/dl redirects the tarballs/pkgs here
+			},
+			Icon: svgGo(),
+		},
+		{
+			Key:         "maven",
+			DisplayName: "Maven / Gradle (JVM)",
+			Description: "Maven Central, Sonatype, Gradle + plugin portal, JitPack, JDK distributions",
+			Patterns: []string{
+				"*.maven.org", // repo1.maven.org
+				"*.maven.apache.org",
+				"*.mvnrepository.com",
+				"*.sonatype.com",
+				"*.sonatype.org", // oss.sonatype.org, s01.oss.sonatype.org
+				"*.gradle.org",   // services.gradle.org, plugins.gradle.org
+				"*.gradle.com",
+				"*.jitpack.io",
+				"*.clojars.org",
+				"maven.google.com",
+				// JDK distributions the build tools fetch toolchains from.
+				"*.adoptium.net",
+				"*.adoptopenjdk.net",
+				"*.azul.com",
+			},
+			Icon: svgBranded("Mv", "#c71a36", "#ffffff", "#ffffff"),
+		},
+		{
+			Key:         "npm",
+			DisplayName: "npm / Node.js",
+			Description: "npm registry, Node/Yarn/pnpm/Bun/Deno downloads, jsDelivr + unpkg CDNs",
+			Patterns: []string{
+				"*.npmjs.org", // registry.npmjs.org
+				"*.npmjs.com",
+				"*.nodejs.org",
+				"*.nodesource.com",
+				"*.yarnpkg.com",
+				"*.pnpm.io",
+				"*.bun.sh",
+				"*.bun.com",
+				"*.deno.land",
+				"*.deno.com",
+				"*.jsr.io",
+				"*.unpkg.com",
+				"*.jsdelivr.net",
+				"*.jsdelivr.com",
+				"*.esm.sh",
+				"cdnjs.cloudflare.com",
+			},
+			Icon: svgNpm(),
+		},
+		{
+			Key:         "rust",
+			DisplayName: "Rust / crates.io",
+			Description: "crates.io registry + index, rustup toolchains, docs.rs",
+			Patterns: []string{
+				"*.crates.io", // static.crates.io, index.crates.io
+				"*.rust-lang.org",
+				"*.rustup.rs",
+				"*.docs.rs",
+				"*.rs.dev",
+			},
+			Icon: svgRust(),
+		},
+		{
+			Key:         "ruby",
+			DisplayName: "Ruby / RubyGems",
+			Description: "RubyGems registry, ruby-lang downloads, Bundler",
+			Patterns: []string{
+				"*.rubygems.org",
+				"*.ruby-lang.org",
+				"*.bundler.io",
+				"*.rvm.io",
+				"*.ruby-china.com",
+			},
+			Icon: svgBranded("Rb", "#cc342d", "#ffffff", "#ffffff"),
+		},
+		{
+			Key:         "dotnet",
+			DisplayName: ".NET / NuGet",
+			Description: "NuGet registry, .NET SDK/runtime downloads, dotnet.microsoft.com",
+			Patterns: []string{
+				"*.nuget.org",
+				"*.dot.net",
+				"dotnet.microsoft.com",
+				"builds.dotnet.microsoft.com",
+				"dotnetcli.azureedge.net",
+				"dotnetbuilds.azureedge.net",
+				"dotnetcli.blob.core.windows.net",
+			},
+			Icon: svgBranded(".N", "#512bd4", "#ffffff", "#ffffff"),
+		},
+		{
+			Key:         "php",
+			DisplayName: "PHP / Composer",
+			Description: "Packagist registry, Composer installer, php.net downloads",
+			Patterns: []string{
+				"*.packagist.org",
+				"*.getcomposer.org",
+				"*.php.net",
+			},
+			Icon: svgBranded("PHP", "#777bb4", "#ffffff", "#ffffff"),
+		},
+		{
+			Key:         "hashicorp",
+			DisplayName: "HashiCorp / Terraform",
+			Description: "Terraform + provider registry, releases.hashicorp.com, Vault/Consul/Nomad",
+			Patterns: []string{
+				"*.hashicorp.com",
+				"*.terraform.io",
+				"*.vagrantup.com",
+				"*.vagrantcloud.com",
+			},
+			Icon: svgBranded("Tf", "#7b42bc", "#ffffff", "#ffffff"),
+		},
 		{
 			Key:         "android-studio",
 			DisplayName: "Android Studio",
@@ -643,6 +792,70 @@ func svgHomebrew() string {
 		`<rect x="20" y="38" width="18" height="2"/>` +
 		`<rect x="20" y="44" width="18" height="2"/>` +
 		`</g></svg>`
+}
+
+// svgPython: navy badge with the two interlocking python bodies (blue on
+// top-left, yellow on bottom-right) and their eye dots.
+func svgPython() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#2b3d4f"/>` +
+		// upper-left snake (blue)
+		`<path fill="#3776ab" d="M31.8 11c-4.4 0-8 1.6-8 5.4v4.4h8.4v1.5H18.6c-3.6 0-6.6 2.6-6.6 8.1s3 8.2 6.6 8.2h3.3v-5.3c0-3.9 3.3-7 7.2-7h9.6c3.2 0 5.8-2.6 5.8-5.8v-4.1C44.5 12.6 40.9 11 36.5 11h-4.7zm-4.5 3.6a1.9 1.9 0 1 1 0 3.8 1.9 1.9 0 0 1 0-3.8z"/>` +
+		// lower-right snake (yellow)
+		`<path fill="#ffd43b" d="M32.2 53c4.4 0 8-1.6 8-5.4v-4.4h-8.4v-1.5h13.6c3.6 0 6.6-2.6 6.6-8.1s-3-8.2-6.6-8.2h-3.3v5.3c0 3.9-3.3 7-7.2 7h-9.6c-3.2 0-5.8 2.6-5.8 5.8v4.1C19.5 51.4 23.1 53 27.5 53h4.7zm4.5-3.6a1.9 1.9 0 1 1 0-3.8 1.9 1.9 0 0 1 0 3.8z"/>` +
+		`</svg>`
+}
+
+// svgGo: cyan badge with the Go "GO" wordmark and the gopher's speed lines.
+func svgGo() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#00add8"/>` +
+		// speed lines to the left of the wordmark
+		`<g fill="#ffffff" opacity="0.85">` +
+		`<rect x="8" y="24" width="10" height="3" rx="1.5"/>` +
+		`<rect x="6" y="31" width="12" height="3" rx="1.5"/>` +
+		`<rect x="9" y="38" width="9" height="3" rx="1.5"/>` +
+		`</g>` +
+		`<text x="38" y="41" font-family="Helvetica,Arial,sans-serif" font-size="26" font-weight="800" ` +
+		`text-anchor="middle" fill="#ffffff">GO</text></svg>`
+}
+
+// svgNpm: npm red badge with the white lowercase "npm" wordmark on a
+// white box, matching the registry's block logo.
+func svgNpm() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#cb3837"/>` +
+		`<rect x="10" y="22" width="44" height="20" fill="#ffffff"/>` +
+		// three glyph columns cut out of the white box in npm red
+		`<g fill="#cb3837">` +
+		`<rect x="13" y="25" width="3" height="17"/>` +
+		`<rect x="19" y="25" width="3" height="14"/>` +
+		`<rect x="25" y="25" width="3" height="17"/>` +
+		`<rect x="31" y="25" width="3" height="14"/>` +
+		`<rect x="37" y="25" width="3" height="17"/>` +
+		`<rect x="43" y="25" width="3" height="14"/>` +
+		`<rect x="49" y="25" width="2" height="14"/>` +
+		`</g></svg>`
+}
+
+// svgRust: dark badge with the Rust gear ring and the "R" in the centre.
+func svgRust() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#1c1917"/>` +
+		// gear teeth
+		`<g fill="#dea584">` +
+		`<rect x="30" y="8" width="4" height="6" rx="1"/>` +
+		`<rect x="30" y="50" width="4" height="6" rx="1"/>` +
+		`<rect x="8" y="30" width="6" height="4" rx="1"/>` +
+		`<rect x="50" y="30" width="6" height="4" rx="1"/>` +
+		`<rect x="14" y="14" width="4" height="6" rx="1" transform="rotate(-45 16 17)"/>` +
+		`<rect x="46" y="14" width="4" height="6" rx="1" transform="rotate(45 48 17)"/>` +
+		`<rect x="14" y="44" width="4" height="6" rx="1" transform="rotate(45 16 47)"/>` +
+		`<rect x="46" y="44" width="4" height="6" rx="1" transform="rotate(-45 48 47)"/>` +
+		`</g>` +
+		`<circle cx="32" cy="32" r="17" fill="none" stroke="#dea584" stroke-width="3"/>` +
+		`<text x="32" y="40" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="800" ` +
+		`text-anchor="middle" fill="#dea584">R</text></svg>`
 }
 
 // svgX: black badge with the white X wordmark (post-rebrand Twitter logo).

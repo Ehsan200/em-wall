@@ -171,6 +171,49 @@ const filteredGroups = computed<ipc.GroupDTO[]>(() => {
 const filteredCurated = computed<ipc.GroupDTO[]>(() => filteredGroups.value.filter(g => !g.custom));
 const filteredCustom = computed<ipc.GroupDTO[]>(() => filteredGroups.value.filter(g => g.custom));
 
+// Curated groups bucketed into collapsible sections. One flat wall of ~40
+// cards stopped being scannable, so the daemon labels each group with a
+// display category (core/groups/category.go). A daemon predating that field
+// sends "" — everything then lands in a single "Services" bucket, i.e. the
+// old behaviour, instead of vanishing.
+const CATEGORY_ORDER = ['AI', 'Developer', 'Platforms', 'Social', 'Media', 'Productivity', 'Other'];
+const UNCATEGORIZED = 'Services';
+
+type CuratedSection = { name: string; groups: ipc.GroupDTO[] };
+
+const curatedSections = computed<CuratedSection[]>(() => {
+  const byCat = new Map<string, ipc.GroupDTO[]>();
+  for (const g of filteredCurated.value) {
+    const c = g.category || UNCATEGORIZED;
+    const list = byCat.get(c) ?? [];
+    list.push(g);
+    byCat.set(c, list);
+  }
+  const out: CuratedSection[] = [];
+  for (const c of CATEGORY_ORDER) {
+    const list = byCat.get(c);
+    if (list?.length) { out.push({ name: c, groups: list }); byCat.delete(c); }
+  }
+  // A category this build doesn't know about (newer daemon) still shows,
+  // appended after the known ones in first-seen order.
+  for (const [c, list] of byCat) out.push({ name: c, groups: list });
+  return out;
+});
+
+// Which category sections are open. AI + Developer start open (the common
+// reasons to reach for a group); an active search force-opens every section
+// that still has matches so results are never hidden behind a collapsed row.
+const openCats = ref<Set<string>>(new Set(['AI', 'Developer', UNCATEGORIZED]));
+function catOpen(name: string): boolean {
+  return !!search.value.trim() || openCats.value.has(name);
+}
+function toggleCat(name: string) {
+  if (search.value.trim()) return; // sections are forced open while searching
+  const next = new Set(openCats.value);
+  if (next.has(name)) next.delete(name); else next.add(name);
+  openCats.value = next;
+}
+
 // Custom-group create/edit modal. null = closed; {group:null} = create.
 const customGroupForm = ref<{ group: ipc.GroupDTO | null } | null>(null);
 function openNewGroup() { customGroupForm.value = { group: null }; }
@@ -908,15 +951,25 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
       <div class="muted" style="font-size: 11px; margin-bottom: 8px">
         Quick add — one click creates rules for every domain of a service:
       </div>
-      <div class="row" style="gap: 6px; flex-wrap: wrap">
-        <button v-for="g in filteredCurated" :key="g.key"
-                class="group-card"
-                @click="openGroupForm(g)"
-                :title="g.description + '\n\n' + g.patterns.join('\n')">
-          <GroupIcon :group-key="g.key" :size="20" />
-          <span class="group-name">{{ g.displayName }}</span>
-          <span class="muted" style="font-size: 10px">{{ g.patterns.length }} domain{{ g.patterns.length === 1 ? '' : 's' }}</span>
-        </button>
+      <div class="col" style="gap: 4px">
+        <div v-for="sec in curatedSections" :key="sec.name" class="cat-section">
+          <button class="cat-header" @click="toggleCat(sec.name)"
+                  :title="search.trim() ? 'Sections stay open while searching' : (catOpen(sec.name) ? 'Collapse' : 'Expand')">
+            <span class="cat-caret">{{ catOpen(sec.name) ? '▾' : '▸' }}</span>
+            <span class="cat-name">{{ sec.name }}</span>
+            <span class="muted" style="font-size: 10px">{{ sec.groups.length }}</span>
+          </button>
+          <div v-show="catOpen(sec.name)" class="row" style="gap: 6px; flex-wrap: wrap; padding: 2px 0 6px 14px">
+            <button v-for="g in sec.groups" :key="g.key"
+                    class="group-card"
+                    @click="openGroupForm(g)"
+                    :title="g.description + '\n\n' + g.patterns.join('\n')">
+              <GroupIcon :group-key="g.key" :size="20" />
+              <span class="group-name">{{ g.displayName }}</span>
+              <span class="muted" style="font-size: 10px">{{ g.patterns.length }} domain{{ g.patterns.length === 1 ? '' : 's' }}</span>
+            </button>
+          </div>
+        </div>
         <span v-if="search.trim() && !filteredGroups.length" class="muted" style="font-size: 11px; padding: 6px">
           No groups match "<code>{{ search }}</code>".
         </span>
@@ -1577,6 +1630,29 @@ tr.edit-row td {
 }
 .group-card:hover { background: var(--border); border-color: var(--accent); }
 .group-card .group-name { font-weight: 600; }
+
+/* Category section header inside the quick-add bar: a bare clickable row,
+   deliberately quieter than the group cards it holds. */
+.cat-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-dim);
+  text-align: left;
+}
+.cat-header:hover { color: var(--text); }
+.cat-caret { font-size: 10px; width: 10px; }
+.cat-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 
 /* Custom-group card: the apply button plus inline edit/delete controls,
    grouped so they read as one card with a shared border. */

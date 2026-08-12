@@ -387,6 +387,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Description: g.Description,
 				Patterns:    pats,
 				Color:       groups.BrandColor(g.Key),
+				Category:    groups.Category(g.Key),
 				RuleCount:   countFor(pats),
 			})
 		}
@@ -402,6 +403,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Description: g.Description,
 				Patterns:    g.Patterns,
 				Color:       g.Color,
+				Category:    groups.CategoryCustomKey,
 				Custom:      true,
 				RuleCount:   countFor(g.Patterns),
 			})

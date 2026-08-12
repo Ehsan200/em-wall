@@ -113,6 +113,9 @@ const BRAND: Record<string, string> = {
   'youtube': '#ff0000', 'spotify': '#1db954', 'soundcloud': '#ff5500',
   'jetbrains': '#ff318c', 'github': '#e6edf3', 'docker': '#2496ed',
   'homebrew': '#fbb040', 'android-studio': '#3ddc84', 'telemetry-common': '#6c5ce7',
+  'python': '#3776ab', 'golang': '#00add8', 'maven': '#c71a36', 'npm': '#cb3837',
+  'rust': '#dea584', 'ruby': '#cc342d', 'dotnet': '#a67bff', 'php': '#777bb4',
+  'hashicorp': '#a77bff',
 };
 
 // Wildcard match mirroring the daemon's rules.Match: `*.x.com` matches the

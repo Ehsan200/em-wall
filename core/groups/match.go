@@ -28,6 +28,15 @@ var brandColors = map[string]string{
 	"github":           "#e6edf3", // GitHub near-white
 	"docker":           "#2496ed", // Docker blue
 	"homebrew":         "#fbb040", // Homebrew amber
+	"python":           "#3776ab", // Python blue
+	"golang":           "#00add8", // Go cyan
+	"maven":            "#c71a36", // Maven red
+	"npm":              "#cb3837", // npm red
+	"rust":             "#dea584", // Rust tan (black brand, lightened for dark bg)
+	"ruby":             "#cc342d", // Ruby red
+	"dotnet":           "#a67bff", // .NET purple (lightened from #512bd4 for dark bg)
+	"php":              "#777bb4", // PHP indigo
+	"hashicorp":        "#a77bff", // Terraform purple (lightened for dark bg)
 	"android-studio":   "#3ddc84", // Android green
 	"telemetry-common": "#6c5ce7", // generic telemetry purple
 }

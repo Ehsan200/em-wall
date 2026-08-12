@@ -364,6 +364,7 @@ func customGroupToDTO(g rules.CustomGroup) ipc.GroupDTO {
 		Description: g.Description,
 		Patterns:    g.Patterns,
 		Color:       g.Color,
+		Category:    groups.CategoryCustomKey,
 		Custom:      true,
 	}
 }

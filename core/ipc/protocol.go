@@ -189,6 +189,7 @@ type GroupDTO struct {
 	Description string   `json:"description"`
 	Patterns    []string `json:"patterns"`
 	Color       string   `json:"color"`     // brand accent hex, "" if none
+	Category    string   `json:"category"`  // display section, e.g. "AI"/"Developer"; "Custom" for user groups
 	Custom      bool     `json:"custom"`    // true = user-created (editable/deletable)
 	RuleCount   int      `json:"ruleCount"` // how many stored rules match this group's patterns
 }

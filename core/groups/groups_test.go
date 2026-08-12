@@ -157,6 +157,77 @@ func TestGoogle_CoversAllOfGoogle(t *testing.T) {
 	}
 }
 
+// TestCategories_CoverEveryGroup: an unlabelled group silently falls into
+// "Other" in the UI's quick-add sections, which is how a new group ends up
+// filed away from its siblings. Every curated key must be in the table, and
+// every category must be one the UI knows how to order.
+func TestCategories_CoverEveryGroup(t *testing.T) {
+	known := map[string]bool{}
+	for _, c := range CategoryOrder() {
+		known[c] = true
+	}
+	for _, g := range KnownGroups() {
+		c, ok := categories[g.Key]
+		if !ok {
+			t.Errorf("group %q has no category — add it to core/groups/category.go", g.Key)
+			continue
+		}
+		if !known[c] {
+			t.Errorf("group %q has category %q which is not in CategoryOrder()", g.Key, c)
+		}
+	}
+}
+
+// TestDevRegistries_CoverRealFetchHosts: a package manager is useless if the
+// registry host is routed but the artifact CDN it redirects to is not (pip →
+// files.pythonhosted.org, go → proxy/sum, npm → registry.npmjs.org). Also locks
+// the ordering choice that "maven" — not "android-studio" — owns Maven Central.
+func TestDevRegistries_CoverRealFetchHosts(t *testing.T) {
+	covers := func(key, host string) bool {
+		g := FindByKey(key)
+		if g == nil {
+			t.Fatalf("group %q missing", key)
+		}
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct{ key, host string }{
+		{"python", "pypi.org"},
+		{"python", "files.pythonhosted.org"},
+		{"python", "www.python.org"},
+		{"golang", "proxy.golang.org"},
+		{"golang", "sum.golang.org"},
+		{"golang", "pkg.go.dev"},
+		{"maven", "repo1.maven.org"},
+		{"maven", "repo.maven.apache.org"},
+		{"maven", "plugins.gradle.org"},
+		{"maven", "oss.sonatype.org"},
+		{"npm", "registry.npmjs.org"},
+		{"npm", "nodejs.org"},
+		{"rust", "static.crates.io"},
+		{"rust", "index.crates.io"},
+		{"rust", "static.rust-lang.org"},
+		{"ruby", "rubygems.org"},
+		{"dotnet", "api.nuget.org"},
+		{"php", "repo.packagist.org"},
+		{"hashicorp", "releases.hashicorp.com"},
+		{"hashicorp", "registry.terraform.io"},
+	} {
+		if !covers(c.key, c.host) {
+			t.Errorf("group %q must cover %q but does not", c.key, c.host)
+		}
+	}
+	// Attribution: the JVM hosts belong to "maven", which is listed before
+	// "android-studio" so GroupForKey resolves them there.
+	if k, _, ok := GroupForKey("repo1.maven.org"); !ok || k != "maven" {
+		t.Errorf("repo1.maven.org attributed to %q (ok=%v), want \"maven\"", k, ok)
+	}
+}
+
 // TestGrok_CoversUserContentAndXSurface locks in the login-via-X gap: Grok
 // serves user content from grokusercontent.com and is reachable as grok.x.com
 // during "sign in with X", neither covered by the original three patterns.
