@@ -381,6 +381,18 @@ func KnownGroups() []Group {
 			Icon: svgSpotify(),
 		},
 		{
+			Key:         "pandora",
+			DisplayName: "Pandora",
+			Description: "Pandora radio web/app, audio + album-art CDN",
+			Patterns: []string{
+				"*.pandora.com",
+				"*.p-cdn.com",        // audio streams + album art
+				"*.pandoramedia.com", // corporate / API surface
+				"*.pdora.co",         // share links
+			},
+			Icon: svgPandora(),
+		},
+		{
 			Key:         "soundcloud",
 			DisplayName: "SoundCloud",
 			Description: "SoundCloud web/app + media CDN",
@@ -641,6 +653,44 @@ func KnownGroups() []Group {
 			Icon: svgFigma(),
 		},
 		{
+			Key:         "airbnb",
+			DisplayName: "Airbnb",
+			Description: "Airbnb web/app, localized country sites, photo CDN, HotelTonight",
+			Patterns: []string{
+				"*.airbnb.com",
+				"*.airbnb.net", // edge/origin hosts the CDN CNAMEs to
+				"*.muscache.com",
+				"*.airbnb.io",
+				"*.airbnb.org", // Airbnb.org nonprofit
+				"*.abnb.me",    // share/short links
+				"*.hoteltonight.com",
+				// Localized storefronts are separate registrable domains, not
+				// subdomains of airbnb.com, so each needs its own pattern.
+				// The common ones; add more the same way if a market is missed.
+				"*.airbnb.co.uk",
+				"*.airbnb.ca",
+				"*.airbnb.com.au",
+				"*.airbnb.de",
+				"*.airbnb.fr",
+				"*.airbnb.es",
+				"*.airbnb.it",
+				"*.airbnb.com.tr",
+			},
+			Icon: svgAirbnb(),
+		},
+		{
+			Key:         "booking",
+			DisplayName: "Booking.com",
+			Description: "Booking.com web/app, static + photo CDN",
+			Patterns: []string{
+				"*.booking.com",
+				"*.bstatic.com", // photos, JS/CSS bundles
+				"*.booking.cn",  // China storefront
+				"*.bookingholdings.com",
+			},
+			Icon: svgBranded("B.", "#003580", "#0071c2", "#ffffff"),
+		},
+		{
 			Key:         "telemetry-common",
 			DisplayName: "Common telemetry / analytics",
 			Description: "Sentry, Mixpanel, Segment, Amplitude, Datadog browser",
@@ -722,6 +772,24 @@ func svgSpotify() string {
 }
 
 // svgSoundCloud: orange badge with a white waveform.
+// svgPandora: blue badge with the white wordmark "P".
+func svgPandora() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#3668ff"/>` +
+		`<path fill="#ffffff" d="M20 14h13c7.7 0 12.5 4.6 12.5 11.6S40.7 37.4 33 37.4h-4.6V50H20V14z` +
+		`m8.4 7v9.4h3.7c3 0 4.8-1.7 4.8-4.7s-1.8-4.7-4.8-4.7h-3.7z"/></svg>`
+}
+
+// svgAirbnb: white badge with the coral bélo mark — a rounded loop over a
+// splayed base, drawn as one stroked path rather than the official glyph.
+func svgAirbnb() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#e6e6e6" stroke-width="1.5"/>` +
+		`<path fill="none" stroke="#ff5a5f" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" ` +
+		`d="M32 15c-3 6-6.6 12.3-9.6 17.6-2.6 4.5-4.4 7.7-4.4 10.4a7 7 0 0 0 12.1 4.8L32 46l1.9 1.8A7 7 0 0 0 46 43` +
+		`c0-2.7-1.8-5.9-4.4-10.4C38.6 27.3 35 21 32 15z"/></svg>`
+}
+
 func svgSoundCloud() string {
 	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
 		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ff5500"/>` +

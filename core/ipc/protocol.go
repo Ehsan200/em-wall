@@ -47,6 +47,7 @@ const (
 	MethodSystemRoutesList       = "system.routes.list"
 	MethodGroupsList             = "groups.list"
 	MethodGroupsApply            = "groups.apply"
+	MethodGroupsSync             = "groups.sync" // top up an applied group with patterns added since
 	MethodGroupsIcon             = "groups.icon"
 	MethodGroupsDeleteRules      = "groups.delete-rules"
 	MethodGroupsSetEnabled       = "groups.set-enabled"
@@ -192,6 +193,11 @@ type GroupDTO struct {
 	Category    string   `json:"category"`  // display section, e.g. "AI"/"Developer"; "Custom" for user groups
 	Custom      bool     `json:"custom"`    // true = user-created (editable/deletable)
 	RuleCount   int      `json:"ruleCount"` // how many stored rules match this group's patterns
+	// MissingPatterns are this group's patterns that no stored rule covers.
+	// Non-empty only when RuleCount > 0 — i.e. the group was applied and then
+	// drifted, typically because an app update added domains to the curated
+	// list. This is what the UI's "+N new" / Sync affordance keys off.
+	MissingPatterns []string `json:"missingPatterns"`
 }
 
 // DynamicGroupDTO reports one dynamic group's refresh outcome: how many
@@ -248,6 +254,17 @@ type GroupsApplyParams struct {
 	Action    string `json:"action"`    // "block" or "route"
 	Interface string `json:"interface"` // empty for block, required for route
 	Enabled   bool   `json:"enabled"`
+}
+
+// GroupsSyncParams tops up a group that is already applied: only the
+// patterns no stored rule covers get inserted. Action/Interface are
+// optional — when empty the daemon copies the shape (action, interface,
+// enabled) of the group's existing rules, so the user doesn't have to
+// re-pick the proxy they chose when they first applied the group.
+type GroupsSyncParams struct {
+	Key       string `json:"key"`
+	Action    string `json:"action"`    // optional override
+	Interface string `json:"interface"` // optional override
 }
 
 type GroupsApplyResult struct {

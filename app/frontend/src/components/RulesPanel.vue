@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
-  Groups, ApplyGroup, DeleteGroupRules, SetGroupEnabled,
+  Groups, ApplyGroup, SyncGroup, DeleteGroupRules, SetGroupEnabled,
   ListProxies, ListXray, BulkUpdateRules, RuleExitIP,
   DeleteCustomGroup,
 } from '../../wailsjs/go/main/App';
@@ -468,6 +468,60 @@ async function applyGroup() {
 
 function groupByKey(key: string): ipc.GroupDTO | undefined {
   return knownGroups.value.find(g => g.key === key);
+}
+
+// ---- Group drift ----
+// A group's domain list ships with the app, but the rules made from it live
+// in the DB. An update that adds a domain to a group therefore leaves
+// already-applied groups short, and the new domain leaks past the proxy.
+// The daemon reports the gap per group as missingPatterns (empty for groups
+// that were never applied); syncing re-uses the action/interface already on
+// the group's rules, so there is nothing to re-pick.
+function missingCount(g: ipc.GroupDTO | null): number {
+  return g?.missingPatterns?.length || 0;
+}
+
+const driftedGroups = computed<ipc.GroupDTO[]>(() =>
+  knownGroups.value.filter(g => missingCount(g) > 0));
+
+const syncing = ref<string | null>(null);
+
+async function syncGroup(g: ipc.GroupDTO) {
+  syncing.value = g.key;
+  try {
+    const result = await SyncGroup(g.key, '', '');
+    const created = result.created?.length || 0;
+    error.value = created > 0
+      ? `Added ${created} new domain rule(s) to ${g.displayName}.`
+      : `${g.displayName} was already up to date.`;
+    await reloadGroups();
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    syncing.value = null;
+  }
+}
+
+async function syncAllGroups() {
+  const targets = [...driftedGroups.value];
+  syncing.value = '*';
+  let created = 0;
+  try {
+    for (const g of targets) {
+      const result = await SyncGroup(g.key, '', '');
+      created += result.created?.length || 0;
+    }
+    error.value = `Added ${created} new domain rule(s) across ${targets.length} group(s).`;
+    await reloadGroups();
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    syncing.value = null;
+  }
 }
 
 // Action model:
@@ -1235,6 +1289,23 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
       </div>
     </div>
 
+    <!-- Drift banner: groups whose shipped domain list has grown past the
+         rules created from it (typically after an app update). -->
+    <div v-if="driftedGroups.length" class="drift-banner">
+      <span class="drift-dot">↑</span>
+      <span style="flex: 1">
+        <strong>{{ driftedGroups.length }}</strong>
+        {{ driftedGroups.length === 1 ? 'group has' : 'groups have' }}
+        new domains since you applied
+        {{ driftedGroups.length === 1 ? 'it' : 'them' }} —
+        <span class="muted">{{ driftedGroups.map(g => g.displayName).join(', ') }}</span>
+      </span>
+      <button class="primary" :disabled="syncing !== null" @click="syncAllGroups()"
+              title="Add only the missing domains, keeping each group's existing action and interface">
+        {{ syncing === '*' ? 'Syncing…' : 'Sync all' }}
+      </button>
+    </div>
+
     <!-- Per-section rendering. Each known group gets its own table with
          a header row carrying the bulk actions. Ungrouped (and rules
          the user hand-edited away from a group) lands in the final
@@ -1282,9 +1353,19 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             {{ groupEnabledState(sec.rules) === 'on' ? 'all on'
               : groupEnabledState(sec.rules) === 'off' ? 'all off' : 'mixed' }}
           </span>
+          <span v-if="missingCount(sec.group)" class="drift-pill"
+                :title="sec.group?.missingPatterns?.join('\n')">
+            +{{ missingCount(sec.group) }} new
+          </span>
         </div>
         <!-- Bulk actions: groups only. Ungrouped section is just a label. -->
         <div v-if="sec.group" class="row" style="gap: 6px; align-items: center">
+          <button v-if="missingCount(sec.group)" class="bulk-btn primary"
+                  :disabled="syncing !== null"
+                  @click="syncGroup(sec.group)"
+                  :title="`Add the ${missingCount(sec.group)} domain(s) this group gained, reusing this group's action and interface`">
+            {{ syncing === sec.group.key ? 'Syncing…' : 'Sync' }}
+          </button>
           <button class="bulk-btn"
                   :disabled="groupEnabledState(sec.rules) === 'on'"
                   @click="setGroupEnabledAll(sec.group, true)"
@@ -1773,5 +1854,41 @@ tr.edit-row td {
 .bulk-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Group drift: shipped domain list has grown past the applied rules. */
+.drift-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  background: rgba(93, 160, 255, 0.16);
+  color: var(--accent);
+}
+.drift-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(93, 160, 255, 0.08);
+  font-size: 12px;
+}
+.drift-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
 }
 </style>

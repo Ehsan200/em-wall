@@ -228,6 +228,44 @@ func TestDevRegistries_CoverRealFetchHosts(t *testing.T) {
 	}
 }
 
+// TestConsumerBrands_CoverCDNHosts: each of these services serves its real
+// payload from a domain that is not the brand domain — Airbnb photos from
+// muscache.com (CNAMEd into airbnb.net), Booking photos/bundles from
+// bstatic.com, Pandora audio/art from p-cdn.com — so a group holding only
+// the brand domain routes the page but not its content.
+func TestConsumerBrands_CoverCDNHosts(t *testing.T) {
+	covers := func(key, host string) bool {
+		g := FindByKey(key)
+		if g == nil {
+			t.Fatalf("group %q missing", key)
+		}
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct{ key, host string }{
+		{"airbnb", "www.airbnb.com"},
+		{"airbnb", "a0.muscache.com"},
+		{"airbnb", "muscache.production.global.product.origins.airbnb.net"},
+		{"airbnb", "www.airbnb.co.uk"},
+		{"airbnb", "abnb.me"},
+		{"pandora", "www.pandora.com"},
+		{"pandora", "cont-1.p-cdn.com"},
+		{"pandora", "mediaserver-cont-dc6-1-v4v6.pandora.com"},
+		{"pandora", "pdora.co"},
+		{"booking", "www.booking.com"},
+		{"booking", "cf.bstatic.com"},
+		{"booking", "q-xx.bstatic.com"},
+	} {
+		if !covers(c.key, c.host) {
+			t.Errorf("group %q must cover %q but does not", c.key, c.host)
+		}
+	}
+}
+
 // TestGrok_CoversUserContentAndXSurface locks in the login-via-X gap: Grok
 // serves user content from grokusercontent.com and is reachable as grok.x.com
 // during "sign in with X", neither covered by the original three patterns.

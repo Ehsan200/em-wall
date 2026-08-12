@@ -71,6 +71,11 @@ var categories = map[string]string{
 	"youtube":    CategoryMedia,
 	"spotify":    CategoryMedia,
 	"soundcloud": CategoryMedia,
+	"pandora":    CategoryMedia,
+
+	// Travel booking.
+	"airbnb":  CategoryPlatform,
+	"booking": CategoryPlatform,
 
 	"notion": CategoryWork,
 	"figma":  CategoryWork,

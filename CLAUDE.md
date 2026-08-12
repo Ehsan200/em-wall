@@ -76,5 +76,6 @@ The installer is the **only** install path — there is no shell script counterp
 - `Rule.Action` is one of `block`, `allow`, `route`. `route` requires non-empty `Interface`; `allow` requires empty.
 - `Interface` field accepts a literal interface name (`utun3`), `proxy:NAME` / `proxy:NAME1,NAME2`, or `xray:NAME` / `xray:NAME1,NAME2` (multi-name fallback, first available wins).
 - Disabled rules are skipped during matching, not deleted.
+- Adding patterns to a curated group in `core/groups` does **not** reach users who already applied that group — their rules are rows in the DB. `groups.list` reports the gap per group as `MissingPatterns`, and `groups.sync` ([daemon/groups_sync.go](daemon/groups_sync.go)) inserts only those, copying the action/interface of the group's existing rules. The UI surfaces it as a "+N new" pill and a Sync / Sync all button. So: extend a group's pattern list freely, no migration needed.
 - Settings live in the same SQLite DB as rules (key/value table), accessed via `store.GetSetting/SetSetting`. Stateful daemon decisions (`block_encrypted_dns`, `system_dns_active`, `upstream_dns`, `system_dns_backup`) round-trip through here.
 - `MethodSettingsSet` has a side-effect for `block_encrypted_dns`: it calls `pf.Sync` to install/remove the anchor. New side-effecting settings keys go in the same handler.

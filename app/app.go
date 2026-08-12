@@ -262,6 +262,18 @@ func (a *App) ApplyGroup(key, action, iface string, enabled bool) (ipc.GroupsApp
 	return out, err
 }
 
+// SyncGroup tops up an already-applied group with the patterns it has
+// gained since (an app update adding domains to the curated list). Only
+// missing patterns are inserted, reusing the action/interface of the
+// group's existing rules unless action is given as an override.
+func (a *App) SyncGroup(key, action, iface string) (ipc.GroupsApplyResult, error) {
+	var out ipc.GroupsApplyResult
+	err := a.call(ipc.MethodGroupsSync, ipc.GroupsSyncParams{
+		Key: key, Action: action, Interface: iface,
+	}, &out)
+	return out, err
+}
+
 // RefreshDynamicGroups re-fetches the vendor feeds behind dynamic groups
 // (Google's published IP ranges) and reconciles any rules those groups own.
 // The daemon also does this on a timer; this is the manual path.

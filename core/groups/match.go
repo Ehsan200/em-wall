@@ -24,6 +24,9 @@ var brandColors = map[string]string{
 	"youtube":          "#ff0000", // YouTube red
 	"spotify":          "#1db954", // Spotify green
 	"soundcloud":       "#ff5500", // SoundCloud orange
+	"pandora":          "#3668ff", // Pandora blue
+	"airbnb":           "#ff5a5f", // Airbnb coral
+	"booking":          "#0071c2", // Booking.com blue (lightened from #003580 for dark bg)
 	"jetbrains":        "#ff318c", // JetBrains magenta
 	"github":           "#e6edf3", // GitHub near-white
 	"docker":           "#2496ed", // Docker blue

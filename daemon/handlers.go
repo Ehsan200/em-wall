@@ -382,13 +382,14 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		for _, g := range registry {
 			pats := d.effectiveGroupPatterns(ctx, g)
 			out = append(out, ipc.GroupDTO{
-				Key:         g.Key,
-				DisplayName: g.DisplayName,
-				Description: g.Description,
-				Patterns:    pats,
-				Color:       groups.BrandColor(g.Key),
-				Category:    groups.Category(g.Key),
-				RuleCount:   countFor(pats),
+				Key:             g.Key,
+				DisplayName:     g.DisplayName,
+				Description:     g.Description,
+				Patterns:        pats,
+				Color:           groups.BrandColor(g.Key),
+				Category:        groups.Category(g.Key),
+				RuleCount:       countFor(pats),
+				MissingPatterns: missingGroupPatterns(pats, allRules),
 			})
 		}
 		// Append user-created groups after the curated registry.
@@ -398,17 +399,28 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		for _, g := range custom {
 			out = append(out, ipc.GroupDTO{
-				Key:         g.Key,
-				DisplayName: g.DisplayName,
-				Description: g.Description,
-				Patterns:    g.Patterns,
-				Color:       g.Color,
-				Category:    groups.CategoryCustomKey,
-				Custom:      true,
-				RuleCount:   countFor(g.Patterns),
+				Key:             g.Key,
+				DisplayName:     g.DisplayName,
+				Description:     g.Description,
+				Patterns:        g.Patterns,
+				Color:           g.Color,
+				Category:        groups.CategoryCustomKey,
+				Custom:          true,
+				RuleCount:       countFor(g.Patterns),
+				MissingPatterns: missingGroupPatterns(g.Patterns, allRules),
 			})
 		}
 		return out, nil
+	})
+
+	// Add-only top-up for a group that is already applied but has drifted
+	// behind the shipped pattern list (see daemon/groups_sync.go).
+	s.Handle(ipc.MethodGroupsSync, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.GroupsSyncParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return d.syncGroup(ctx, p)
 	})
 
 	s.Handle(ipc.MethodGroupsApply, func(ctx context.Context, raw json.RawMessage) (any, error) {
