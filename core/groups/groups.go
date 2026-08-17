@@ -41,7 +41,15 @@ func KnownGroups() []Group {
 			Description: "ChatGPT, OpenAI API, Codex, platform, Sora, DALL·E",
 			Patterns: []string{
 				"*.openai.com",
+				// Codex CLI's second first-party domain: Agent Identity
+				// (auth.api.openai.org/api/accounts) and the remote
+				// exec-server, whose API-key auth it explicitly allows on
+				// "openai.com and openai.org hosts and subdomains".
+				"*.openai.org",
 				"*.chatgpt.com",
+				// Non-prod ChatGPT env Codex accepts as a backend
+				// (chatgpt-staging.com/backend-api, /codex).
+				"*.chatgpt-staging.com",
 				"*.oaistatic.com",
 				"*.oaiusercontent.com",
 				"*.sora.com",
