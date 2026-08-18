@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -96,7 +97,51 @@ func newXraySupervisor(binary, dataDir, runtimeDir, logDir string, xs *xray.Stor
 	} else {
 		logger.Printf("xray supervisor: binary %s not found — xray:NAME rules will fail to dial", binary)
 	}
+	sweepOrphanXray(binary, logger)
 	return sup
+}
+
+// sweepOrphanXray kills em-wall-xray processes left behind by a
+// previous daemon that died without running Stop() — SIGKILL from
+// launchd, a crash, a panic. restartLocked starts the child with
+// Setpgid so our signals don't hit caller-spawned siblings, which
+// also means the child outlives its parent: nothing reaps it, and it
+// keeps holding the SOCKS5 inbound ports the fresh config wants plus
+// a slow trickle of CPU. Orphans accumulate one per unclean restart.
+//
+// Called from newXraySupervisor, where the daemon owns no xray child
+// yet — so every live process with this name is by definition stale.
+// Runs even in disabled mode: the binary can be uninstalled while its
+// last process is still running.
+func sweepOrphanXray(binary string, logger *log.Logger) {
+	name := filepath.Base(binary)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return
+	}
+	out, err := exec.Command("/usr/bin/pgrep", "-x", name).Output()
+	if err != nil {
+		// pgrep exits 1 when nothing matched — the common, healthy case.
+		return
+	}
+	self := os.Getpid()
+	for _, field := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil || pid <= 1 || pid == self {
+			continue
+		}
+		// Stale proxy with nothing to flush: SIGKILL rather than a
+		// SIGTERM grace period we cannot waitpid() on (not our child).
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			logger.Printf("xray supervisor: orphan pid=%d kill failed: %v", pid, err)
+			continue
+		}
+		// Kill is asynchronous; wait for the pid to go away so the
+		// first restartLocked isn't racing it for the same ports.
+		for i := 0; i < 20 && syscall.Kill(pid, 0) == nil; i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
+		logger.Printf("xray supervisor: killed orphan pid=%d", pid)
+	}
 }
 
 // Enabled reports whether the binary was on disk at construction —
