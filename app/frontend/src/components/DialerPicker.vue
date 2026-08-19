@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, watch } from 'vue';
+import SearchSelect from './SearchSelect.vue';
 
 // A master entry's Dialer is a comma-separated list of typed refs
 // (xraysub:NAME / xray:NAME / proxy:NAME). All referenced nodes merge into
@@ -25,6 +26,8 @@ const KINDS: Kind[] = ['xraysub', 'xray', 'proxy'];
 function kindLabel(k: Kind): string {
   return k === 'xraysub' ? 'subscription (fastest)' : k === 'xray' ? 'xray node' : 'proxy';
 }
+
+const KIND_OPTIONS = KINDS.map((k) => ({ value: k, label: kindLabel(k) }));
 
 function parse(s: string): Row[] {
   return (s || '')
@@ -91,17 +94,12 @@ function onKindChange(i: number) {
     </div>
 
     <div v-for="(r, i) in rows" :key="i" class="row" style="gap: 6px; align-items: center; flex-wrap: wrap">
-      <select v-model="r.kind" @change="onKindChange(i)" style="width: 190px">
-        <option v-for="k in KINDS" :key="k" :value="k">{{ kindLabel(k) }}</option>
-      </select>
-      <select v-model="r.name" @change="commit" style="min-width: 180px; flex: 1">
-        <option value="" disabled>— choose {{ r.kind === 'xraysub' ? 'subscription' : r.kind }} —</option>
-        <option v-for="n in namesFor(r.kind)" :key="n" :value="n">{{ n }}</option>
-        <!-- keep a dangling stored name visible even if it no longer exists -->
-        <option v-if="r.name && !namesFor(r.kind).includes(r.name)" :value="r.name">
-          {{ r.name }} (missing)
-        </option>
-      </select>
+      <SearchSelect v-model="r.kind" :options="KIND_OPTIONS" @change="onKindChange(i)"
+                    style="width: 190px" />
+      <SearchSelect v-model="r.name" :options="namesFor(r.kind)" @change="commit"
+                    :placeholder="`— choose ${r.kind === 'xraysub' ? 'subscription' : r.kind} —`"
+                    :search-placeholder="`search ${r.kind === 'xraysub' ? 'subscriptions' : r.kind + 's'}…`"
+                    style="min-width: 180px; flex: 1" />
       <button @click="removeRow(i)" title="remove">✕</button>
     </div>
 

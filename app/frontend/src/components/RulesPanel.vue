@@ -8,6 +8,7 @@ import {
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import GroupIcon from './GroupIcon.vue';
+import SearchSelect from './SearchSelect.vue';
 import CustomGroupForm from './CustomGroupForm.vue';
 import ExportDialog from './ExportDialog.vue';
 import MoveToGroupDialog from './MoveToGroupDialog.vue';
@@ -981,6 +982,24 @@ function setByName(name: string): XraySetRow | undefined {
   return xraySets.value.find(s => s.name === name);
 }
 
+// Option lists for the SearchSelect pickers. Kept here so the four sites
+// (group-apply / add-draft / bulk / inline-edit) stay in lockstep.
+const ACTION_OPTIONS = [
+  { value: 'block', label: 'block' },
+  { value: 'route', label: 'route' },
+];
+const ifaceOptions = computed(() =>
+  interfaces.value.map(i => ({ value: i.name, label: ifaceLabel(i), hint: `mtu ${i.mtu}` })),
+);
+const setOptions = computed(() =>
+  xraySets.value.map(s => ({
+    value: s.name,
+    label: s.name,
+    hint: `${s.members.length} member${s.members.length === 1 ? '' : 's'}${s.enabled ? '' : ' — disabled'}`,
+    disabled: !s.enabled,
+  })),
+);
+
 // Short badge for a set reference: how many of its members could
 // actually be dialled right now, or why it can't be.
 function setStatusBadge(name: string): string {
@@ -1153,10 +1172,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
         </span>
       </div>
       <div class="row" style="gap: 8px">
-        <select v-model="groupApply.action" style="width: 100px">
-          <option value="block">block</option>
-          <option value="route">route</option>
-        </select>
+        <SearchSelect v-model="groupApply.action" :options="ACTION_OPTIONS" style="width: 100px" />
         <label class="toggle">
           <input type="checkbox" v-model="groupApply.enabled" />
           <span class="track"></span>
@@ -1174,10 +1190,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <button :class="['seg', {active: groupApply.binding === 'set'}]" @click="groupApply.binding = 'set'"
                     title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
           </div>
-          <select v-if="groupApply.binding === 'iface'" v-model="groupApply.iface" style="flex: 1">
-            <option value="">— pick interface —</option>
-            <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
-          </select>
+          <SearchSelect v-if="groupApply.binding === 'iface'" v-model="groupApply.iface" :options="ifaceOptions"
+                        placeholder="— pick interface —" search-placeholder="search interfaces…"
+                        style="flex: 1" />
           <span v-else-if="groupApply.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
             select one or more — daemon uses the first one that's reachable
             <span v-if="groupApply.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1190,16 +1205,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ groupApply.xrays.length }} selected
             </span>
           </span>
-          <select v-else v-model="groupApply.set" style="flex: 1">
-            <option value="">— pick outbound set —</option>
-            <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
-              {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
-            </option>
-            <!-- keep a stored name visible even if the set is gone -->
-            <option v-if="groupApply.set && !setIsKnown(groupApply.set)" :value="groupApply.set">
-              {{ groupApply.set }} (missing)
-            </option>
-          </select>
+          <SearchSelect v-else v-model="groupApply.set" :options="setOptions"
+                        placeholder="— pick outbound set —" search-placeholder="search sets…"
+                        style="flex: 1" />
         </div>
         <div v-if="groupApply.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
@@ -1233,10 +1241,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
     <div class="add-form">
       <div class="row" style="gap: 8px">
         <input v-model="draft.pattern" placeholder="Pattern (e.g. *.bad.com or 1.2.3.0/24)" style="flex: 1" @keyup.enter="add" />
-        <select v-model="draft.action" style="width: 100px">
-          <option value="block">block</option>
-          <option value="route">route</option>
-        </select>
+        <SearchSelect v-model="draft.action" :options="ACTION_OPTIONS" style="width: 100px" />
         <label class="toggle">
           <input type="checkbox" v-model="draft.enabled" />
           <span class="track"></span>
@@ -1253,10 +1258,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <button :class="['seg', {active: draft.binding === 'set'}]" @click="draft.binding = 'set'"
                     title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
           </div>
-          <select v-if="draft.binding === 'iface'" v-model="draft.iface" style="flex: 1">
-            <option value="">— pick interface —</option>
-            <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
-          </select>
+          <SearchSelect v-if="draft.binding === 'iface'" v-model="draft.iface" :options="ifaceOptions"
+                        placeholder="— pick interface —" search-placeholder="search interfaces…"
+                        style="flex: 1" />
           <span v-else-if="draft.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
             select one or more — daemon uses the first one that's reachable
             <span v-if="draft.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1269,16 +1273,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ draft.xrays.length }} selected
             </span>
           </span>
-          <select v-else v-model="draft.set" style="flex: 1">
-            <option value="">— pick outbound set —</option>
-            <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
-              {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
-            </option>
-            <!-- keep a stored name visible even if the set is gone -->
-            <option v-if="draft.set && !setIsKnown(draft.set)" :value="draft.set">
-              {{ draft.set }} (missing)
-            </option>
-          </select>
+          <SearchSelect v-else v-model="draft.set" :options="setOptions"
+                        placeholder="— pick outbound set —" search-placeholder="search sets…"
+                        style="flex: 1" />
         </div>
         <div v-if="draft.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
@@ -1333,10 +1330,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
       <div v-if="bulk" class="col" style="gap: 10px; margin-top: 10px">
         <div class="row" style="gap: 8px; align-items: center">
           <span class="muted" style="font-size: 11px; min-width: 60px">action:</span>
-          <select v-model="bulk.action" style="width: 100px">
-            <option value="block">block</option>
-            <option value="route">route</option>
-          </select>
+          <SearchSelect v-model="bulk.action" :options="ACTION_OPTIONS" style="width: 100px" />
           <button class="primary" @click="applyBulk" :disabled="!bulkIsValid()">
             Apply to {{ selectedCount }} rule{{ selectedCount === 1 ? '' : 's' }}
           </button>
@@ -1352,10 +1346,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               <button :class="['seg', {active: bulk.binding === 'set'}]" @click="bulk.binding = 'set'"
                       title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
             </div>
-            <select v-if="bulk.binding === 'iface'" v-model="bulk.iface" style="flex: 1">
-              <option value="">— pick interface —</option>
-              <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
-            </select>
+            <SearchSelect v-if="bulk.binding === 'iface'" v-model="bulk.iface" :options="ifaceOptions"
+                        placeholder="— pick interface —" search-placeholder="search interfaces…"
+                        style="flex: 1" />
             <span v-else-if="bulk.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
               select one or more — daemon uses the first one that's reachable
               <span v-if="bulk.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1368,16 +1361,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 · {{ bulk.xrays.length }} selected
               </span>
             </span>
-            <select v-else v-model="bulk.set" style="flex: 1">
-              <option value="">— pick outbound set —</option>
-              <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
-                {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
-              </option>
-              <!-- keep a stored name visible even if the set is gone -->
-              <option v-if="bulk.set && !setIsKnown(bulk.set)" :value="bulk.set">
-                {{ bulk.set }} (missing)
-              </option>
-            </select>
+            <SearchSelect v-else v-model="bulk.set" :options="setOptions"
+                        placeholder="— pick outbound set —" search-placeholder="search sets…"
+                        style="flex: 1" />
           </div>
           <div v-if="bulk.binding === 'proxy'" class="chip-grid">
             <button v-for="p in proxies" :key="p.id"
@@ -1624,10 +1610,7 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                            style="flex: 1"
                            @keyup.enter="saveEdit"
                            @keyup.esc="cancelEdit" />
-                    <select v-model="editing!.action" style="width: 100px">
-                      <option value="block">block</option>
-                      <option value="route">route</option>
-                    </select>
+                    <SearchSelect v-model="editing!.action" :options="ACTION_OPTIONS" style="width: 100px" />
                     <label class="toggle">
                       <input type="checkbox" v-model="editing!.enabled" />
                       <span class="track"></span>
@@ -1645,12 +1628,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                         <button :class="['seg', {active: editing!.binding === 'set'}]" @click="editing!.binding = 'set'"
                                 title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
                       </div>
-                      <select v-if="editing!.binding === 'iface'" v-model="editing!.iface" style="flex: 1">
-                        <option value="">— pick interface —</option>
-                        <option v-for="i in interfaces" :key="i.name" :value="i.name">{{ ifaceLabel(i) }} (mtu {{ i.mtu }})</option>
-                        <option v-if="editing!.iface && !interfaces.some(i => i.name === editing!.iface)"
-                                :value="editing!.iface" disabled>{{ editing!.iface }} — down (saved)</option>
-                      </select>
+                      <SearchSelect v-if="editing!.binding === 'iface'" v-model="editing!.iface" :options="ifaceOptions"
+                                    placeholder="— pick interface —" search-placeholder="search interfaces…"
+                                    style="flex: 1" />
                       <span v-else-if="editing!.binding === 'proxy'" class="muted" style="font-size: 11px; flex: 1">
                         select one or more — daemon uses the first one that's reachable
                         <span v-if="editing!.proxies.length" style="color: var(--accent); font-weight: 600">
@@ -1663,16 +1643,9 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                           · {{ editing!.xrays.length }} selected
                         </span>
                       </span>
-                      <select v-else v-model="editing!.set" style="flex: 1">
-                        <option value="">— pick outbound set —</option>
-                        <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
-                          {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
-                        </option>
-                        <!-- keep a stored name visible even if the set is gone -->
-                        <option v-if="editing!.set && !setIsKnown(editing!.set)" :value="editing!.set">
-                          {{ editing!.set }} (missing)
-                        </option>
-                      </select>
+                      <SearchSelect v-else v-model="editing!.set" :options="setOptions"
+                        placeholder="— pick outbound set —" search-placeholder="search sets…"
+                        style="flex: 1" />
                     </div>
                     <div v-if="editing!.binding === 'proxy'" class="chip-grid">
                       <button v-for="p in proxies" :key="p.id"

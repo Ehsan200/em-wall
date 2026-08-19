@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import { AddCustomGroup, UpdateCustomGroup, DeleteRule } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
+import SearchSelect from './SearchSelect.vue';
 
 // Moves the selected rules into a custom group: their patterns are added to
 // the group definition, then the standalone rules are deleted. The group's
@@ -29,6 +30,12 @@ const patterns = computed<string[]>(() => {
   }
   return out;
 });
+
+// Existing custom groups plus a trailing "new group" row.
+const targetOptions = computed(() => [
+  ...props.customGroups.map(g => ({ value: g.key, label: g.displayName })),
+  { value: '__new__', label: '+ New group…' },
+]);
 
 const isNew = computed(() => target.value === '__new__' || props.customGroups.length === 0);
 const valid = computed(() => {
@@ -76,10 +83,8 @@ async function confirm() {
       <div class="col" style="gap: 10px">
         <label class="field" v-if="customGroups.length">
           <span class="lbl">Target group</span>
-          <select v-model="target">
-            <option v-for="g in customGroups" :key="g.key" :value="g.key">{{ g.displayName }}</option>
-            <option value="__new__">+ New group…</option>
-          </select>
+          <SearchSelect v-model="target" :options="targetOptions"
+                        placeholder="— pick group —" search-placeholder="search groups…" />
         </label>
 
         <template v-if="isNew">

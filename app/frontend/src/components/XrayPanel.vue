@@ -9,6 +9,7 @@ import {
 import MonacoJsonEditor from './MonacoJsonEditor.vue';
 import DialerPicker from './DialerPicker.vue';
 import XraySubscriptionsPanel from './XraySubscriptionsPanel.vue';
+import SearchSelect from './SearchSelect.vue';
 
 // Local mirrors of the DTOs so the file compiles even before
 // `make run-app` regenerates wailsjs/models.ts.
@@ -712,7 +713,7 @@ defineExpose({ refresh });
 
           <div class="row" style="gap: 8px; align-items: center">
             <span class="muted" style="font-size: 11px; min-width: 60px">name:</span>
-            <input v-model="setDraft.name" placeholder="iproute" style="flex: 1" />
+            <input v-model="setDraft.name" placeholder="my-set" style="flex: 1" />
             <code v-if="setDraft.name" style="font-size: 11px; color: var(--text-dim)">xrayset:{{ setDraft.name }}</code>
           </div>
 
@@ -722,12 +723,9 @@ defineExpose({ refresh });
             </span>
             <div v-for="(m, i) in setDraft.members" :key="i" class="row" style="gap: 6px; align-items: center">
               <span class="muted" style="font-size: 11px; width: 16px; text-align: right">{{ i + 1 }}</span>
-              <select v-model="setDraft.members[i]" style="flex: 1">
-                <option value="" disabled>— choose outbound —</option>
-                <option v-for="opt in setMemberOptions" :key="opt" :value="opt">{{ opt }}</option>
-                <!-- keep a stored ref visible even if its target is gone -->
-                <option v-if="m && !setMemberOptions.includes(m)" :value="m">{{ m }} (missing)</option>
-              </select>
+              <SearchSelect v-model="setDraft.members[i]" :options="setMemberOptions"
+                            placeholder="— choose outbound —" search-placeholder="search outbounds…"
+                            style="flex: 1" />
               <button @click="moveSetMember(i, -1)" :disabled="i === 0" title="move up">↑</button>
               <button @click="moveSetMember(i, 1)" :disabled="i === setDraft.members.length - 1" title="move down">↓</button>
               <button @click="removeSetMemberRow(i)" title="remove">✕</button>

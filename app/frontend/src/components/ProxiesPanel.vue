@@ -1,8 +1,11 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue';
+import SearchSelect from './SearchSelect.vue';
 import {
   ListProxies, AddProxy, UpdateProxy, DeleteProxy, TestProxy,
 } from '../../wailsjs/go/main/App';
+
+const PROTOCOL_OPTIONS = ['socks5', 'http'];
 
 // Local mirror of the proxy DTO so the component compiles even if
 // wailsjs/models.ts hasn't been regenerated yet. The runtime values come
@@ -251,10 +254,7 @@ defineExpose({ refresh });
       <template v-else>
         <div class="row" style="gap: 8px; flex-wrap: wrap">
           <input v-model="editing.name" placeholder="name" style="width: 140px" />
-          <select v-model="editing.protocol">
-            <option value="socks5">socks5</option>
-            <option value="http">http</option>
-          </select>
+          <SearchSelect v-model="editing.protocol" :options="PROTOCOL_OPTIONS" style="width: 110px" />
           <input v-model="editing.host" placeholder="host" style="flex: 1; min-width: 140px" />
           <input type="number" v-model.number="editing.port" placeholder="port" style="width: 80px" min="1" max="65535" />
         </div>
@@ -277,10 +277,7 @@ defineExpose({ refresh });
       <strong style="font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px">New proxy</strong>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
         <input v-model="draft.name" placeholder="name (e.g. work)" style="width: 140px" />
-        <select v-model="draft.protocol">
-          <option value="socks5">socks5</option>
-          <option value="http">http</option>
-        </select>
+        <SearchSelect v-model="draft.protocol" :options="PROTOCOL_OPTIONS" style="width: 110px" />
         <input v-model="draft.host" placeholder="host" style="flex: 1; min-width: 140px" />
         <input type="number" v-model.number="draft.port" placeholder="port" style="width: 80px" min="1" max="65535" />
       </div>
