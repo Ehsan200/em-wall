@@ -855,7 +855,11 @@ async function refresh() {
     interfaces.value = (await Interfaces()) || [];
     proxies.value = ((await ListProxies()) || []) as unknown as ProxyRow[];
     xrays.value = ((await ListXray()) || []) as unknown as XrayRow[];
-    xraySets.value = ((await ListXraySets()) || []) as unknown as XraySetRow[];
+    // nil slices arrive as null from Go — setOptions indexes members.
+    xraySets.value = (((await ListXraySets()) || []) as any[]).map((s) => ({
+      ...s,
+      members: s.members || [],
+    })) as unknown as XraySetRow[];
     if (knownGroups.value.length === 0) {
       knownGroups.value = (await Groups()) || [];
     }

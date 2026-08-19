@@ -116,12 +116,15 @@ func (d *handlerDeps) setMemberBlockers(ctx context.Context, kind, name string) 
 // how many rules would feel an edit, and what the set expands to.
 func (d *handlerDeps) setToDTO(ctx context.Context, s xray.Set) ipc.XraySetDTO {
 	dto := ipc.XraySetDTO{
-		ID:        s.ID,
-		Name:      s.Name,
-		Members:   []string{},
-		Enabled:   s.Enabled,
-		CreatedAt: s.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+		ID:      s.ID,
+		Name:    s.Name,
+		Members: []string{},
+		// Non-nil so JSON carries [] not null — the UI indexes both
+		// slices directly and a null would fault its render.
+		MissingMembers: []string{},
+		Enabled:        s.Enabled,
+		CreatedAt:      s.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:      s.UpdatedAt.Format(time.RFC3339),
 	}
 	refs, err := xray.ParseSetMembers(s.Members)
 	if err != nil {

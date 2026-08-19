@@ -141,7 +141,13 @@ async function refresh() {
       proxyNames.value = (((await ListProxies()) || []) as any[]).map((p) => p.name).filter((n: string) => !n.startsWith('_'));
     } catch { /* non-fatal for the picker */ }
     try {
-      sets.value = ((await ListXraySets()) || []) as unknown as XraySetRow[];
+      // Go marshals a nil slice as null; the list template indexes both
+      // slices, so normalise before they reach the render.
+      sets.value = (((await ListXraySets()) || []) as any[]).map((s) => ({
+        ...s,
+        members: s.members || [],
+        missingMembers: s.missingMembers || [],
+      })) as unknown as XraySetRow[];
     } catch { /* non-fatal — the outbounds list still renders */ }
     if (!routing.value.dirty) {
       const r = await XrayRouting();
