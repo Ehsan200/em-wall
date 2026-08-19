@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
   Groups, ApplyGroup, SyncGroup, DeleteGroupRules, SetGroupEnabled,
-  ListProxies, ListXray, BulkUpdateRules, RuleExitIP,
+  ListProxies, ListXray, ListXraySets, BulkUpdateRules, RuleExitIP,
   DeleteCustomGroup,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -38,12 +38,28 @@ type XrayRow = {
   updatedAt: string;
 };
 
+// Local mirror of XraySetDTO — see above for the rationale. A set is a
+// named bundle of outbounds a rule binds to as a unit ("xrayset:NAME");
+// editing the set reaches every rule bound to it, which is the whole
+// point of binding by reference instead of pasting the member list in.
+type XraySetRow = {
+  id: number;
+  name: string;
+  members: string[];
+  enabled: boolean;
+  missingMembers: string[];
+  usableCount: number;
+  ruleCount: number;
+  interface: string;
+};
+
 const emit = defineEmits<{ (e: 'changed'): void }>();
 
 const rules = ref<ipc.RuleDTO[]>([]);
 const interfaces = ref<ipc.InterfaceDTO[]>([]);
 const proxies = ref<ProxyRow[]>([]);
 const xrays = ref<XrayRow[]>([]);
+const xraySets = ref<XraySetRow[]>([]);
 const knownGroups = ref<ipc.GroupDTO[]>([]);
 const error = ref<string>('');
 const pendingDelete = ref<number | null>(null);
@@ -392,10 +408,11 @@ async function confirmDeleteGroup(g: ipc.GroupDTO) {
 const groupApply = ref<{
   key: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'proxy' | 'xray';
+  binding: 'iface' | 'proxy' | 'xray' | 'set';
   iface: string;
   proxies: string[];
   xrays: string[];
+  set: string;
   enabled: boolean;
 } | null>(null);
 
@@ -407,6 +424,7 @@ function openGroupForm(g: ipc.GroupDTO) {
     iface: '',
     proxies: [],
     xrays: [],
+    set: '',
     enabled: true,
   };
 }
@@ -432,6 +450,7 @@ function groupInterfaceField(): string {
   if (!g || g.action !== 'route') return '';
   if (g.binding === 'proxy' && g.proxies.length > 0) return `proxy:${g.proxies.join(',')}`;
   if (g.binding === 'xray' && g.xrays.length > 0) return `xray:${g.xrays.join(',')}`;
+  if (g.binding === 'set' && g.set) return `xrayset:${g.set}`;
   if (g.binding === 'iface') return g.iface;
   return '';
 }
@@ -443,6 +462,7 @@ function groupApplyValid(): boolean {
   if (g.binding === 'iface') return !!g.iface;
   if (g.binding === 'proxy') return g.proxies.length > 0;
   if (g.binding === 'xray') return g.xrays.length > 0;
+  if (g.binding === 'set') return !!g.set;
   return false;
 }
 
@@ -535,10 +555,11 @@ const draft = ref({
   pattern: '',
   action: 'block' as 'block' | 'route',
   // Only meaningful when action === 'route':
-  binding: 'iface' as 'iface' | 'proxy' | 'xray',
+  binding: 'iface' as 'iface' | 'proxy' | 'xray' | 'set',
   iface: '',
   proxies: [] as string[],
   xrays: [] as string[],
+  set: '',
   enabled: true,
 });
 
@@ -549,6 +570,9 @@ function draftInterfaceField(): string {
   }
   if (draft.value.binding === 'xray' && draft.value.xrays.length > 0) {
     return `xray:${draft.value.xrays.join(',')}`;
+  }
+  if (draft.value.binding === 'set' && draft.value.set) {
+    return `xrayset:${draft.value.set}`;
   }
   if (draft.value.binding === 'iface') return draft.value.iface;
   return '';
@@ -561,6 +585,7 @@ function draftIsValid(): boolean {
   if (draft.value.binding === 'iface') return !!draft.value.iface;
   if (draft.value.binding === 'proxy') return draft.value.proxies.length > 0;
   if (draft.value.binding === 'xray') return draft.value.xrays.length > 0;
+  if (draft.value.binding === 'set') return !!draft.value.set;
   return false;
 }
 
@@ -638,10 +663,11 @@ function toggleSection(rs: ipc.RuleDTO[]) {
 // Editor panel state, mirroring `draft` minus pattern/enabled.
 type BulkState = {
   action: 'block' | 'route';
-  binding: 'iface' | 'proxy' | 'xray';
+  binding: 'iface' | 'proxy' | 'xray' | 'set';
   iface: string;
   proxies: string[];
   xrays: string[];
+  set: string;
 };
 const bulk = ref<BulkState | null>(null);
 
@@ -652,6 +678,7 @@ function openBulk() {
     iface: '',
     proxies: [],
     xrays: [],
+    set: '',
   };
 }
 
@@ -676,6 +703,7 @@ function bulkInterfaceField(): string {
   if (!b || b.action !== 'route') return '';
   if (b.binding === 'proxy' && b.proxies.length > 0) return `proxy:${b.proxies.join(',')}`;
   if (b.binding === 'xray' && b.xrays.length > 0) return `xray:${b.xrays.join(',')}`;
+  if (b.binding === 'set' && b.set) return `xrayset:${b.set}`;
   if (b.binding === 'iface') return b.iface;
   return '';
 }
@@ -687,6 +715,7 @@ function bulkIsValid(): boolean {
   if (b.binding === 'iface') return !!b.iface;
   if (b.binding === 'proxy') return b.proxies.length > 0;
   if (b.binding === 'xray') return b.xrays.length > 0;
+  if (b.binding === 'set') return !!b.set;
   return false;
 }
 
@@ -716,20 +745,22 @@ type EditState = {
   id: number;
   pattern: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'proxy' | 'xray';
+  binding: 'iface' | 'proxy' | 'xray' | 'set';
   iface: string;
   proxies: string[];
   xrays: string[];
+  set: string;
   enabled: boolean;
 };
 
 const editing = ref<EditState | null>(null);
 
 function beginEdit(r: ipc.RuleDTO) {
-  let binding: 'iface' | 'proxy' | 'xray' = 'iface';
+  let binding: 'iface' | 'proxy' | 'xray' | 'set' = 'iface';
   let iface = '';
   let proxyNames: string[] = [];
   let xrayNames: string[] = [];
+  let setName = '';
   if (r.interface.startsWith('app:')) {
     // Legacy app-bound rules are being removed daemon-side; degrade
     // gracefully to an empty interface binding so editing doesn't crash.
@@ -738,6 +769,9 @@ function beginEdit(r: ipc.RuleDTO) {
   } else if (r.interface.startsWith('proxy:')) {
     binding = 'proxy';
     proxyNames = r.interface.substring(6).split(',').map(s => s.trim()).filter(Boolean);
+  } else if (r.interface.startsWith('xrayset:')) {
+    binding = 'set';
+    setName = r.interface.substring(8).trim();
   } else if (r.interface.startsWith('xray:')) {
     binding = 'xray';
     xrayNames = r.interface.substring(5).split(',').map(s => s.trim()).filter(Boolean);
@@ -759,6 +793,7 @@ function beginEdit(r: ipc.RuleDTO) {
     iface,
     proxies: proxyNames,
     xrays: xrayNames,
+    set: setName,
     enabled: r.enabled,
   };
 }
@@ -770,6 +805,7 @@ function editingInterfaceField(): string {
   if (!e || e.action !== 'route') return '';
   if (e.binding === 'proxy' && e.proxies.length > 0) return `proxy:${e.proxies.join(',')}`;
   if (e.binding === 'xray' && e.xrays.length > 0) return `xray:${e.xrays.join(',')}`;
+  if (e.binding === 'set' && e.set) return `xrayset:${e.set}`;
   if (e.binding === 'iface') return e.iface;
   return '';
 }
@@ -781,6 +817,7 @@ function editingIsValid(): boolean {
   if (e.binding === 'iface') return !!e.iface;
   if (e.binding === 'proxy') return e.proxies.length > 0;
   if (e.binding === 'xray') return e.xrays.length > 0;
+  if (e.binding === 'set') return !!e.set;
   return false;
 }
 
@@ -817,6 +854,7 @@ async function refresh() {
     interfaces.value = (await Interfaces()) || [];
     proxies.value = ((await ListProxies()) || []) as unknown as ProxyRow[];
     xrays.value = ((await ListXray()) || []) as unknown as XrayRow[];
+    xraySets.value = ((await ListXraySets()) || []) as unknown as XraySetRow[];
     if (knownGroups.value.length === 0) {
       knownGroups.value = (await Groups()) || [];
     }
@@ -909,6 +947,8 @@ function ifaceLabel(i: ipc.InterfaceDTO): string {
 //   'utunN'       → fixed interface
 //   'proxy:NAME'  → routed through an upstream HTTP/SOCKS5 proxy
 //   'xray:NAME'   → routed through an embedded xray-core outbound
+//   'xrayset:NAME'→ routed through a named outbound SET, whose current
+//                   members the daemon resolves on every rule reload
 function ruleIsProxy(field: string): boolean { return field.startsWith('proxy:'); }
 
 // "proxy:work,home" → ["work","home"]
@@ -921,6 +961,43 @@ function ruleIsXray(field: string): boolean { return field.startsWith('xray:'); 
 // "xray:a,b" → ["a","b"]
 function ruleXrayNames(field: string): string[] {
   return field.replace(/^xray:/, '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function ruleIsSet(field: string): boolean { return field.startsWith('xrayset:'); }
+
+// "xrayset:iproute" → "iproute"
+function ruleSetName(field: string): string {
+  return field.replace(/^xrayset:/, '').trim();
+}
+
+// Template helper: keeps the "(missing)" fallback option out of arrow
+// functions inlined in v-if, where TS loses the null-narrowing on the
+// surrounding form state.
+function setIsKnown(name: string): boolean {
+  return xraySets.value.some(s => s.name === name);
+}
+
+function setByName(name: string): XraySetRow | undefined {
+  return xraySets.value.find(s => s.name === name);
+}
+
+// Short badge for a set reference: how many of its members could
+// actually be dialled right now, or why it can't be.
+function setStatusBadge(name: string): string {
+  const s = setByName(name);
+  if (!s) return '?';
+  if (!s.enabled) return 'off';
+  return `${s.usableCount}/${s.members.length}`;
+}
+
+function setStatusLabel(name: string): string {
+  const s = setByName(name);
+  if (!s) return `${name} — outbound set no longer exists`;
+  if (!s.enabled) return `set "${name}" is disabled — its rules return NXDOMAIN`;
+  const parts = [`members: ${s.members.join(', ')}`];
+  if (s.missingMembers.length) parts.push(`missing: ${s.missingMembers.join(', ')}`);
+  parts.push(`used by ${s.ruleCount} rule(s)`);
+  return parts.join(' · ');
 }
 
 function xrayByName(name: string): XrayRow | undefined {
@@ -970,6 +1047,13 @@ function bindingDown(field: string): boolean {
       const x = xrayByName(n);
       return !!x && x.enabled;
     });
+  }
+  if (ruleIsSet(field)) {
+    // A set is down when it's gone, switched off, or every member it
+    // names has become undialable — the daemon falls through the
+    // members in order, so one usable member is enough.
+    const s = setByName(ruleSetName(field));
+    return !s || !s.enabled || s.usableCount === 0;
   }
   return !interfaces.value.some(i => i.name === field);
 }
@@ -1087,6 +1171,8 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <button :class="['seg', {active: groupApply.binding === 'iface'}]" @click="groupApply.binding = 'iface'">Interface</button>
             <button :class="['seg', {active: groupApply.binding === 'proxy'}]" @click="groupApply.binding = 'proxy'">Proxy</button>
             <button :class="['seg', {active: groupApply.binding === 'xray'}]" @click="groupApply.binding = 'xray'">Xray</button>
+            <button :class="['seg', {active: groupApply.binding === 'set'}]" @click="groupApply.binding = 'set'"
+                    title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
           </div>
           <select v-if="groupApply.binding === 'iface'" v-model="groupApply.iface" style="flex: 1">
             <option value="">— pick interface —</option>
@@ -1098,12 +1184,22 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ groupApply.proxies.length }} selected
             </span>
           </span>
-          <span v-else class="muted" style="font-size: 11px; flex: 1">
+          <span v-else-if="groupApply.binding === 'xray'" class="muted" style="font-size: 11px; flex: 1">
             select one or more xray outbounds — daemon uses the first that dials
             <span v-if="groupApply.xrays.length" style="color: var(--accent); font-weight: 600">
               · {{ groupApply.xrays.length }} selected
             </span>
           </span>
+          <select v-else v-model="groupApply.set" style="flex: 1">
+            <option value="">— pick outbound set —</option>
+            <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
+              {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
+            </option>
+            <!-- keep a stored name visible even if the set is gone -->
+            <option v-if="groupApply.set && !setIsKnown(groupApply.set)" :value="groupApply.set">
+              {{ groupApply.set }} (missing)
+            </option>
+          </select>
         </div>
         <div v-if="groupApply.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
@@ -1154,6 +1250,8 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
             <button :class="['seg', {active: draft.binding === 'iface'}]" @click="draft.binding = 'iface'">Interface</button>
             <button :class="['seg', {active: draft.binding === 'proxy'}]" @click="draft.binding = 'proxy'">Proxy</button>
             <button :class="['seg', {active: draft.binding === 'xray'}]" @click="draft.binding = 'xray'">Xray</button>
+            <button :class="['seg', {active: draft.binding === 'set'}]" @click="draft.binding = 'set'"
+                    title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
           </div>
           <select v-if="draft.binding === 'iface'" v-model="draft.iface" style="flex: 1">
             <option value="">— pick interface —</option>
@@ -1165,12 +1263,22 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               · {{ draft.proxies.length }} selected
             </span>
           </span>
-          <span v-else class="muted" style="font-size: 11px; flex: 1">
+          <span v-else-if="draft.binding === 'xray'" class="muted" style="font-size: 11px; flex: 1">
             select one or more xray outbounds — daemon uses the first that dials
             <span v-if="draft.xrays.length" style="color: var(--accent); font-weight: 600">
               · {{ draft.xrays.length }} selected
             </span>
           </span>
+          <select v-else v-model="draft.set" style="flex: 1">
+            <option value="">— pick outbound set —</option>
+            <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
+              {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
+            </option>
+            <!-- keep a stored name visible even if the set is gone -->
+            <option v-if="draft.set && !setIsKnown(draft.set)" :value="draft.set">
+              {{ draft.set }} (missing)
+            </option>
+          </select>
         </div>
         <div v-if="draft.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
@@ -1241,6 +1349,8 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
               <button :class="['seg', {active: bulk.binding === 'iface'}]" @click="bulk.binding = 'iface'">Interface</button>
               <button :class="['seg', {active: bulk.binding === 'proxy'}]" @click="bulk.binding = 'proxy'">Proxy</button>
               <button :class="['seg', {active: bulk.binding === 'xray'}]" @click="bulk.binding = 'xray'">Xray</button>
+              <button :class="['seg', {active: bulk.binding === 'set'}]" @click="bulk.binding = 'set'"
+                      title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
             </div>
             <select v-if="bulk.binding === 'iface'" v-model="bulk.iface" style="flex: 1">
               <option value="">— pick interface —</option>
@@ -1252,12 +1362,22 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                 · {{ bulk.proxies.length }} selected
               </span>
             </span>
-            <span v-else class="muted" style="font-size: 11px; flex: 1">
+            <span v-else-if="bulk.binding === 'xray'" class="muted" style="font-size: 11px; flex: 1">
               select one or more xray outbounds — daemon uses the first that dials
               <span v-if="bulk.xrays.length" style="color: var(--accent); font-weight: 600">
                 · {{ bulk.xrays.length }} selected
               </span>
             </span>
+            <select v-else v-model="bulk.set" style="flex: 1">
+              <option value="">— pick outbound set —</option>
+              <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
+                {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
+              </option>
+              <!-- keep a stored name visible even if the set is gone -->
+              <option v-if="bulk.set && !setIsKnown(bulk.set)" :value="bulk.set">
+                {{ bulk.set }} (missing)
+              </option>
+            </select>
           </div>
           <div v-if="bulk.binding === 'proxy'" class="chip-grid">
             <button v-for="p in proxies" :key="p.id"
@@ -1417,9 +1537,11 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                       class="tag tag-block" style="margin-left: 6px"
                       :title="ruleIsProxy(r.interface) ? 'Proxy missing — referenced proxy no longer exists'
                             : ruleIsXray(r.interface) ? 'No referenced xray entry is enabled — queries return NXDOMAIN'
+                            : ruleIsSet(r.interface) ? setStatusLabel(ruleSetName(r.interface))
                             : 'Configured interface is not up — queries return NXDOMAIN until it comes back'">
                   ⚠ {{ ruleIsProxy(r.interface) ? 'proxy missing'
                        : ruleIsXray(r.interface) ? 'xray off'
+                       : ruleIsSet(r.interface) ? 'set unusable'
                        : 'iface down' }}
                 </span>
               </td>
@@ -1440,6 +1562,16 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                     <span>xray:{{ n }}</span>
                     <span class="muted">{{ xrayStatusBadge(n) }}</span>
                     <span v-if="i < ruleXrayNames(r.interface).length - 1" class="muted">·</span>
+                  </span>
+                </div>
+                <div v-else-if="r.action === 'route' && ruleIsSet(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
+                  <!-- One chip for the whole set: the rule binds to the
+                       NAME, so the member list is a tooltip detail that
+                       can change under it without touching the rule. -->
+                  <span class="row" style="gap: 4px; padding: 2px 6px; border: 1px solid var(--accent); border-radius: 12px; font-size: 11px"
+                        :title="setStatusLabel(ruleSetName(r.interface))">
+                    <span>⛓ {{ ruleSetName(r.interface) }}</span>
+                    <span class="muted">{{ setStatusBadge(ruleSetName(r.interface)) }}</span>
                   </span>
                 </div>
                 <code v-else-if="r.action === 'route'" style="font-size: 12px">{{ r.interface }}</code>
@@ -1510,6 +1642,8 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                         <button :class="['seg', {active: editing!.binding === 'iface'}]" @click="editing!.binding = 'iface'">Interface</button>
                         <button :class="['seg', {active: editing!.binding === 'proxy'}]" @click="editing!.binding = 'proxy'">Proxy</button>
                         <button :class="['seg', {active: editing!.binding === 'xray'}]" @click="editing!.binding = 'xray'">Xray</button>
+                        <button :class="['seg', {active: editing!.binding === 'set'}]" @click="editing!.binding = 'set'"
+                                title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
                       </div>
                       <select v-if="editing!.binding === 'iface'" v-model="editing!.iface" style="flex: 1">
                         <option value="">— pick interface —</option>
@@ -1523,12 +1657,22 @@ onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
                           · {{ editing!.proxies.length }} selected
                         </span>
                       </span>
-                      <span v-else class="muted" style="font-size: 11px; flex: 1">
+                      <span v-else-if="editing!.binding === 'xray'" class="muted" style="font-size: 11px; flex: 1">
                         select one or more xray outbounds — daemon uses the first that dials
                         <span v-if="editing!.xrays.length" style="color: var(--accent); font-weight: 600">
                           · {{ editing!.xrays.length }} selected
                         </span>
                       </span>
+                      <select v-else v-model="editing!.set" style="flex: 1">
+                        <option value="">— pick outbound set —</option>
+                        <option v-for="s in xraySets" :key="s.id" :value="s.name" :disabled="!s.enabled">
+                          {{ s.name }} ({{ s.members.length }} member{{ s.members.length === 1 ? '' : 's' }}){{ s.enabled ? '' : ' — disabled' }}
+                        </option>
+                        <!-- keep a stored name visible even if the set is gone -->
+                        <option v-if="editing!.set && !setIsKnown(editing!.set)" :value="editing!.set">
+                          {{ editing!.set }} (missing)
+                        </option>
+                      </select>
                     </div>
                     <div v-if="editing!.binding === 'proxy'" class="chip-grid">
                       <button v-for="p in proxies" :key="p.id"

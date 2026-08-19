@@ -101,3 +101,37 @@ func TestEngine_ReloadPicksUpChanges(t *testing.T) {
 type mutableSource struct{ list []rules.Rule }
 
 func (m *mutableSource) List(_ context.Context) ([]rules.Rule, error) { return m.list, nil }
+
+// staticExpander is a fixed rewrite map standing in for *xray.Store.
+type staticExpander map[string]string
+
+func (s staticExpander) Expansions(context.Context) (map[string]string, error) {
+	return s, nil
+}
+
+// A rule bound to an indirect interface must come out of Decide already
+// resolved, so no downstream consumer needs to know sets exist.
+func TestReloadExpandsIndirectInterface(t *testing.T) {
+	src := staticSource{list: []rules.Rule{
+		{ID: 1, Pattern: "a.com", Action: rules.ActionRoute, Interface: "xrayset:iproute", Enabled: true},
+		{ID: 2, Pattern: "b.com", Action: rules.ActionRoute, Interface: "utun4", Enabled: true},
+		{ID: 3, Pattern: "c.com", Action: rules.ActionRoute, Interface: "xrayset:gone", Enabled: true},
+	}}
+	e := New(src)
+	e.SetExpander(staticExpander{"xrayset:iproute": "xray:a,b"})
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	if got := e.Decide("a.com").Interface; got != "xray:a,b" {
+		t.Errorf("set-bound rule iface = %q, want %q", got, "xray:a,b")
+	}
+	if got := e.Decide("b.com").Interface; got != "utun4" {
+		t.Errorf("literal iface rewritten to %q", got)
+	}
+	// Unresolved set keeps its raw ref: nothing downstream matches it, so
+	// the rule fails closed instead of falling back to the default route.
+	if got := e.Decide("c.com").Interface; got != "xrayset:gone" {
+		t.Errorf("unresolved set iface = %q, want the raw ref", got)
+	}
+}

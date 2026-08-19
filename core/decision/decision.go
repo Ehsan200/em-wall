@@ -43,10 +43,28 @@ type RuleSource interface {
 	List(ctx context.Context) ([]rules.Rule, error)
 }
 
+// InterfaceExpander resolves indirect Rule.Interface bindings into the
+// literal form the routing layer understands. It is satisfied by
+// *xray.Store (outbound sets), but the engine stays OS- and
+// xray-agnostic: it only ever sees opaque strings.
+//
+// Expansions returns a rewrite map keyed by the FULL stored interface
+// value; an interface absent from the map passes through unchanged.
+//
+// A binding that no longer resolves (deleted or disabled set) is simply
+// left out of the map, so the raw reference survives into the routing
+// layer. Nothing there recognizes it, so the rule fails closed
+// (NXDOMAIN) instead of leaking its traffic out of the default route,
+// and the unresolved name still shows up verbatim in the query log.
+type InterfaceExpander interface {
+	Expansions(ctx context.Context) (map[string]string, error)
+}
+
 // Engine decides outcomes for DNS queries. It caches the rule list
 // in memory and is hot-path safe; call Reload after rule changes.
 type Engine struct {
 	src   RuleSource
+	exp   InterfaceExpander
 	cache atomic.Pointer[[]rules.Rule]
 }
 
@@ -57,10 +75,30 @@ func New(src RuleSource) *Engine {
 	return e
 }
 
+// SetExpander installs an InterfaceExpander applied to every rule at
+// Reload time. Call before the first Reload; passing nil disables
+// expansion. Not safe to call concurrently with Reload.
+func (e *Engine) SetExpander(exp InterfaceExpander) { e.exp = exp }
+
+// Reload refreshes the cached rule list. Indirect interface bindings are
+// resolved ONCE here rather than per query, so Decide stays a pure
+// in-memory lookup and every downstream consumer of Decision.Interface
+// (dnsproxy, proxytun, routing) only ever sees literal bindings.
 func (e *Engine) Reload(ctx context.Context) error {
 	list, err := e.src.List(ctx)
 	if err != nil {
 		return err
+	}
+	if e.exp != nil {
+		rewrite, err := e.exp.Expansions(ctx)
+		if err != nil {
+			return err
+		}
+		for i := range list {
+			if v, ok := rewrite[list[i].Interface]; ok {
+				list[i].Interface = v
+			}
+		}
 	}
 	e.cache.Store(&list)
 	return nil

@@ -4,6 +4,7 @@ import {
   XrayStatus, ListXray, AddXray, UpdateXray, DeleteXray, SetXrayEnabled,
   XrayRouting, SetXrayRouting, ParseXrayLink, TestXray,
   ListXraySubs, ListProxies,
+  ListXraySets, AddXraySet, UpdateXraySet, DeleteXraySet, SetXraySetEnabled,
 } from '../../wailsjs/go/main/App';
 import MonacoJsonEditor from './MonacoJsonEditor.vue';
 import DialerPicker from './DialerPicker.vue';
@@ -32,7 +33,21 @@ type XrayStatusRow = {
   recentLogs: string[];
 };
 
-type SubTab = 'outbounds' | 'subscriptions' | 'routing' | 'status';
+// A set bundles several outbounds under one name. A rule binds to the
+// NAME ("xrayset:NAME"), so changing the membership here updates every
+// rule that uses the set — no re-picking chips per rule, no drift.
+type XraySetRow = {
+  id: number;
+  name: string;
+  members: string[];
+  enabled: boolean;
+  missingMembers: string[];
+  usableCount: number;
+  ruleCount: number;
+  interface: string;
+};
+
+type SubTab = 'outbounds' | 'sets' | 'subscriptions' | 'routing' | 'status';
 
 const status = ref<XrayStatusRow | null>(null);
 const entries = ref<XrayRow[]>([]);
@@ -67,6 +82,12 @@ let pendingDeleteTimer: number | undefined;
 const testTarget = ref<string>('1.1.1.1:443');
 const testResults = ref<Record<number, { ok: boolean; message: string; latencyMs: number; exitIp?: string; country?: string; region?: string; city?: string }>>({});
 const revealedIPs = ref<Record<number, boolean>>({});
+
+const sets = ref<XraySetRow[]>([]);
+// One editor at a time: `null` = closed, `id: 0` = creating a new set.
+const setDraft = ref<{ id: number; name: string; members: string[]; enabled: boolean } | null>(null);
+const pendingSetDelete = ref<number | null>(null);
+let pendingSetDeleteTimer: number | undefined;
 
 const linkDialog = ref<{ open: boolean; link: string }>({ open: false, link: '' });
 
@@ -118,6 +139,9 @@ async function refresh() {
       subNames.value = (((await ListXraySubs()) || []) as any[]).map((s) => s.name);
       proxyNames.value = (((await ListProxies()) || []) as any[]).map((p) => p.name).filter((n: string) => !n.startsWith('_'));
     } catch { /* non-fatal for the picker */ }
+    try {
+      sets.value = ((await ListXraySets()) || []) as unknown as XraySetRow[];
+    } catch { /* non-fatal — the outbounds list still renders */ }
     if (!routing.value.dirty) {
       const r = await XrayRouting();
       routing.value.raw = r?.rules || '';
@@ -205,6 +229,108 @@ async function toggleEnabled(row: XrayRow) {
     await SetXrayEnabled(row.id, !row.enabled);
     await refresh();
   } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+// ---------- Outbound sets ----------
+
+// Everything a set can be built from, as typed refs. Proxies are
+// included because a set is just a fallback chain and the daemon can
+// dial either kind; subscriptions are NOT — their nodes have no local
+// inbound of their own (they're only reachable as a master's dialer).
+const setMemberOptions = computed<string[]>(() => [
+  ...entries.value.map((e) => `xray:${e.name}`),
+  ...proxyNames.value.map((n) => `proxy:${n}`),
+]);
+
+const setDraftIsValid = computed(() => {
+  const d = setDraft.value;
+  if (!d) return false;
+  if (!d.name.trim() || !/^[a-z0-9_-]+$/.test(d.name.trim())) return false;
+  return d.members.filter(Boolean).length > 0;
+});
+
+function openSetDraft() {
+  setDraft.value = { id: 0, name: '', members: [''], enabled: true };
+}
+
+function editSet(s: XraySetRow) {
+  setDraft.value = { id: s.id, name: s.name, members: [...s.members], enabled: s.enabled };
+}
+
+function closeSetDraft() { setDraft.value = null; }
+
+function addSetMemberRow() {
+  setDraft.value?.members.push('');
+}
+
+function removeSetMemberRow(i: number) {
+  setDraft.value?.members.splice(i, 1);
+}
+
+// Fallback order is meaningful — the daemon walks members top-down and
+// uses the first that dials — so the editor lets the user reorder.
+function moveSetMember(i: number, delta: number) {
+  const d = setDraft.value;
+  if (!d) return;
+  const j = i + delta;
+  if (j < 0 || j >= d.members.length) return;
+  const [m] = d.members.splice(i, 1);
+  d.members.splice(j, 0, m);
+}
+
+async function saveSet() {
+  const d = setDraft.value;
+  if (!d || !setDraftIsValid.value) return;
+  busy.value = true;
+  try {
+    const members = d.members.filter(Boolean);
+    if (d.id === 0) {
+      await AddXraySet(d.name.trim(), members, d.enabled);
+    } else {
+      await UpdateXraySet(d.id, d.name.trim(), members, d.enabled);
+    }
+    setDraft.value = null;
+    await refresh();
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function toggleSet(s: XraySetRow) {
+  busy.value = true;
+  try {
+    await SetXraySetEnabled(s.id, !s.enabled);
+    await refresh();
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+function askDeleteSet(s: XraySetRow) {
+  if (pendingSetDelete.value === s.id) return;
+  pendingSetDelete.value = s.id;
+  if (pendingSetDeleteTimer) window.clearTimeout(pendingSetDeleteTimer);
+  pendingSetDeleteTimer = window.setTimeout(() => { pendingSetDelete.value = null; }, 3000);
+}
+
+async function confirmDeleteSet(s: XraySetRow) {
+  if (pendingSetDeleteTimer) window.clearTimeout(pendingSetDeleteTimer);
+  pendingSetDelete.value = null;
+  busy.value = true;
+  try {
+    await DeleteXraySet(s.id);
+    await refresh();
+  } catch (e: any) {
+    // The daemon refuses while rules still bind the set — surface that
+    // verbatim, it names the blast radius.
     error.value = e?.message || String(e);
   } finally {
     busy.value = false;
@@ -405,6 +531,10 @@ defineExpose({ refresh });
         Outbounds
         <span class="subtab-badge">{{ entries.length }}</span>
       </button>
+      <button class="subtab" :class="{ active: subTab === 'sets' }" @click="subTab = 'sets'">
+        Sets
+        <span v-if="sets.length" class="subtab-badge">{{ sets.length }}</span>
+      </button>
       <button class="subtab" :class="{ active: subTab === 'subscriptions' }" @click="subTab = 'subscriptions'">
         Subscriptions
         <span v-if="subNames.length" class="subtab-badge">{{ subNames.length }}</span>
@@ -552,6 +682,123 @@ defineExpose({ refresh });
         <div class="row" style="gap: 6px; justify-content: flex-end">
           <button @click="cancelImport" :disabled="busy">Cancel</button>
           <button class="primary" @click="applyImport" :disabled="!linkDialog.link.trim() || busy">Parse</button>
+        </div>
+      </div>
+    </template>
+
+    <!-- ============ Sets tab ============ -->
+    <template v-else-if="subTab === 'sets'">
+      <div class="col" style="gap: 10px">
+        <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
+          <button v-if="!setDraft" @click="openSetDraft" :disabled="busy">+ New set</button>
+          <span class="muted" style="font-size: 11px; flex: 1">
+            A set bundles outbounds under one name. Rules bind to
+            <code style="font-size: 11px">xrayset:NAME</code>, so editing the set
+            updates every rule that uses it.
+          </span>
+        </div>
+
+        <!-- Editor (create + edit share it; id 0 means create) -->
+        <div v-if="setDraft" class="col"
+             style="gap: 10px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px">
+          <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
+            <strong style="font-size: 13px">{{ setDraft.id === 0 ? 'New set' : `Edit set: ${setDraft.name}` }}</strong>
+            <div style="flex: 1"></div>
+            <label class="toggle" :title="setDraft.enabled ? 'enabled' : 'disabled — bound rules stop resolving'">
+              <input type="checkbox" v-model="setDraft.enabled" />
+              <span class="track"></span>
+            </label>
+          </div>
+
+          <div class="row" style="gap: 8px; align-items: center">
+            <span class="muted" style="font-size: 11px; min-width: 60px">name:</span>
+            <input v-model="setDraft.name" placeholder="iproute" style="flex: 1" />
+            <code v-if="setDraft.name" style="font-size: 11px; color: var(--text-dim)">xrayset:{{ setDraft.name }}</code>
+          </div>
+
+          <div class="col" style="gap: 6px">
+            <span class="muted" style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px">
+              Members — tried in order, first that dials wins
+            </span>
+            <div v-for="(m, i) in setDraft.members" :key="i" class="row" style="gap: 6px; align-items: center">
+              <span class="muted" style="font-size: 11px; width: 16px; text-align: right">{{ i + 1 }}</span>
+              <select v-model="setDraft.members[i]" style="flex: 1">
+                <option value="" disabled>— choose outbound —</option>
+                <option v-for="opt in setMemberOptions" :key="opt" :value="opt">{{ opt }}</option>
+                <!-- keep a stored ref visible even if its target is gone -->
+                <option v-if="m && !setMemberOptions.includes(m)" :value="m">{{ m }} (missing)</option>
+              </select>
+              <button @click="moveSetMember(i, -1)" :disabled="i === 0" title="move up">↑</button>
+              <button @click="moveSetMember(i, 1)" :disabled="i === setDraft.members.length - 1" title="move down">↓</button>
+              <button @click="removeSetMemberRow(i)" title="remove">✕</button>
+            </div>
+            <div class="row" style="gap: 6px">
+              <button @click="addSetMemberRow">+ Add member</button>
+            </div>
+          </div>
+
+          <div class="row" style="gap: 6px; justify-content: flex-end">
+            <button @click="closeSetDraft" :disabled="busy">Cancel</button>
+            <button class="primary" @click="saveSet" :disabled="!setDraftIsValid || busy">
+              {{ setDraft.id === 0 ? 'Create set' : 'Save' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="sets.length === 0 && !setDraft" class="col"
+             style="padding: 24px; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; align-items: center; gap: 6px">
+          <span style="font-size: 13px">No sets yet.</span>
+          <span class="muted" style="font-size: 12px">
+            Group the outbounds you keep picking together, then bind rules to the set instead.
+          </span>
+        </div>
+
+        <div v-for="s in sets" :key="s.id"
+             class="col" style="gap: 8px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+          <div class="row" style="justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap">
+            <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0">
+              <strong style="font-size: 13px">xrayset:{{ s.name }}</strong>
+              <span class="tag" :class="s.enabled ? 'tag-route' : 'tag-off'" style="font-size: 11px">
+                {{ s.enabled ? 'enabled' : 'disabled' }}
+              </span>
+              <span class="tag" style="font-size: 11px"
+                    :class="s.usableCount === 0 ? 'tag-block' : 'tag-allow'"
+                    :title="s.usableCount === 0 ? 'no member can be dialled — bound rules return NXDOMAIN' : 'members currently usable'">
+                {{ s.usableCount }}/{{ s.members.length }} usable
+              </span>
+              <span v-if="s.missingMembers.length" class="tag tag-block" style="font-size: 11px"
+                    :title="'missing: ' + s.missingMembers.join(', ')">
+                ⚠ {{ s.missingMembers.length }} missing
+              </span>
+              <span class="muted" style="font-size: 11px">
+                used by {{ s.ruleCount }} rule{{ s.ruleCount === 1 ? '' : 's' }}
+              </span>
+            </div>
+            <div class="row" style="gap: 6px">
+              <label class="toggle" @click.prevent="toggleSet(s)">
+                <input type="checkbox" :checked="s.enabled" />
+                <span class="track"></span>
+              </label>
+              <button @click="editSet(s)" :disabled="busy">Edit</button>
+              <button :class="pendingSetDelete === s.id ? 'danger primary' : 'danger'"
+                      @click="pendingSetDelete === s.id ? confirmDeleteSet(s) : askDeleteSet(s)"
+                      :disabled="busy">
+                {{ pendingSetDelete === s.id ? 'Confirm?' : 'Delete' }}
+              </button>
+            </div>
+          </div>
+          <div class="row" style="gap: 4px; flex-wrap: wrap">
+            <span v-for="(m, i) in s.members" :key="m"
+                  class="row" style="gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 12px; font-size: 11px"
+                  :class="{ 'not-running': s.missingMembers.includes(m) }"
+                  :title="s.missingMembers.includes(m) ? 'target no longer exists' : ''">
+              <span class="muted">{{ i + 1 }}</span>
+              <span>{{ m }}</span>
+            </span>
+          </div>
+          <code v-if="s.interface" style="font-size: 11px; color: var(--text-dim)">
+            expands to {{ s.interface }}
+          </code>
         </div>
       </div>
     </template>

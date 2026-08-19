@@ -40,6 +40,11 @@ func (d *handlerDeps) reconcileIPRoutes(ctx context.Context) {
 		log.Printf("em-walld: reconcile IP routes: list rules: %v", err)
 		return
 	}
+	// Rules bound to an outbound set carry an indirect interface; resolve
+	// it here the same way decision.Engine does for the DNS path,
+	// otherwise a set-bound IP/CIDR rule would try to route via the
+	// literal string "xrayset:NAME".
+	rs = d.expandRuleIfaces(ctx, rs)
 	for _, r := range rs {
 		if r.Action != rules.ActionRoute || !r.Enabled || !rules.IsIPRule(r.Pattern) {
 			continue
@@ -97,6 +102,10 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
 			return nil, err
 		}
+		p.Interface = xray.CanonicalizeInterface(p.Interface)
+		if err := d.validateSetRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
 		r := rules.Rule{
 			Pattern:   p.Pattern,
 			Action:    rules.Action(p.Action),
@@ -121,6 +130,10 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			return nil, err
 		}
 		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
+		p.Interface = xray.CanonicalizeInterface(p.Interface)
+		if err := d.validateSetRefs(ctx, p.Interface); err != nil {
 			return nil, err
 		}
 		r := rules.Rule{
@@ -176,6 +189,10 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			return nil, err
 		}
 		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
+			return nil, err
+		}
+		p.Interface = xray.CanonicalizeInterface(p.Interface)
+		if err := d.validateSetRefs(ctx, p.Interface); err != nil {
 			return nil, err
 		}
 		var touched []int64
@@ -692,6 +709,10 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			if _, rerr := d.store.RenameInterfaceRef(ctx, proxy.InterfacePrefix, oldName, p.Name); rerr != nil {
 				return nil, fmt.Errorf("proxy renamed, but cascading rule references failed: %w", rerr)
 			}
+			// Outbound sets reference proxies by name too.
+			if _, serr := d.xrayStore.RenameSetMember(ctx, xray.DialerKindProxy, oldName, p.Name); serr != nil {
+				return nil, fmt.Errorf("proxy renamed, but cascading set membership failed: %w", serr)
+			}
 			if err := d.engine.Reload(ctx); err != nil {
 				return nil, fmt.Errorf("proxy renamed, but engine reload failed: %w", err)
 			}
@@ -717,6 +738,11 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		if len(refs) > 0 {
 			return nil, fmt.Errorf("proxy %q is referenced by %d rule(s); remove or edit those rules first", stored.Name, len(refs))
+		}
+		if sets, serr := d.setMemberBlockers(ctx, xray.DialerKindProxy, stored.Name); serr != nil {
+			return nil, serr
+		} else if len(sets) > 0 {
+			return nil, fmt.Errorf("proxy %q is a member of set(s): %s — remove it from those first", stored.Name, strings.Join(sets, ", "))
 		}
 		if err := d.proxyStore.Delete(ctx, p.ID); err != nil {
 			return nil, err
@@ -851,6 +877,14 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			if _, derr := d.xrayStore.RenameDialerXrayRef(ctx, oldName, p.Name); derr != nil {
 				return nil, fmt.Errorf("xray entry renamed, but cascading dialer references failed: %w", derr)
 			}
+			// ...and into outbound-set membership, which references
+			// entries by name just as a dialer does.
+			if _, serr := d.xrayStore.RenameSetMember(ctx, xray.DialerKindXray, oldName, p.Name); serr != nil {
+				return nil, fmt.Errorf("xray entry renamed, but cascading set membership failed: %w", serr)
+			}
+			if err := d.engine.Reload(ctx); err != nil {
+				return nil, fmt.Errorf("xray entry renamed, but engine reload failed: %w", err)
+			}
 		}
 		if err := d.xraySup.Reconcile(ctx); err != nil {
 			return nil, fmt.Errorf("entry updated, but xray reconcile failed: %w", err)
@@ -883,6 +917,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			return nil, derr
 		} else if len(dialers) > 0 {
 			return nil, fmt.Errorf("xray entry %q is used by dialer(s): %s — clear those first", stored.Name, strings.Join(dialers, ", "))
+		}
+		// Same for outbound sets: a set that loses a member silently
+		// shrinks the fallback chain of every rule bound to it.
+		if sets, serr := d.setMemberBlockers(ctx, xray.DialerKindXray, stored.Name); serr != nil {
+			return nil, serr
+		} else if len(sets) > 0 {
+			return nil, fmt.Errorf("xray entry %q is a member of set(s): %s — remove it from those first", stored.Name, strings.Join(sets, ", "))
 		}
 		if err := d.xrayStore.Delete(ctx, p.ID); err != nil {
 			return nil, err
@@ -1053,6 +1094,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	})
 
 	registerXraySubHandlers(s, d)
+	registerXraySetHandlers(s, d)
 	registerCustomGroupHandlers(s, d)
 	registerPortableHandlers(s, d)
 }
@@ -1433,4 +1475,3 @@ func (d *handlerDeps) rulesReferencingXray(ctx context.Context, name string) ([]
 	}
 	return ids, nil
 }
-

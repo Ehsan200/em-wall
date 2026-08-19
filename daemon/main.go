@@ -117,6 +117,11 @@ func main() {
 	}
 
 	engine := decision.New(store)
+	// Outbound sets ("xrayset:NAME") are indirect bindings; the engine
+	// resolves them to a literal interface at Reload time so the DNS and
+	// netstack paths never see the indirection. Must be installed before
+	// the first Reload or set-bound rules would start out unresolved.
+	engine.SetExpander(xrayStore)
 	if err := engine.Reload(context.Background()); err != nil {
 		log.Fatalf("em-walld: load rules: %v", err)
 	}
@@ -276,7 +281,7 @@ func main() {
 				if err != nil {
 					continue
 				}
-				names := multiBindingProxyNames(rs)
+				names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
 				if len(names) == 0 {
 					continue
 				}
@@ -484,22 +489,22 @@ func (s *storeLogSink) Log(name, action, iface string, ruleID int64, clientIP st
 // ---------- IPC handler wiring ----------
 
 type handlerDeps struct {
-	store       *rules.Store
-	proxyStore  *proxy.Store
-	proxyTable  *proxy.Table
-	xrayStore   *xray.Store
-	xraySup     *xraySupervisor
-	subFetch    *subFetcher
-	engine      *decision.Engine
-	router      *routing.Manager
-	pf          *pfctl.Manager
-	sysDNS      *SystemDNS
-	dnsServer   *dnsproxy.Server
-	latency     *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
-	proxyTun    string                   // daemon-owned utun name; "" if proxy routing is disabled
-	listenAddr  string
-	upstream    string
-	startedAt   time.Time
+	store      *rules.Store
+	proxyStore *proxy.Store
+	proxyTable *proxy.Table
+	xrayStore  *xray.Store
+	xraySup    *xraySupervisor
+	subFetch   *subFetcher
+	engine     *decision.Engine
+	router     *routing.Manager
+	pf         *pfctl.Manager
+	sysDNS     *SystemDNS
+	dnsServer  *dnsproxy.Server
+	latency    *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
+	proxyTun   string                   // daemon-owned utun name; "" if proxy routing is disabled
+	listenAddr string
+	upstream   string
+	startedAt  time.Time
 
 	// Reachability-probe target for proxies.test, parsed from the
 	// -proxy-test-target flag. host may be an IP literal or a DNS name.

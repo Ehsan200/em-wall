@@ -51,8 +51,8 @@ const (
 	MethodGroupsIcon             = "groups.icon"
 	MethodGroupsDeleteRules      = "groups.delete-rules"
 	MethodGroupsSetEnabled       = "groups.set-enabled"
-	MethodGroupsAdd              = "groups.add"    // create a custom group def
-	MethodGroupsUpdate           = "groups.update" // edit a custom group def
+	MethodGroupsAdd              = "groups.add"     // create a custom group def
+	MethodGroupsUpdate           = "groups.update"  // edit a custom group def
 	MethodGroupsDelete           = "groups.delete"  // remove a custom group def
 	MethodGroupsRefresh          = "groups.refresh" // re-fetch dynamic groups' vendor feeds
 	MethodExport                 = "portable.export"
@@ -81,9 +81,18 @@ const (
 	MethodXraySubRefresh         = "xraysub.refresh" // fetch now (ID, or 0 = all due)
 	MethodXraySubNodes           = "xraysub.nodes"
 	MethodXraySubSetNodeDisabled = "xraysub.setNodeDisabled"
-	MethodPublicIP               = "net.public-ip"
-	MethodRuleExitIP             = "rules.exit-ip"
-	MethodUsageQuery             = "usage.query"
+	// Outbound sets — a named, ordered bundle of xray entries / proxies a
+	// rule can bind to as one unit ("xrayset:NAME"). Constants read
+	// "XraySets*" (plural) to keep them clearly apart from
+	// MethodXraySetEnabled, which toggles a single xray ENTRY.
+	MethodXraySetsList       = "xrayset.list"
+	MethodXraySetsAdd        = "xrayset.add"
+	MethodXraySetsUpdate     = "xrayset.update"
+	MethodXraySetsDelete     = "xrayset.delete"
+	MethodXraySetsSetEnabled = "xrayset.setEnabled"
+	MethodPublicIP           = "net.public-ip"
+	MethodRuleExitIP         = "rules.exit-ip"
+	MethodUsageQuery         = "usage.query"
 )
 
 // Param/result payloads. Plain structs, json-tagged.
@@ -381,6 +390,46 @@ type XrayUpdateParams struct {
 	Outbound string `json:"outbound"`
 	Enabled  bool   `json:"enabled"`
 	Dialer   string `json:"dialer"`
+}
+
+// XraySetDTO is the public view of one outbound set. Members are typed
+// refs ("xray:NAME" / "proxy:NAME") in fallback order — the daemon uses
+// the first one that dials, exactly as an inline "xray:a,b,c" binding
+// does. The counts are computed daemon-side so the UI can badge a set
+// without a second round-trip.
+type XraySetDTO struct {
+	ID      int64    `json:"id"`
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Enabled bool     `json:"enabled"`
+	// MissingMembers lists refs whose target no longer exists. Non-empty
+	// means the set is partly broken; the UI flags it.
+	MissingMembers []string `json:"missingMembers"`
+	// UsableCount is how many members are present AND currently enabled,
+	// i.e. how many the daemon could actually fall back through. Zero
+	// means every rule bound to this set is failing.
+	UsableCount int `json:"usableCount"`
+	// RuleCount is how many rules bind to this set. Guards deletion and
+	// tells the user the blast radius of an edit.
+	RuleCount int `json:"ruleCount"`
+	// Interface is the literal binding this set currently expands to,
+	// shown read-only in the UI so the indirection stays inspectable.
+	Interface string `json:"interface"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+type XraySetAddParams struct {
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Enabled bool     `json:"enabled"`
+}
+
+type XraySetUpdateParams struct {
+	ID      int64    `json:"id"`
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Enabled bool     `json:"enabled"`
 }
 
 // XraySubDTO is the public view of a subscription plus its node counts.

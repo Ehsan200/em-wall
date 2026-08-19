@@ -37,7 +37,7 @@ func Open(path string) (*Store, error) {
 	sqlDB.SetMaxOpenConns(1)
 
 	if err := db.AutoMigrate(&Config{}, &kvSetting{},
-		&Subscription{}, &SubNode{}, &SubNodeOverride{}); err != nil {
+		&Subscription{}, &SubNode{}, &SubNodeOverride{}, &Set{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &Store{db: db}, nil

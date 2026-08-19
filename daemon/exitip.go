@@ -155,6 +155,11 @@ func (d *handlerDeps) rankCandidates(cands []exitCandidate) []exitCandidate {
 // (unknown proxy, no enabled xray, missing interface) — distinct from a
 // candidate that builds but later fails to reach the probe target.
 func (d *handlerDeps) dialCandidatesForInterface(ctx context.Context, iface string) ([]exitCandidate, error) {
+	// A rule may be bound to an outbound set; probe what it currently
+	// expands to. An unresolvable set comes back verbatim and matches no
+	// case below, yielding the "unknown interface" error — which is the
+	// honest answer for a rule that can't route.
+	iface = d.expandIface(ctx, iface)
 	switch {
 	case iface == "":
 		return []exitCandidate{{name: "", dc: (&net.Dialer{}).DialContext}}, nil

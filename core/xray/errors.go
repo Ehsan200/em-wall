@@ -16,4 +16,8 @@ var (
 	ErrInvalidDialer = errors.New("xray: dialer must be comma-separated xray:/xraysub:/proxy: refs")
 	ErrDialerCycle   = errors.New("xray: dialer must not reference its own entry")
 	ErrSlotOverflow  = errors.New("xray: too many master entries with a dialer (slot pool exhausted)")
+
+	ErrInvalidSetMember = errors.New("xray: set members must be comma-separated xray:/proxy: refs")
+	ErrEmptySet         = errors.New("xray: a set must have at least one member")
+	ErrSetInUse         = errors.New("xray: set is still referenced by one or more rules")
 )

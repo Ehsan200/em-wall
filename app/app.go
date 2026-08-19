@@ -481,6 +481,42 @@ func (a *App) SetXrayEnabled(id int64, enabled bool) error {
 	return a.call(ipc.MethodXraySetEnabled, ipc.XraySetEnabledParams{ID: id, Enabled: enabled}, nil)
 }
 
+// ---------- outbound sets ----------
+//
+// A set bundles several xray entries / proxies under one name; a rule
+// binds to it as "xrayset:NAME" and follows the set's membership from
+// then on, so editing the set updates every rule that uses it.
+
+func (a *App) ListXraySets() ([]ipc.XraySetDTO, error) {
+	var out []ipc.XraySetDTO
+	err := a.call(ipc.MethodXraySetsList, nil, &out)
+	return out, err
+}
+
+// AddXraySet creates a set. members are typed refs in fallback order
+// ("xray:hk-01", "proxy:office").
+func (a *App) AddXraySet(name string, members []string, enabled bool) (ipc.XraySetDTO, error) {
+	var out ipc.XraySetDTO
+	err := a.call(ipc.MethodXraySetsAdd, ipc.XraySetAddParams{
+		Name: name, Members: members, Enabled: enabled,
+	}, &out)
+	return out, err
+}
+
+func (a *App) UpdateXraySet(id int64, name string, members []string, enabled bool) error {
+	return a.call(ipc.MethodXraySetsUpdate, ipc.XraySetUpdateParams{
+		ID: id, Name: name, Members: members, Enabled: enabled,
+	}, nil)
+}
+
+func (a *App) DeleteXraySet(id int64) error {
+	return a.call(ipc.MethodXraySetsDelete, map[string]any{"id": id}, nil)
+}
+
+func (a *App) SetXraySetEnabled(id int64, enabled bool) error {
+	return a.call(ipc.MethodXraySetsSetEnabled, map[string]any{"id": id, "enabled": enabled}, nil)
+}
+
 // XrayRouting returns the user's saved global routing-rules JSON
 // (a JSON array; empty string when never set).
 func (a *App) XrayRouting() (ipc.XrayRoutingResult, error) {
