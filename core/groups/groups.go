@@ -720,6 +720,195 @@ func KnownGroups() []Group {
 			},
 			Icon: svgBranded("T", "#6c5ce7", "#a29bfe", "#ffffff"),
 		},
+		// Last on purpose: GroupForKey attributes a host to the first group
+		// that claims it, and this group's *.microsoft.com / *.azureedge.net /
+		// *.windows.net wildcards would otherwise swallow the .NET, VS Code
+		// and telemetry groups' hosts on the usage dashboard.
+		{
+			Key:         "microsoft",
+			DisplayName: "Microsoft (all)",
+			Description: "Microsoft 365 (Outlook/Teams/SharePoint/OneDrive), Entra/Azure AD sign-in, Azure, Windows Update, Bing, MSN, Xbox, LinkedIn + the shared Microsoft CDNs/auth backends they call. GitHub, GitHub Copilot and NuGet have their own groups and are not included.",
+			Patterns: []string{
+				// Corporate + the new consolidated .microsoft TLD
+				// (*.cloud.microsoft, *.static.microsoft,
+				// *.usercontent.microsoft, *.mx.microsoft — the domains M365
+				// is being migrated onto).
+				"*.microsoft.com",
+				"*.microsoft.net",
+				"*.microsoft",
+				"*.s-microsoft.com",
+				"*.microsoftusercontent.com",
+				"*.microsoftpersonalcontent.com",
+				"*.microsoftcloud.com",
+				"*.msft.net",
+				// Microsoft's .ms shorteners / asset hosts.
+				"*.aka.ms",
+				"*.sfx.ms",
+				"*.gfx.ms",
+				"*.svc.ms",
+				"*.onestore.ms",
+				"*.1drv.ms",
+				"*.task.ms",
+				"*.clarity.ms",
+				"*.devtunnels.ms",
+				"*.whiteboard.ms",
+				"*.jwt.ms",
+				// Identity: Entra ID / Azure AD sign-in, MSA, ADFS assets.
+				// Blocking these logs the user out of everything, so they
+				// belong with the vendor rather than in a product group.
+				"*.microsoftonline.com",
+				"*.microsoftonline-p.com",
+				"*.microsoftonline-p.net",
+				"*.microsoftazuread-sso.com",
+				"*.msauth.net",
+				"*.msauthimages.net",
+				"*.msftauth.net",
+				"*.msftauthimages.net",
+				"*.msidentity.com",
+				"*.msftidentity.com",
+				"*.phonefactor.net",
+				"*.b2clogin.com",
+				"*.onmicrosoft.com",
+				"*.msocsp.com",
+				"*.passport.net",
+				// Microsoft 365 / Office.
+				"*.office.com",
+				"*.office.net",
+				"*.office365.com",
+				"*.microsoft365.com",
+				"*.sharepoint.com",
+				"*.sharepointonline.com",
+				"*.onedrive.com",
+				"*.onenote.com",
+				"*.onenote.net",
+				"*.msocdn.com",
+				"*.outlook.com",
+				"*.outlookmobile.com",
+				"*.acompli.net",
+				"*.yammer.com",
+				"*.yammerusercontent.com",
+				"*.assets-yammer.com",
+				"*.sway.com",
+				"*.sway-cdn.com",
+				"*.sway-extensions.com",
+				"*.aadrm.com",
+				"*.azurerms.com",
+				"*.oaspapps.com",
+				"*.microsoftstream.com",
+				// Teams / Skype.
+				"*.skype.com",
+				"*.skypeassets.com",
+				"*.skypeforbusiness.com",
+				"*.sfbassets.com",
+				"*.lync.com",
+				// Consumer accounts / mail / news.
+				"*.live.com",
+				"*.live.net",
+				"*.hotmail.com",
+				"*.msn.com",
+				"*.s-msn.com",
+				"*.microsoftstart.com",
+				"*.skydrive.com",
+				// Azure. *.windows.net covers login.windows.net,
+				// graph.windows.net and *.blob.core.windows.net — broad by
+				// design, same trade-off as Google's *.appspot.com.
+				"*.azure.com",
+				"*.azure.net",
+				"*.windows.net",
+				"*.windowsazure.com",
+				"*.azureedge.net",
+				"*.azurefd.net",
+				"*.azurewebsites.net",
+				"*.azure-api.net",
+				"*.azure-apim.net",
+				"*.azurecr.io",
+				"*.azuresynapse.net",
+				"*.azure-automation.net",
+				"*.azurecontainer.io",
+				"*.azmk8s.io",
+				"*.azconfig.io",
+				"*.cloudapp.net",
+				"*.trafficmanager.net",
+				"*.azure-dns.com",
+				"*.azure-dns.net",
+				"*.azure-dns.org",
+				"*.azure-dns.info",
+				"*.signalr.net",
+				"*.applicationinsights.io",
+				"*.loganalytics.io",
+				"*.msappproxy.net",
+				"*.cloudappsecurity.com",
+				"*.botframework.com",
+				// Power Platform / Dynamics.
+				"*.powerbi.com",
+				"*.powerapps.com",
+				"*.powerautomate.com",
+				"*.powerplatform.com",
+				"*.powerappsportals.com",
+				"*.dynamics.com",
+				// Windows: update, connectivity checks, Edge/AFD CDNs.
+				"*.windows.com",
+				"*.windowsupdate.com",
+				"*.windowsphone.com",
+				"*.msftconnecttest.com",
+				"*.msftncsi.com",
+				"*.msecnd.net",
+				"*.msecn.net",
+				"*.msedge.net",
+				"*.a-msedge.net",
+				"*.b-msedge.net",
+				"*.t-msedge.net",
+				"*.dc-msedge.net",
+				"*.spo-msedge.net",
+				"*.nelreports.net",
+				"*.aspnetcdn.com",
+				"*.msftstatic.com",
+				"*.footprintdns.com",
+				"*.microsoftedgeinsider.com",
+				// Bing / Maps / translation.
+				"*.bing.com",
+				"*.bing.net",
+				"*.bingapis.com",
+				"*.virtualearth.net",
+				"*.microsofttranslator.com",
+				// Dev tooling that isn't already its own group.
+				"*.visualstudio.com",
+				"*.vsassets.io",
+				"*.vscode.dev",
+				"*.vscode-cdn.net",
+				"*.vscode-unpkg.net",
+				"*.powershellgallery.com",
+				"*.appcenter.ms",
+				"*.sysinternals.com",
+				// Xbox / game studios (Mojang, Activision Blizzard, King).
+				"*.xbox.com",
+				"*.xboxlive.com",
+				"*.xboxservices.com",
+				"*.gamepass.com",
+				"*.minecraft.net",
+				"*.minecraftservices.com",
+				"*.mojang.com",
+				"*.halowaypoint.com",
+				"*.forzamotorsport.net",
+				"*.playfab.com",
+				"*.playfabapi.com",
+				"*.battle.net",
+				"*.blizzard.com",
+				"*.activision.com",
+				"*.demonware.net",
+				"*.king.com",
+				// LinkedIn (Microsoft-owned).
+				"*.linkedin.com",
+				"*.licdn.com",
+				"*.lnkd.in",
+				// Telemetry / ads (Microsoft-owned: Xandr née AppNexus).
+				"*.msads.net",
+				"*.adnxs.com",
+				"*.adnxs.net",
+				"*.xandr.com",
+			},
+			Icon: svgMicrosoft(),
+		},
 	}
 }
 
@@ -760,6 +949,16 @@ func svgGoogle() string {
 		`<path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/>` +
 		`<path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>` +
 		`</g></svg>`
+}
+
+// svgMicrosoft: white badge with the four-colour Microsoft squares.
+func svgMicrosoft() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>` +
+		`<rect x="15" y="15" width="15" height="15" fill="#f25022"/>` +
+		`<rect x="34" y="15" width="15" height="15" fill="#7fba00"/>` +
+		`<rect x="15" y="34" width="15" height="15" fill="#00a4ef"/>` +
+		`<rect x="34" y="34" width="15" height="15" fill="#ffb900"/></svg>`
 }
 
 // svgYouTube: red badge with a white play triangle.

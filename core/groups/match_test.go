@@ -23,6 +23,31 @@ func TestGroupForDomain(t *testing.T) {
 	}
 }
 
+// TestGroupForDomain_MicrosoftIsLastResort: the vendor-wide "microsoft" group
+// has wildcards (*.microsoft.com, *.azureedge.net, *.windows.net) that overlap
+// the narrower product groups. It sits last in KnownGroups so those keep their
+// hosts on the dashboard, and only unclaimed Microsoft hosts fall through to it.
+func TestGroupForDomain_MicrosoftIsLastResort(t *testing.T) {
+	cases := []struct{ host, wantKey string }{
+		{"dotnet.microsoft.com", "dotnet"},
+		{"dotnetcli.azureedge.net", "dotnet"},
+		{"api.githubcopilot.com", "github-copilot"},
+		{"github.com", "github"},
+		// Not claimed by any narrower group → Microsoft.
+		{"login.microsoftonline.com", "microsoft"},
+		{"outlook.office365.com", "microsoft"},
+		{"contoso.sharepoint.com", "microsoft"},
+		{"www.bing.com", "microsoft"},
+		{"www.linkedin.com", "microsoft"},
+	}
+	for _, c := range cases {
+		key, _, ok := GroupForDomain(c.host)
+		if !ok || key != c.wantKey {
+			t.Errorf("GroupForDomain(%q) = (%q, %v), want %q", c.host, key, ok, c.wantKey)
+		}
+	}
+}
+
 func TestGroupForKey_IP(t *testing.T) {
 	cases := []struct {
 		key     string

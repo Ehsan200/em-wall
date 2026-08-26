@@ -12,6 +12,7 @@ var brandColors = map[string]string{
 	"google-ai":        "#4285f4", // Google blue
 	"google":           "#ea4335", // Google red
 	"google-media":     "#00832d", // Google Meet green
+	"microsoft":        "#00a4ef", // Microsoft blue (one of the four logo squares)
 	"github-copilot":   "#8957e5", // Copilot purple
 	"cursor":           "#b6b6c2", // Cursor neutral (black brand, lightened for dark bg)
 	"perplexity":       "#22b8cd", // Perplexity teal

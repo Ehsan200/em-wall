@@ -157,6 +157,80 @@ func TestGoogle_CoversAllOfGoogle(t *testing.T) {
 	}
 }
 
+// TestMicrosoft_CoversVendorSurface: the "microsoft" group is the vendor-wide
+// counterpart to "google". The hosts below are the ones that break first when
+// only microsoft.com is routed — sign-in (Entra), the M365 workloads on their
+// own apexes, and the CDN/asset hosts the apps pull from.
+func TestMicrosoft_CoversVendorSurface(t *testing.T) {
+	g := FindByKey("microsoft")
+	if g == nil {
+		t.Fatal("microsoft group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		// Identity — losing these signs the user out of every product.
+		"login.microsoftonline.com",
+		"login.live.com",
+		"login.windows.net",
+		"logincdn.msftauth.net",
+		"aadcdn.msauth.net",
+		"autologon.microsoftazuread-sso.com",
+		"contoso.onmicrosoft.com",
+		// M365 workloads.
+		"outlook.office365.com",
+		"outlook.cloud.microsoft", // the consolidated .microsoft TLD
+		"teams.cloud.microsoft",   // ditto
+		"res.static.microsoft",    // ditto
+		"x.usercontent.microsoft", // ditto
+		"contoso.sharepoint.com",
+		"admin.onedrive.com",
+		"oneclient.sfx.ms",
+		"cdn.odc.officeapps.live.com",
+		"www.microsoft365.com",
+		"graph.microsoft.com",
+		"teams.microsoft.com",
+		"contoso.mail.protection.outlook.com",
+		"x.svc.ms",
+		// Azure + Windows.
+		"portal.azure.com",
+		"contoso.blob.core.windows.net",
+		"contoso.azurewebsites.net",
+		"download.windowsupdate.com",
+		"www.msftconnecttest.com",
+		"assets.msn.com",
+		"www.bing.com",
+		// Other Microsoft-owned brands.
+		"www.linkedin.com",
+		"static.licdn.com",
+		"xsts.auth.xboxlive.com",
+		"session.minecraft.net",
+		"code.visualstudio.com",
+		"main.vscode-cdn.net",
+	} {
+		if !covered(h) {
+			t.Errorf("microsoft group must cover %q but does not", h)
+		}
+	}
+	// GitHub keeps its own groups; folding it in here would double-create
+	// rules for anyone who already applied them.
+	for _, h := range []string{
+		"github.com",
+		"api.githubcopilot.com",
+		"www.nuget.org",
+	} {
+		if covered(h) {
+			t.Errorf("microsoft group must NOT cover %q (it has its own group)", h)
+		}
+	}
+}
+
 // TestCategories_CoverEveryGroup: an unlabelled group silently falls into
 // "Other" in the UI's quick-add sections, which is how a new group ends up
 // filed away from its siblings. Every curated key must be in the table, and
