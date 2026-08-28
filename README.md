@@ -65,6 +65,7 @@ core/          Go library — fully testable without root
   version/     build-time version stamp
 
 daemon/        em-walld — wires core/* together, runs as LaunchDaemon
+cli/           em-wall — command-line IPC client (same wire contract as the app)
 app/           Wails + Vue 3 UI (separate Go module via go.work)
   app.go       thin IPC client; every method forwards one RPC call
   internal/installer/  in-app install / uninstall logic
@@ -79,9 +80,10 @@ launchd/       LaunchDaemon plist template
 **Required:** Go 1.21+, Node 18+, [Wails v2](https://wails.io) at `~/go/bin/wails`.
 
 ```bash
-make test            # core unit tests — no root, no port 53 needed
+make test            # core + cli unit tests — no root, no port 53 needed
 make run-daemon      # local daemon on :5353 with ./tmp/dev.db (no root)
 make run-app         # wails dev UI — run in a second terminal
+make cli             # build/em-wall — point it at a dev daemon with --socket
 ```
 
 `make run-daemon` starts em-walld against a local DB and socket so the UI can connect without touching system DNS. The install panel will show `not packaged` — that is expected in dev; the rule/log/network tabs work normally.
@@ -105,7 +107,29 @@ The Makefile always rebuilds the daemon from source before bundling so the embed
 
 ## Install
 
-Open `em-wall.app`. On first launch an **Install** screen appears — clicking it triggers the standard macOS admin prompt and writes the daemon, LaunchDaemon plist, and pf anchor to their system paths. After install, activate the DNS hijack from the **Settings** tab.
+Open `em-wall.app`. On first launch an **Install** screen appears — clicking it triggers the standard macOS admin prompt and writes the daemon, LaunchDaemon plist, pf anchor, and the `em-wall` CLI to their system paths. After install, activate the DNS hijack from the **Settings** tab.
+
+## CLI
+
+`em-wall` is installed to `/usr/local/bin` alongside the daemon. It is a thin client over the same Unix socket the app uses — no separate install step, and no `sudo`: the socket is group-`staff` readable.
+
+```bash
+em-wall status                            # daemon health, upstream, rule count
+em-wall rules list --action route         # filter by action, or --match SUBSTR
+em-wall rules add '*.example.com' --action route --iface xray:tokyo
+em-wall rules disable 12 13               # also: enable, rm
+
+em-wall group add "Work AI" -p '*.openai.com,api.anthropic.com'
+em-wall group add "Work AI" --from-file patterns.txt   # one per line, # comments ok
+em-wall group apply work-ai --action route --iface xrayset:fast
+em-wall group edit work-ai --add-pattern gemini.google.com
+em-wall group sync work-ai                # create rules for patterns added since
+em-wall group list --custom
+```
+
+Custom-group keys carry a `custom:` prefix; the bare name works everywhere a key is accepted. Pass `--json` to any command for the raw DTO, and `--socket PATH` to target a dev daemon. Exit codes: `0` ok, `1` the daemon rejected the request, `2` bad arguments, `3` daemon unreachable.
+
+Note that `group sync --all` targets every group the daemon considers applied, and "applied" means a stored rule matches one of the group's patterns — a hand-written rule can therefore pull an overlapping curated group into scope. The command prints its target list before syncing.
 
 ## Uninstall
 

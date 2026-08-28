@@ -2,14 +2,16 @@
 #
 # The shipped flow is: build the .app via `make app-bundle`, then end
 # users install/uninstall em-wall from inside the app itself (the UI
-# escalates via osascript admin prompt). There is no CLI install path —
-# the in-app installer at app/internal/installer/ is the only source
-# of truth for what gets written where.
+# escalates via osascript admin prompt). The in-app installer at
+# app/internal/installer/ is the only source of truth for what gets
+# written where — including the `em-wall` CLI, which ships as another
+# embedded resource rather than having its own install path.
 
 GO          ?= go
 WAILS       ?= $(HOME)/go/bin/wails
 BUILD_DIR   ?= build
 DAEMON_BIN  := $(BUILD_DIR)/em-walld
+CLI_BIN     := $(BUILD_DIR)/em-wall
 APP_DIR     := app
 
 VERSION     ?= dev
@@ -19,13 +21,14 @@ LDFLAGS     := -X github.com/ehsan/em-wall/core/version.Version=$(VERSION)
 # by the `app-resources` target, read by app/internal/installer/embed.go.
 APP_RES_DIR := $(APP_DIR)/internal/installer/resources
 APP_RES_BIN     := $(APP_RES_DIR)/em-walld
+APP_RES_CLI     := $(APP_RES_DIR)/em-wall
 APP_RES_PLIST   := $(APP_RES_DIR)/com.em-wall.daemon.plist
 APP_RES_ANCHOR  := $(APP_RES_DIR)/em-wall.pf.anchor
 
-.PHONY: all daemon app app-bundle app-resources app-icon test test-core lint \
+.PHONY: all daemon cli app app-bundle app-resources app-icon test test-core test-app lint \
         run-daemon run-daemon-root run-app clean tidy
 
-all: daemon app
+all: daemon cli app
 
 # daemon is PHONY — `go build` is the only thing that knows whether
 # the binary is current relative to its sources, and Go's build cache
@@ -36,6 +39,12 @@ all: daemon app
 daemon:
 	@mkdir -p $(BUILD_DIR)
 	$(GO) build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(DAEMON_BIN) ./daemon
+
+# PHONY for the same reason as daemon: only `go build` knows whether
+# the binary is current relative to cli/**, core/** and go.mod.
+cli:
+	@mkdir -p $(BUILD_DIR)
+	$(GO) build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(CLI_BIN) ./cli
 
 # `make app` builds the Wails .app *without* the embedded daemon.
 # Useful for fast iteration on the UI. The resulting binary will
@@ -58,16 +67,24 @@ app-icon:
 	@mkdir -p $(APP_DIR)/build
 	cp assets/appicon.png $(APP_DIR)/build/appicon.png
 
-app-resources: daemon
+app-resources: daemon cli
 	@mkdir -p $(APP_RES_DIR)
 	cp $(DAEMON_BIN) $(APP_RES_BIN)
 	chmod 0755 $(APP_RES_BIN)
+	cp $(CLI_BIN) $(APP_RES_CLI)
+	chmod 0755 $(APP_RES_CLI)
 	cp launchd/com.em-wall.daemon.plist $(APP_RES_PLIST)
 	@test -f $(APP_RES_ANCHOR) || printf '# em-wall pf anchor — rewritten at runtime by core/pfctl\n' > $(APP_RES_ANCHOR)
 
-test: test-core
+test: test-core test-app
 test-core:
-	$(GO) test ./core/...
+	$(GO) test ./core/... ./cli/...
+
+# The app module is a separate go.mod, so `go test` from the root never
+# reaches it — the installer's generated shell scripts run as root and
+# are worth parsing in CI.
+test-app:
+	cd $(APP_DIR) && $(GO) test ./...
 
 run-daemon: daemon
 	@echo "running em-walld with a local DB and socket — no root, no port 53, system DNS untouched"
@@ -111,5 +128,5 @@ tidy:
 
 clean:
 	rm -rf $(BUILD_DIR) tmp
-	rm -f $(APP_RES_BIN) $(APP_RES_PLIST) $(APP_RES_ANCHOR)
+	rm -f $(APP_RES_BIN) $(APP_RES_CLI) $(APP_RES_PLIST) $(APP_RES_ANCHOR)
 	cd $(APP_DIR) && rm -rf frontend/dist build/bin

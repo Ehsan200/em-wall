@@ -11,11 +11,12 @@ go test -run TestX ./core/decision  # single test
 make run-daemon          # local daemon: ./tmp/dev.db, ./tmp/em-wall.sock, :5353, system DNS untouched
 make run-app             # Wails dev UI; stages embedded resources first (separate terminal)
 make daemon              # builds build/em-walld
+make cli                 # builds build/em-wall (command-line client)
 make app-bundle          # primary user-facing build: stages resources + `wails build` → app/build/bin/em-wall.app
 make tidy                # `go mod tidy` in both modules
 ```
 
-There is no CLI install path. Install/uninstall happens from inside the .app — see "In-app install / uninstall" below.
+Install/uninstall happens from inside the .app — see "In-app install / uninstall" below. The `em-wall` CLI ships as another embedded resource of that installer, so it has no install path of its own either.
 
 The repo is a **Go workspace** (`go.work`) with two modules: the root module (daemon + core/) and `app/` (Wails UI). Use `go work` semantics — running `go test ./...` from root only sees the root module; the app module has its own `go.mod`. Frontend lives in `app/frontend` (Vite + Vue 3 + TS); `wails dev` handles its build.
 
@@ -25,8 +26,9 @@ This is a macOS firewall built around **DNS-layer interception**. There are two 
 
 - **`daemon/` → `em-walld`** — privileged process (LaunchDaemon, root). Owns the SQLite store, runs the DNS proxy on `127.0.0.1:53`, manages per-host routes via `/sbin/route`, and exposes the IPC server. Wires `core/*` packages together.
 - **`app/` → Wails app** — unprivileged user-launched UI. Pure thin client; every `App` method on [app/app.go](app/app.go) just forwards an IPC call. **All real work lives in the daemon.**
+- **`cli/` → `em-wall`** — unprivileged command-line client, installed to `/usr/local/bin` by the same in-app installer. Also a pure thin client (`status`, `rules`, `group` subcommands); it never opens the DB. The socket is mode 0660 group `staff`, so no `sudo`. Exit codes are part of its contract: `0` ok, `1` daemon-side error, `2` usage, `3` unreachable. Subcommand flags parse via `parseFlags` in [cli/main.go](cli/main.go), which permutes so flags may follow positionals — the stdlib `flag` package otherwise stops at the first non-flag word.
 
-The IPC protocol is **newline-framed JSON-RPC** over `/var/run/em-wall.sock`. The single source of truth for method names and payload shapes is [core/ipc/protocol.go](core/ipc/protocol.go) — adding a feature means: define DTO + method constant there, register handler in `daemon/main.go` `registerHandlers`, expose method on `app/app.go`. The Wails frontend gets a typed binding for free via `wailsjs/`.
+The IPC protocol is **newline-framed JSON-RPC** over `/var/run/em-wall.sock`. The single source of truth for method names and payload shapes is [core/ipc/protocol.go](core/ipc/protocol.go) — adding a feature means: define DTO + method constant there, register handler in `daemon/main.go` `registerHandlers`, expose method on `app/app.go`. The Wails frontend gets a typed binding for free via `wailsjs/`. Surfacing the same feature in the CLI is optional and independent — `cli/` reads the DTOs directly from `core/ipc`, so it needs no generated bindings.
 
 ### `core/` is intentionally OS-agnostic
 

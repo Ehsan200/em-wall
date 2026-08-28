@@ -35,15 +35,19 @@ func IsPackaged() bool {
 // and core/ipc.DefaultSocketPath. Changing one means changing all.
 const (
 	DaemonBinaryDest = "/usr/local/bin/em-walld"
-	PlistDest        = "/Library/LaunchDaemons/com.em-wall.daemon.plist"
-	AnchorFile       = "/etc/pf.anchors/em-wall"
-	PFConf           = "/etc/pf.conf"
-	SocketPath       = "/var/run/em-wall.sock"
-	DBDir            = "/usr/local/var/em-wall"
-	DBFile           = "/usr/local/var/em-wall/rules.db"
-	LogDir           = "/usr/local/var/log"
-	LogFile          = "/usr/local/var/log/em-wall.log"
-	LaunchctlLabel   = "com.em-wall.daemon"
+	// CLIBinaryDest is the `em-wall` command-line client. It is a thin
+	// IPC client — losing it breaks no daemon functionality, so install
+	// tolerates its absence from the embedded resources (older builds).
+	CLIBinaryDest  = "/usr/local/bin/em-wall"
+	PlistDest      = "/Library/LaunchDaemons/com.em-wall.daemon.plist"
+	AnchorFile     = "/etc/pf.anchors/em-wall"
+	PFConf         = "/etc/pf.conf"
+	SocketPath     = "/var/run/em-wall.sock"
+	DBDir          = "/usr/local/var/em-wall"
+	DBFile         = "/usr/local/var/em-wall/rules.db"
+	LogDir         = "/usr/local/var/log"
+	LogFile        = "/usr/local/var/log/em-wall.log"
+	LaunchctlLabel = "com.em-wall.daemon"
 
 	// Xray-core install destinations. The binary is renamed em-wall-xray
 	// so a user-installed `xray` on $PATH isn't shadowed. The data dir
@@ -130,6 +134,7 @@ func Install(ctx context.Context) error {
 	defer os.RemoveAll(tmp)
 
 	binPath := filepath.Join(tmp, "em-walld")
+	cliPath := filepath.Join(tmp, "em-wall")
 	plistPath := filepath.Join(tmp, "com.em-wall.daemon.plist")
 	anchorPath := filepath.Join(tmp, "em-wall.pf.anchor")
 	xrayBinPath := filepath.Join(tmp, "xray")
@@ -143,6 +148,11 @@ func Install(ctx context.Context) error {
 	if err := extract("resources/com.em-wall.daemon.plist", plistPath, 0o644); err != nil {
 		return fmt.Errorf("install: extract plist: %w", err)
 	}
+	// The CLI is optional: a resources/ dir staged by an older Makefile
+	// has no em-wall binary, and the daemon works fine without it.
+	if err := extract("resources/em-wall", cliPath, 0o755); err != nil {
+		cliPath = ""
+	}
 	if err := extract("resources/em-wall.pf.anchor", anchorPath, 0o644); err != nil {
 		return fmt.Errorf("install: extract anchor: %w", err)
 	}
@@ -155,7 +165,7 @@ func Install(ctx context.Context) error {
 	if err := extract("resources/geosite.dat", geositePath, 0o644); err != nil {
 		return fmt.Errorf("install: extract geosite: %w", err)
 	}
-	if err := os.WriteFile(scriptPath, []byte(installScript(binPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath)), 0o700); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(installScript(binPath, cliPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath)), 0o700); err != nil {
 		return fmt.Errorf("install: write script: %w", err)
 	}
 	return runWithAdminPrivileges(ctx, scriptPath)
@@ -194,12 +204,17 @@ func Uninstall(ctx context.Context, purge bool) error {
 }
 
 // installScript builds the privileged install bash payload. Inputs
-// are paths to the temp-extracted daemon binary, plist, pf anchor
-// stub, xray binary, and the two xray geo data files — the script
-// `install`s them into their final locations, patches /etc/pf.conf to
-// load the anchor, then bootstraps the LaunchDaemon. Idempotent —
-// safe to re-run.
-func installScript(binPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath string) string {
+// are paths to the temp-extracted daemon binary, CLI client, plist, pf
+// anchor stub, xray binary, and the two xray geo data files — the
+// script `install`s them into their final locations, patches
+// /etc/pf.conf to load the anchor, then bootstraps the LaunchDaemon.
+// Idempotent — safe to re-run. cliPath may be empty, in which case the
+// CLI is skipped.
+func installScript(binPath, cliPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath string) string {
+	cliBlock := ""
+	if cliPath != "" {
+		cliBlock = fmt.Sprintf("install -m 0755 %q %q\n", cliPath, CLIBinaryDest)
+	}
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
@@ -216,7 +231,7 @@ XRAY_GEOSITE=%q
 XRAY_RUNTIME_DIR=%q
 
 install -m 0755 %q "$DAEMON_BIN_DST"
-
+%s
 mkdir -p "$DB_DIR" "$LOG_DIR" "$XRAY_DATA_DIR" "$XRAY_RUNTIME_DIR"
 chmod 0755 "$DB_DIR" "$LOG_DIR" "$XRAY_DATA_DIR" "$XRAY_RUNTIME_DIR"
 
@@ -252,7 +267,7 @@ launchctl kickstart -k system/com.em-wall.daemon
 `,
 		DaemonBinaryDest, PlistDest, AnchorFile, PFConf, LogDir, DBDir,
 		XrayBinaryDest, XrayDataDir, XrayGeoIPFile, XrayGeoSite, XrayRuntimeDir,
-		binPath, xrayBinPath, geoipPath, geositePath, anchorPath, plistPath,
+		binPath, cliBlock, xrayBinPath, geoipPath, geositePath, anchorPath, plistPath,
 	)
 }
 
@@ -282,6 +297,7 @@ set -euo pipefail
 
 PLIST_DST=%q
 DAEMON_BIN_DST=%q
+CLI_BIN_DST=%q
 ANCHOR_FILE=%q
 PF_CONF=%q
 SOCKET=%q
@@ -291,7 +307,7 @@ XRAY_DATA_DIR=%q
 launchctl bootout system "$PLIST_DST" 2>/dev/null || true
 pfctl -a em-wall -F all 2>/dev/null || true
 
-rm -f "$PLIST_DST" "$DAEMON_BIN_DST" "$SOCKET" "$ANCHOR_FILE" "$XRAY_BIN_DST"
+rm -f "$PLIST_DST" "$DAEMON_BIN_DST" "$CLI_BIN_DST" "$SOCKET" "$ANCHOR_FILE" "$XRAY_BIN_DST"
 rm -rf "$XRAY_DATA_DIR"
 
 if grep -qE '^(rdr-)?anchor "em-wall"' "$PF_CONF"; then
@@ -316,7 +332,7 @@ dscacheutil -flushcache 2>/dev/null || true
 killall -HUP mDNSResponder 2>/dev/null || true
 
 %s`,
-		PlistDest, DaemonBinaryDest, AnchorFile, PFConf, SocketPath,
+		PlistDest, DaemonBinaryDest, CLIBinaryDest, AnchorFile, PFConf, SocketPath,
 		XrayBinaryDest, XrayDataDir,
 		purgeBlock,
 	)
