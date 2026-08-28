@@ -121,6 +121,47 @@ type ruleSet []rules.Rule
 
 func (r ruleSet) List(_ context.Context) ([]rules.Rule, error) { return []rules.Rule(r), nil }
 
+// freeAddr returns a loopback "host:port" free on BOTH udp and tcp. Server
+// binds each and Ready() waits for both, so reserving only the udp side leaves
+// the tcp side open for an unrelated listener to win the port.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			continue
+		}
+		addr := l.Addr().String()
+		pc, err := net.ListenPacket("udp", addr)
+		_ = l.Close()
+		if err != nil {
+			continue
+		}
+		_ = pc.Close()
+		return addr
+	}
+	t.Fatal("no loopback port free on both udp and tcp")
+	return ""
+}
+
+// startOn runs s until the test ends and blocks until both listeners are up.
+// A bind clash surfaces as Start's error rather than a bare readiness timeout.
+func startOn(t *testing.T, s *Server) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	errc := make(chan error, 1)
+	go func() { errc <- s.Start(ctx) }()
+
+	select {
+	case <-s.Ready():
+	case err := <-errc:
+		t.Fatalf("server exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never became ready")
+	}
+}
+
 func startServer(t *testing.T, ruleList []rules.Rule, fwd Forwarder, routes RouteInstaller, logs LogSink) (*Server, string) {
 	t.Helper()
 	eng := decision.New(ruleSet(ruleList))
@@ -128,12 +169,7 @@ func startServer(t *testing.T, ruleList []rules.Rule, fwd Forwarder, routes Rout
 		t.Fatal(err)
 	}
 	// Listen on random local port to avoid needing root.
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := pc.LocalAddr().String()
-	_ = pc.Close()
+	addr := freeAddr(t)
 
 	s, err := New(Config{
 		Listen:    addr,
@@ -146,15 +182,7 @@ func startServer(t *testing.T, ruleList []rules.Rule, fwd Forwarder, routes Rout
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = s.Start(ctx) }()
-
-	select {
-	case <-s.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server never became ready")
-	}
+	startOn(t, s)
 	return s, addr
 }
 
@@ -269,9 +297,7 @@ func TestServer_RouteFailure_NX(t *testing.T) {
 	rs := []rules.Rule{
 		{ID: 99, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
 	}
-	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
-	addr := pc.LocalAddr().String()
-	_ = pc.Close()
+	addr := freeAddr(t)
 	eng := decision.New(ruleSet(rs))
 	_ = eng.Reload(context.Background())
 	s, _ := New(Config{
@@ -282,10 +308,7 @@ func TestServer_RouteFailure_NX(t *testing.T) {
 		Interfaces: fakeIfaces{up: map[string]bool{"utun3": true}},
 		Logs:       logs,
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = s.Start(ctx) }()
-	<-s.Ready()
+	startOn(t, s)
 
 	resp := query(t, addr, "x.work.com", dns.TypeA)
 	if resp.Rcode != dns.RcodeNameError {
@@ -312,13 +335,7 @@ func TestServer_RouteIfaceDown_NXDOMAIN(t *testing.T) {
 		{ID: 9, Pattern: "*.work.com", Action: rules.ActionRoute, Interface: "utun3", Enabled: true},
 	}
 
-	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := pc.LocalAddr().String()
-	_ = pc.Close()
+	addr := freeAddr(t)
 
 	eng := decision.New(ruleSet(rs))
 	if err := eng.Reload(context.Background()); err != nil {
@@ -335,14 +352,7 @@ func TestServer_RouteIfaceDown_NXDOMAIN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = s.Start(ctx) }()
-	select {
-	case <-s.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("not ready")
-	}
+	startOn(t, s)
 
 	resp := query(t, addr, "x.work.com", dns.TypeA)
 	if resp.Rcode != dns.RcodeNameError {
@@ -421,12 +431,7 @@ func startFakeIPServer(t *testing.T, rs []rules.Rule, fwd Forwarder, routes Rout
 	if err := eng.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := pc.LocalAddr().String()
-	_ = pc.Close()
+	addr := freeAddr(t)
 
 	s, err := New(Config{
 		Listen:       addr,
@@ -441,14 +446,7 @@ func startFakeIPServer(t *testing.T, rs []rules.Rule, fwd Forwarder, routes Rout
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = s.Start(ctx) }()
-	select {
-	case <-s.Ready():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server never became ready")
-	}
+	startOn(t, s)
 	return addr
 }
 
