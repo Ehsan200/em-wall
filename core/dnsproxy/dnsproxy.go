@@ -101,6 +101,17 @@ type Config struct {
 	// DefaultFakeIPv4CIDR (198.18.0.0/15, RFC 2544 benchmarking, never
 	// globally routed so it can't collide with real destinations).
 	FakeIPv4CIDR string
+	// FakeIPLeaseTTL is how long a hostname keeps its fake IP. This is the
+	// pool's slot lifetime, NOT the DNS answer TTL (that stays
+	// RouteTTLMin) — clients cache addresses long past the record TTL, so
+	// recycling a slot on the record's schedule sends their traffic to
+	// whatever hostname claimed the slot next. Zero →
+	// DefaultFakeIPLeaseTTL.
+	FakeIPLeaseTTL time.Duration
+	// FakeIPStore persists the hostname → fake-IP mapping so it survives a
+	// daemon restart. nil → memory-only, which means every restart
+	// reshuffles the mapping under any client holding a cached fake IP.
+	FakeIPStore FakeIPStore
 	// ProxyTun is the kernel-assigned name of the daemon-owned utun
 	// where the user-space TCP stack accepts proxy-routed connections.
 	// Empty disables the "proxy:" path; resolveIface will treat such
@@ -169,10 +180,15 @@ func New(cfg Config) (*Server, error) {
 		if cidr == "" {
 			cidr = DefaultFakeIPv4CIDR
 		}
-		pool, err := newFakeIPPool(cidr, cfg.RouteTTLMin)
+		leaseTTL := cfg.FakeIPLeaseTTL
+		if leaseTTL <= 0 {
+			leaseTTL = DefaultFakeIPLeaseTTL
+		}
+		pool, err := newFakeIPPool(cidr, leaseTTL, cfg.FakeIPStore, cfg.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("dnsproxy: fake-ip pool: %w", err)
 		}
+		pool.restore(context.Background())
 		s.fakeIP = pool
 	}
 	return s, nil
@@ -443,7 +459,11 @@ func (s *Server) handleFakeIP(w dns.ResponseWriter, req *dns.Msg, name, iface, e
 		return
 	}
 
-	ip, ttl, ok := s.fakeIP.Allocate(name)
+	// The pool lease is long-lived (see FakeIPLeaseTTL) so the binding
+	// stays stable; the answer/route/table lifetime stays short because a
+	// re-query or a connect refreshes both.
+	ttl := s.cfg.RouteTTLMin
+	ip, ok := s.fakeIP.Allocate(name)
 	if !ok {
 		// Pool exhausted — fail closed rather than leak via the default
 		// route. Extremely unlikely with a /15 (131072 slots).

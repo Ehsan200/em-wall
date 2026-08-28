@@ -153,6 +153,7 @@ func main() {
 		Interfaces:   dnsproxy.DefaultInterfaceChecker,
 		Proxies:      &proxyResolver{store: proxyStore, table: proxyTable},
 		EnableFakeIP: true,
+		FakeIPStore:  fakeIPStore{store: store},
 		ProxyTun:     proxyTunName,
 		Logs:         logSink,
 		Logger:       log.Default(),
