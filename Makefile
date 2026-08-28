@@ -13,6 +13,9 @@ BUILD_DIR   ?= build
 DAEMON_BIN  := $(BUILD_DIR)/em-walld
 CLI_BIN     := $(BUILD_DIR)/em-wall
 APP_DIR     := app
+# Vite's output dir, embedded by app/main.go. Gitignored — see test-app.
+APP_DIST       := $(APP_DIR)/frontend/dist
+APP_DIST_INDEX := $(APP_DIST)/index.html
 
 VERSION     ?= dev
 LDFLAGS     := -X github.com/ehsan/em-wall/core/version.Version=$(VERSION)
@@ -83,8 +86,20 @@ test-core:
 # The app module is a separate go.mod, so `go test` from the root never
 # reaches it — the installer's generated shell scripts run as root and
 # are worth parsing in CI.
-test-app:
+test-app: $(APP_DIST_INDEX)
 	cd $(APP_DIR) && $(GO) test ./...
+
+# app/main.go does `//go:embed all:frontend/dist`, but that directory is
+# gitignored and only ever produced by a real Wails build. On a fresh checkout
+# the embed matches nothing and the app package fails to COMPILE — `go test`
+# reports "FAIL app [setup failed]" before running anything. It passes on a dev
+# machine only because a previous build left a dist behind, so this breaks in CI
+# and nowhere else. The root app package has no tests; a stub is all the embed
+# needs. `wails build` empties the dir and writes the real bundle, so this
+# placeholder never reaches a shipped binary.
+$(APP_DIST_INDEX):
+	@mkdir -p $(APP_DIST)
+	@printf '<!doctype html><title>em-wall</title>\n' > $@
 
 run-daemon: daemon
 	@echo "running em-walld with a local DB and socket — no root, no port 53, system DNS untouched"
