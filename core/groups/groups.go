@@ -27,11 +27,18 @@ func KnownGroups() []Group {
 		{
 			Key:         "anthropic",
 			DisplayName: "Claude / Anthropic",
-			Description: "Claude (chat), Anthropic API, Console, Workbench",
+			Description: "Claude (chat), Anthropic API, Console, Workbench, artifact sandbox",
 			Patterns: []string{
 				"*.anthropic.com",
 				"*.claude.ai",
 				"*.claude.com",
+				"*.claudeusercontent.com", // artifact iframe sandbox
+				"challenges.cloudflare.com",
+				// Anthropic's published inbound range (docs.claude.com/en/api/
+				// ip-addresses). Catches anything that dials Anthropic by IP or
+				// via a hostname this group doesn't list. IPv4 only — v6 egress
+				// via the proxy utun isn't guaranteed, so 2607:6bc0::/48 is out.
+				"160.79.104.0/23",
 			},
 			Icon: svgBranded("A", "#d97757", "#fef2e8", "#ffffff"),
 		},
@@ -377,7 +384,7 @@ func KnownGroups() []Group {
 		{
 			Key:         "spotify",
 			DisplayName: "Spotify",
-			Description: "Spotify app/web, audio + image CDN",
+			Description: "Spotify app/web, audio + image CDN (incl. the Akamai audio edge)",
 			Patterns: []string{
 				"*.spotify.com",
 				"*.scdn.co",
@@ -385,6 +392,16 @@ func KnownGroups() []Group {
 				"*.spotifycdn.net",
 				"*.pscdn.co",
 				"*.spoti.fi",
+				// Akamai audio edge. apresolve hands out either Fastly
+				// (audio-fa.scdn.co, covered above) or these. Listed one by one
+				// because the matcher is "*.suffix" only and *.akamaized.net
+				// would swallow every other service's Akamai traffic.
+				"audio-ak-spotify-com.akamaized.net",
+				"audio4-ak-spotify-com.akamaized.net",
+				"audio-akp-quic-spotify-com.akamaized.net",
+				"heads-ak-spotify-com.akamaized.net",
+				"heads4-ak-spotify-com.akamaized.net",
+				"*.anchor.fm", // Spotify for Podcasters episode audio
 			},
 			Icon: svgSpotify(),
 		},
