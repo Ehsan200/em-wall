@@ -64,6 +64,8 @@ var categories = map[string]string{
 	"google":       CategoryPlatform,
 	"google-media": CategoryPlatform,
 	"microsoft":    CategoryPlatform,
+	"apple":        CategoryPlatform,
+	"sony":         CategoryPlatform,
 
 	"x":        CategorySocial,
 	"telegram": CategorySocial,

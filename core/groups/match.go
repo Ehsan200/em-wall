@@ -13,6 +13,8 @@ var brandColors = map[string]string{
 	"google":           "#ea4335", // Google red
 	"google-media":     "#00832d", // Google Meet green
 	"microsoft":        "#00a4ef", // Microsoft blue (one of the four logo squares)
+	"apple":            "#d2d2d7", // Apple silver (black brand, lightened for dark bg)
+	"sony":             "#0070d1", // PlayStation blue (Sony's own wordmark is black)
 	"github-copilot":   "#8957e5", // Copilot purple
 	"cursor":           "#b6b6c2", // Cursor neutral (black brand, lightened for dark bg)
 	"perplexity":       "#22b8cd", // Perplexity teal

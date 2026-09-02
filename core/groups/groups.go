@@ -716,6 +716,75 @@ func KnownGroups() []Group {
 			Icon: svgBranded("B.", "#003580", "#0071c2", "#ffffff"),
 		},
 		{
+			Key:         "apple",
+			DisplayName: "Apple (all)",
+			Description: "Apple ID / iCloud, App Store, Apple Music / TV / Arcade, Maps, software update, push, developer + the CDNs and steering domains they call. Shazam and Beats included.",
+			Patterns: []string{
+				// Corporate + every product surface hosted under it
+				// (id, apps, music, tv, itunes, gsp*/gs-loc Maps,
+				// swscan/swcdn software update, push, developer, …).
+				"*.apple.com",
+				"*.apple.co",   // marketing short links
+				"*.apple.tv",   // Apple TV app / TV+ short domain
+				"*.apple.news", // Apple News
+				"*.itunes.com",
+				"*.appstore.com",
+				// iCloud: web app, Drive/Photos payload host, CloudKit
+				// backend every third-party iCloud-syncing app talks to.
+				"*.icloud.com",
+				"*.icloud.net",
+				"*.icloud-content.com",
+				"*.apple-cloudkit.com",
+				// Legacy MobileMe/.Mac addresses still used for Apple ID
+				// sign-in and iCloud Mail.
+				"*.me.com",
+				"*.mac.com",
+				// Content/CDN + steering. mzstatic serves all App Store /
+				// Music artwork; cdn-apple.com and aaplimg.com are Apple's
+				// own edge; apple-dns.net is the CNAME target nearly every
+				// apple.com service resolves through, so leaving it out
+				// breaks IP-level attribution even when the name is routed.
+				"*.mzstatic.com",
+				"*.cdn-apple.com",
+				"*.aaplimg.com",
+				"*.apple-dns.net",
+				"*.apple-mapkit.com",        // MapKit JS tiles
+				"*.applemediaservices.com",  // Music/TV/News media services
+				"*.apple-livephotoskit.com", // Live Photos embeds
+				"*.appleiphonecell.com",     // captive-portal reachability probe
+				// Apple-owned brands on their own apexes.
+				"*.shazam.com",
+				"*.beatsbydre.com",
+			},
+			Icon: svgApple(),
+		},
+		{
+			Key:         "sony",
+			DisplayName: "Sony / PlayStation",
+			Description: "PlayStation Network (sign-in, Store, downloads, party), Sony corporate/support, Sony Music, Sony Pictures, Crunchyroll",
+			Patterns: []string{
+				// PlayStation: web + app surfaces on .com, and the whole
+				// PSN backend (np/auth, dl content delivery, community) on
+				// .net — both are needed, they are separate apexes.
+				"*.playstation.com",
+				"*.playstation.net",
+				"*.playstationnetwork.com",
+				"*.sonyentertainmentnetwork.com", // PSN account/legacy SEN
+				"*.scea.com",                     // legacy SCEA/SIE endpoints
+				"*.sonyinteractive.com",          // Sony Interactive Entertainment
+				// Corporate, product support and firmware downloads.
+				"*.sony.com",
+				"*.sony.net",
+				"*.sony.co.jp",
+				// Sony-owned media brands on their own apexes.
+				"*.sonymusic.com",
+				"*.sonypictures.com",
+				"*.crunchyroll.com",
+				"*.sonyliv.com",
+			},
+			Icon: svgSony(),
+		},
+		{
 			Key:         "telemetry-common",
 			DisplayName: "Common telemetry / analytics",
 			Description: "Sentry, Mixpanel, Segment, Amplitude, Datadog browser",
@@ -1228,6 +1297,29 @@ func svgFigma() string {
 		// mid-left
 		`<path fill="#a259ff" d="M0 28.5A9.5 9.5 0 0 0 9.5 38H19V19H9.5A9.5 9.5 0 0 0 0 28.5z"/>` +
 		`</g></svg>`
+}
+
+// svgApple: near-black badge with the white Apple mark (24x24 source path,
+// scaled and centred inside the 64x64 badge).
+func svgApple() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#111111" stroke="#3a3a3c" stroke-width="1.5"/>` +
+		`<g transform="translate(14,14) scale(1.5)" fill="#ffffff">` +
+		// body
+		`<path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.088-4.61 1.088z"/>` +
+		// leaf
+		`<path d="M15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701z"/>` +
+		`</g></svg>`
+}
+
+// svgSony: black badge with the white "SONY" wordmark (the brand has no
+// glyph mark) over the PlayStation-blue underline.
+func svgSony() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#000000" stroke="#3a3a3c" stroke-width="1.5"/>` +
+		`<text x="32" y="35" font-family="Helvetica,Arial,sans-serif" font-size="14" font-weight="700" ` +
+		`letter-spacing="1.5" text-anchor="middle" fill="#ffffff">SONY</text>` +
+		`<rect x="17" y="41" width="30" height="3" rx="1.5" fill="#0070d1"/></svg>`
 }
 
 // svgAndroidStudio: dark navy badge with the green Android bugdroid head.

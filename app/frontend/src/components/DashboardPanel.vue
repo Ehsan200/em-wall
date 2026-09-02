@@ -108,6 +108,7 @@ const PALETTE = [
 const BRAND: Record<string, string> = {
   'anthropic': '#d97757', 'openai': '#10a37f', 'google-ai': '#4285f4',
   'google': '#ea4335', 'google-media': '#00832d', 'microsoft': '#00a4ef',
+  'apple': '#d2d2d7', 'sony': '#0070d1',
   'github-copilot': '#8957e5', 'cursor': '#b6b6c2',
   'perplexity': '#22b8cd', 'huggingface': '#ffd21e', 'mistral': '#ff7000',
   'grok': '#e7e9ea', 'x': '#1d9bf0', 'telegram': '#229ed9', 'meta': '#0866ff',

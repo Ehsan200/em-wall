@@ -340,6 +340,99 @@ func TestConsumerBrands_CoverCDNHosts(t *testing.T) {
 	}
 }
 
+// TestApple_CoversVendorSurface: Apple fans most of its traffic out through
+// domains that are not apple.com — artwork from mzstatic, iCloud payload from
+// icloud-content, the edge from cdn-apple/aaplimg, and nearly every name
+// CNAMEs into apple-dns.net — so a group holding only *.apple.com routes the
+// sign-in but not the content.
+func TestApple_CoversVendorSurface(t *testing.T) {
+	g := FindByKey("apple")
+	if g == nil {
+		t.Fatal("apple group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		// Identity + store.
+		"appleid.apple.com",
+		"idmsa.apple.com",
+		"buy.itunes.apple.com",
+		"apps.apple.com",
+		"init.itunes.apple.com",
+		// iCloud.
+		"www.icloud.com",
+		"p123-content.icloud.com",
+		"cvws.icloud-content.com",
+		"api.apple-cloudkit.com",
+		"imap.mail.me.com",
+		// Media, maps, updates, push.
+		"music.apple.com",
+		"is1-ssl.mzstatic.com",
+		"gsp-ssl.ls.apple.com",
+		"swscan.apple.com",
+		"gateway.push.apple.com",
+		"cdn.apple-mapkit.com",
+		"play.itunes.apple.com",
+		// Edge / steering.
+		"cdn.cdn-apple.com",
+		"iphone-ld.origin-apple.com.akadns.net.aaplimg.com",
+		"www.apple.com.edgekey.net.apple-dns.net",
+		"captive.apple.com",
+		"www.appleiphonecell.com",
+		// Apple-owned brands.
+		"www.shazam.com",
+		"www.beatsbydre.com",
+	} {
+		if !covered(h) {
+			t.Errorf("apple group must cover %q but does not", h)
+		}
+	}
+}
+
+// TestSony_CoversPSNSurface: PlayStation splits its surface across two
+// apexes — the storefront/web on playstation.com and the whole PSN backend
+// (auth, downloads, community) on playstation.net — so covering only the
+// first signs the console out of everything.
+func TestSony_CoversPSNSurface(t *testing.T) {
+	g := FindByKey("sony")
+	if g == nil {
+		t.Fatal("sony group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		"www.playstation.com",
+		"store.playstation.com",
+		"image.api.playstation.com",
+		"auth.api.sonyentertainmentnetwork.com",
+		"ca.account.sony.com",
+		"gst.prod.dl.playstation.net",
+		"np.community.playstation.net",
+		"us-prof.np.community.playstation.net",
+		"www.sonyinteractive.com",
+		"www.sony.co.jp",
+		"www.sonymusic.com",
+		"www.sonypictures.com",
+		"www.crunchyroll.com",
+	} {
+		if !covered(h) {
+			t.Errorf("sony group must cover %q but does not", h)
+		}
+	}
+}
+
 // TestGrok_CoversUserContentAndXSurface locks in the login-via-X gap: Grok
 // serves user content from grokusercontent.com and is reachable as grok.x.com
 // during "sign in with X", neither covered by the original three patterns.
