@@ -678,6 +678,29 @@ func KnownGroups() []Group {
 			Icon: svgFigma(),
 		},
 		{
+			Key:         "atlassian",
+			DisplayName: "Atlassian / Trello",
+			Description: "Trello, Jira, Confluence, Bitbucket, Opsgenie, Statuspage, Loom",
+			Patterns: []string{
+				"*.trello.com",
+				"*.trellocdn.com",
+				"*.trello-attachments.com", // legacy card attachment host
+				"*.atlassian.com",
+				"*.atlassian.net", // per-tenant Jira/Confluence cloud sites
+				"*.atlassian.io",
+				"*.atlassian.dev", // Forge developer platform
+				"*.atl-paas.net",  // Connect/Forge app + CDN backend
+				"*.jira.com",
+				"*.bitbucket.org",
+				"*.bitbucket.io", // Bitbucket Pages
+				"*.sourcetreeapp.com",
+				"*.opsgenie.com",
+				"*.statuspage.io",
+				"*.loom.com", // Loom, acquired by Atlassian
+			},
+			Icon: svgAtlassian(),
+		},
+		{
 			Key:         "airbnb",
 			DisplayName: "Airbnb",
 			Description: "Airbnb web/app, localized country sites, photo CDN, HotelTonight",
@@ -1296,6 +1319,17 @@ func svgFigma() string {
 		`<path fill="#f24e1e" d="M0 9.5A9.5 9.5 0 0 0 9.5 19H19V0H9.5A9.5 9.5 0 0 0 0 9.5z"/>` +
 		// mid-left
 		`<path fill="#a259ff" d="M0 28.5A9.5 9.5 0 0 0 9.5 38H19V19H9.5A9.5 9.5 0 0 0 0 28.5z"/>` +
+		`</g></svg>`
+}
+
+// svgAtlassian: the Atlassian double-chevron "A" mark (24x24 source path,
+// scaled and centred inside the 64x64 badge).
+func svgAtlassian() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#dfe1e6" stroke-width="1.5"/>` +
+		`<g transform="translate(12,12) scale(1.6667)">` +
+		`<path fill="#2684FF" d="M7.12 11.084a.593.593 0 0 0-1.005.104L.06 23.293a.61.61 0 0 0 .546.882h8.435a.588.588 0 0 0 .546-.336c1.815-3.75.716-9.451-2.467-12.755z"/>` +
+		`<path fill="#0052CC" d="M11.434.284a13.7 13.7 0 0 0-.799 13.541l4.078 8.15a.61.61 0 0 0 .546.338h8.435a.61.61 0 0 0 .546-.882S12.49.775 12.45.696a.583.583 0 0 0-1.015-.412z"/>` +
 		`</g></svg>`
 }
 

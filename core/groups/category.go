@@ -80,8 +80,9 @@ var categories = map[string]string{
 	"airbnb":  CategoryPlatform,
 	"booking": CategoryPlatform,
 
-	"notion": CategoryWork,
-	"figma":  CategoryWork,
+	"notion":    CategoryWork,
+	"figma":     CategoryWork,
+	"atlassian": CategoryWork,
 
 	"telemetry-common": CategoryOther,
 }
