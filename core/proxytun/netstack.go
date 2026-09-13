@@ -40,6 +40,17 @@ type ConnHandler func(conn net.Conn, local, remote *net.TCPAddr)
 // leaks. nil PacketHandler disables UDP (datagrams are dropped).
 type PacketHandler func(conn net.Conn, local, remote *net.UDPAddr)
 
+// PacketFilter decides whether a new UDP flow is admitted. Returning
+// false makes the stack fall through to normal delivery, which finds no
+// endpoint and answers ICMP port-unreachable — the client learns the
+// port is dead on the FIRST packet instead of waiting out its own
+// timeout. That distinction is the whole point: silently swallowing a
+// flow we know we cannot carry costs a browser ~20s of QUIC handshake
+// before it falls back to TCP; an ICMP reject costs it nothing.
+//
+// nil admits everything.
+type PacketFilter func(local, remote *net.UDPAddr) bool
+
 // Tunnel binds a UTUN to a gvisor user-space TCP stack. Every TCP
 // connection arriving on the utun is accepted by netstack and handed
 // to ConnHandler. The handler's job is to look up which proxy to
@@ -50,6 +61,7 @@ type Tunnel struct {
 	ep            *channel.Endpoint
 	handler       ConnHandler
 	packetHandler PacketHandler
+	packetFilter  PacketFilter
 	logger        *log.Logger
 
 	mtu      uint32
@@ -140,6 +152,11 @@ func NewTunnel(tun *UTUN, mtu int, tcpHandler ConnHandler, udpHandler PacketHand
 
 	return t, nil
 }
+
+// SetUDPFilter installs an admission filter consulted before each new
+// UDP flow is materialized. Call before Start; it is not safe to change
+// once packets are flowing.
+func (t *Tunnel) SetUDPFilter(f PacketFilter) { t.packetFilter = f }
 
 // Start begins shuttling packets between the utun fd and the stack.
 // Runs until ctx is cancelled or the utun fd is closed. Returns when
@@ -271,6 +288,13 @@ func (t *Tunnel) acceptUDP(req *udp.ForwarderRequest) bool {
 	remote := &net.UDPAddr{
 		IP:   net.IP(id.RemoteAddress.AsSlice()),
 		Port: int(id.RemotePort),
+	}
+
+	// Reject before materializing an endpoint: returning false leaves the
+	// packet to normal delivery, which has no endpoint for it and so emits
+	// ICMP port-unreachable back to the client.
+	if t.packetFilter != nil && !t.packetFilter(local, remote) {
+		return false
 	}
 
 	var wq waiter.Queue

@@ -36,15 +36,20 @@ const proxyUDPIdleTimeout = 60 * time.Second
 //
 // Both are vars rather than consts so tests can compress the timeline.
 var (
-	proxyUDPNoReplyTimeout = 6 * time.Second
+	proxyUDPNoReplyTimeout = 3 * time.Second
 	proxyUDPMonitorTick    = time.Second
 )
 
 // proxyUDPMaxReassoc caps how many times one flow may be moved to another
-// association before we give up and let it die. Two is enough to clear a
-// single bad association or a single bad upstream; beyond that the problem
-// isn't the association and retrying just delays the client's TCP fallback.
-const proxyUDPMaxReassoc = 2
+// association before we give up and let it die.
+//
+// Measured on a live install: of ~3000 flows that went silent and were
+// re-associated, ~1% ever recovered. Every extra swap is therefore ~3s of
+// the client sitting on a handshake, bought for a 1-in-100 chance. One
+// swap clears the genuinely per-association case; past that the honest
+// move is to die fast and let udpHealth refuse the next attempt outright
+// so the client gets ICMP instead of silence.
+const proxyUDPMaxReassoc = 1
 
 // proxyUTUNAddr is the point-to-point address assigned to the daemon's
 // utun. The address itself isn't routed — proxy-bound traffic reaches
@@ -110,6 +115,7 @@ type proxyForwarder struct {
 	decider ipRouteDecider // resolves dest IPs with no DNS-time mapping; may be nil
 	latency *netprobe.LatencyTracker
 	traffic *trafficAggregator // nil disables byte accounting
+	health  *udpHealth         // remembers dead UDP relay paths; nil disables
 	logger  *log.Logger
 }
 
@@ -314,25 +320,50 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 // proxy or xray entry), so HTTP-only bindings yield no session and fall
 // back to TCP. QUIC (UDP/443) is relayed too rather than dropped up front,
 // which the old blanket drop broke for QUIC-first backends like signaler-pa.
+// udpDestination resolves the destination a UDP flow is bound for. The
+// relay target is the ORIGINAL hostname, not local.IP — for a fake-IP
+// routed name local.IP is a 198.18.x.x handle that only means something on
+// this machine, so a datagram addressed to it dies at the proxy's egress.
+func (pf *proxyForwarder) udpDestination(localIP net.IP) (proxy.Entry, string, bool) {
+	entry, ok := pf.table.Lookup(localIP)
+	if !ok {
+		entry, ok = pf.lookupIPRule(localIP)
+		if !ok {
+			return proxy.Entry{}, "", false
+		}
+	}
+	target := entry.Hostname
+	if target == "" {
+		target = localIP.String()
+	}
+	return entry, target, true
+}
+
+// admitUDP is the netstack admission filter. Returning false makes the
+// stack answer ICMP port-unreachable, which is the entire value of doing
+// this here rather than in handleUDP: a destination we already know
+// black-holes UDP gets refused on its first packet, so the client falls
+// back to TCP immediately instead of stalling on a QUIC handshake.
+func (pf *proxyForwarder) admitUDP(local, remote *net.UDPAddr) bool {
+	if pf.health == nil {
+		return true
+	}
+	_, target, ok := pf.udpDestination(local.IP)
+	if !ok {
+		return true // unmapped flows are handleUDP's to log and drop
+	}
+	return !pf.health.blocked(udpHealthKey(target, local.Port))
+}
+
 func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	defer conn.Close()
 
-	entry, ok := pf.table.Lookup(local.IP)
+	entry, target, ok := pf.udpDestination(local.IP)
 	if !ok {
-		entry, ok = pf.lookupIPRule(local.IP)
-		if !ok {
-			pf.logger.Printf("proxytun/udp: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
-			return
-		}
+		pf.logger.Printf("proxytun/udp: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
+		return
 	}
-
-	// Relay to the ORIGINAL hostname, not local.IP — for a fake-IP routed
-	// name local.IP is a 198.18.x.x handle that only means something on this
-	// machine, so a datagram addressed to it dies at the proxy's egress.
-	target := entry.Hostname
-	if target == "" {
-		target = local.IP.String()
-	}
+	healthKey := udpHealthKey(target, local.Port)
 
 	dctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
 	session, used, err := pf.associateUDP(dctx, entry, nil)
@@ -580,10 +611,18 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 		if noReply.Load() {
 			why = "every association stayed silent; client falls back to TCP"
 		}
+		// Strike the destination, not the proxy: the same proxy carries a
+		// sibling flow fine seconds later, so what's dead is the path to
+		// this host. Two in a row and admitUDP starts refusing outright.
+		if penalty := pf.health.strike(healthKey); penalty > 0 {
+			pf.logger.Printf("proxytun/udp: %s:%d — UDP refused for %s (ICMP unreachable; client uses TCP)",
+				target, local.Port, penalty)
+		}
 		pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, RECEIVED NOTHING in %s (%s)",
 			target, local.Port, nameChain(), humanBytes(sent), dur, why)
 		return
 	}
+	pf.health.success(healthKey)
 	pf.logger.Printf("proxytun/udp: %s:%d closed via %q — sent %s, recv %s in %s",
 		target, local.Port, nameChain(), humanBytes(sent), humanBytes(recv), dur)
 }
@@ -676,13 +715,17 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, router: router, decider: decider, latency: latency, traffic: traffic, logger: logger}
+	fwd := &proxyForwarder{store: store, table: table, router: router, decider: decider, latency: latency, traffic: traffic, health: newUDPHealth(), logger: logger}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)
 		_ = tun.Close()
 		return nil, ""
 	}
+	// Must be set before Start: a destination whose UDP relay is known dead
+	// is refused with ICMP rather than swallowed, so the client never waits
+	// out a QUIC handshake it can't win.
+	tunnel.SetUDPFilter(fwd.admitUDP)
 	logger.Printf("em-walld: proxy tunnel up on %s (addr %s)", tunnel.IfaceName(), proxyUTUNAddr)
 	return tunnel, tunnel.IfaceName()
 }
