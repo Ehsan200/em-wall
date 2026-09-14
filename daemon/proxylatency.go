@@ -26,6 +26,15 @@ const (
 	proxyLatencyTTL = 90 * time.Second
 )
 
+// proxyRankProbeTarget is what the ranking prober dials, deliberately
+// separate from the proxies.test target the UI uses. The UI's default is an
+// IP literal so a manual "does this proxy answer at all" check doesn't
+// depend on proxy-side DNS; ranking wants the opposite — a hostname
+// exercises the whole path an actual request takes (upstream DNS, SNI, a
+// real CDN edge rather than a router next door), which is what the ranking
+// is supposed to predict.
+const proxyRankProbeTarget = "www.gstatic.com:443"
+
 // multiBindingProxyNames returns the de-duplicated proxy.Store names that
 // are bound in a route rule alongside at least one other proxy — the only
 // names where latency ranking changes which upstream is used. xray names

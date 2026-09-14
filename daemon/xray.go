@@ -240,8 +240,19 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("xray supervisor: mkdir runtime: %w", err)
 	}
 	cfgPath := filepath.Join(s.runtimeDir, "config.json")
+	prev, _ := os.ReadFile(cfgPath) // absent/unreadable → treated as changed
 	if err := os.WriteFile(cfgPath, cfg, 0o644); err != nil {
 		return fmt.Errorf("xray supervisor: write config: %w", err)
+	}
+
+	// Restarting kills every live connection through every entry at once,
+	// so it must be a consequence of an actual change and not of merely
+	// being asked. Reconcile is called on each settings write, subscription
+	// refresh and group sync, most of which leave the generated config
+	// byte-identical — restarting on those is how a routine background
+	// refresh turns into "everything dropped".
+	if s.cmd != nil && bytes.Equal(prev, cfg) && sameSlots(slots, s.loadedSlots) {
+		return nil
 	}
 
 	if err := s.restartLocked(cfgPath); err != nil {
@@ -249,6 +260,31 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 	}
 	s.loadedSlots = slots
 	return nil
+}
+
+// sameSlots reports whether two resolved slot sets are identical down to
+// member keys. Config equality alone isn't enough to skip a restart: live
+// member add/remove (SyncDialerMembers) moves the RUNNING process away from
+// what's on disk, and a slot set that no longer matches has to be
+// reconverged by a real restart.
+func sameSlots(a, b []xray.DialerSlot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Index != b[i].Index || a[i].Master != b[i].Master {
+			return false
+		}
+		if len(a[i].Members) != len(b[i].Members) {
+			return false
+		}
+		for j := range a[i].Members {
+			if a[i].Members[j].Key != b[i].Members[j].Key {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // resolveDialerSlots turns every enabled master entry (one with a

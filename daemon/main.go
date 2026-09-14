@@ -271,6 +271,7 @@ func main() {
 	// otherwise), so a single-outbound setup does no network work here.
 	go func() {
 		defer wg.Done()
+		rankHost, rankPort := parseProxyTestTarget(proxyRankProbeTarget)
 		t := time.NewTicker(proxyProbeInterval)
 		defer t.Stop()
 		for {
@@ -286,7 +287,7 @@ func main() {
 				if len(names) == 0 {
 					continue
 				}
-				probeProxies(ctx, proxyStore, proxyLatency, names, proxyTestHost, proxyTestPort)
+				probeProxies(ctx, proxyStore, proxyLatency, names, rankHost, rankPort)
 			}
 		}
 	}()

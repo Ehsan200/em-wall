@@ -78,6 +78,25 @@ const (
 	proxyConnectDeadline    = 20 * time.Second       // hard cap, all rounds
 )
 
+// Opening-exchange tuning for path verification (see dialBinding).
+//
+// proxyClientHelloWait bounds how long we wait for the client to say
+// something before giving up on verifying the path. Clients that speak
+// first do so immediately (the ClientHello is already queued when the SYN
+// completes); waiting longer only delays server-speaks-first protocols.
+//
+// proxyFirstByteTimeout is how long a TLS server may stay silent before we
+// call the path dead. It must cover a slow exit's round trip to a distant
+// origin, but stay well inside the browser's own patience.
+//
+// Both are vars rather than consts so tests can compress the timeline.
+var (
+	proxyClientHelloWait  = time.Second
+	proxyFirstByteTimeout = 5 * time.Second
+)
+
+const proxyOpeningReadSize = 16 * 1024 // one TLS record; ClientHellos fit
+
 // defaultProxyTestTarget is the endpoint the proxies.test handler dials
 // through a proxy to confirm reachability, overridable via the
 // -proxy-test-target flag. Cloudflare's 1.1.1.1:443 is a well-known
@@ -114,6 +133,7 @@ type proxyForwarder struct {
 	router  *routing.Manager
 	decider ipRouteDecider // resolves dest IPs with no DNS-time mapping; may be nil
 	latency *netprobe.LatencyTracker
+	sticky  *stickyBindings    // remembers which upstream a destination is on; nil disables
 	traffic *trafficAggregator // nil disables byte accounting
 	health  *udpHealth         // remembers dead UDP relay paths; nil disables
 	logger  *log.Logger
@@ -178,14 +198,25 @@ func (pf *proxyForwarder) recordTraffic(host, proxyName string, sent, recv int64
 	}
 }
 
-// orderedNames returns the binding's proxy names lowest-latency first when a
-// latency tracker is wired, else the binding's original order. Single-name
-// bindings pass through untouched.
+// stickyKey identifies the destination a binding decision is remembered
+// under. The hostname is the right granularity — it is what an origin ties a
+// session to. An IP/CIDR-matched rule has no DNS name, and lookupIPRule
+// already puts the destination address there, so that case keys by address
+// without needing a branch here.
+func stickyKey(entry proxy.Entry) string { return entry.Hostname }
+
+// orderedNames returns the binding's proxy names best-first when a latency
+// tracker is wired, else the binding's original order. The destination's
+// current upstream (if any) is passed as the ranking incumbent, so it is
+// only displaced by an upstream that is healthier or meaningfully faster —
+// without that, every probe round reshuffles the list and the next
+// connection to the same site leaves from a different exit IP.
+// Single-name bindings pass through untouched.
 func (pf *proxyForwarder) orderedNames(entry proxy.Entry) []string {
 	if pf.latency == nil {
 		return entry.ProxyNames
 	}
-	return pf.latency.Rank(entry.ProxyNames)
+	return pf.latency.RankFrom(entry.ProxyNames, pf.sticky.Get(stickyKey(entry)))
 }
 
 // Route keepalive. An active flow doesn't re-query DNS, so its fake-IP host
@@ -251,7 +282,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	ctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
 	defer cancel()
 
-	upstream, used, lastErr := pf.dialBinding(ctx, entry, local)
+	upstream, used, sent, lastErr := pf.dialBinding(ctx, entry, local, conn)
 	if upstream == nil {
 		pf.logger.Printf("proxytun: %s:%d — all upstream proxies failed after %d rounds: %v", target, local.Port, proxyDialMaxRounds, lastErr)
 		return
@@ -264,20 +295,84 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	defer stop()
 
 	pf.logger.Printf("proxytun: %s:%d via proxy %q", target, local.Port, used)
+	// The client's opening bytes were consumed by dialBinding and forwarded
+	// there, so bill them here — SpliceCounted only sees what follows.
+	if sent > 0 {
+		pf.recordTraffic(entry.Hostname, used, sent, 0)
+	}
 	// conn→upstream is bytes the client sent; upstream→conn is bytes it
 	// received. SpliceCounted reports deltas live so long-lived streams
 	// register on the usage dashboard before they close.
-	_, _, _ = proxy.SpliceCounted(conn, upstream, proxyTrafficFlushInterval, func(atob, btoa int64) {
-		pf.recordTraffic(entry.Hostname, used, atob, btoa)
+	atob, btoa, _ := proxy.SpliceCounted(conn, upstream, proxyTrafficFlushInterval, func(a, b int64) {
+		pf.recordTraffic(entry.Hostname, used, a, b)
 	})
+
+	// A connection that sent bytes and heard nothing back is evidence the
+	// chosen upstream cannot carry this destination — the same signal
+	// udpHealth acts on, and the only one available for a TCP path whose
+	// SOCKS handshake always succeeds. One is not proof (clients abort
+	// connections all the time), so it is a strike, not a verdict:
+	// netprobe demotes a name only on consecutive failures.
+	if btoa == 0 && atob+sent > 0 {
+		pf.noteUpstreamFailure(entry, used)
+	}
+}
+
+// noteUpstreamFailure records that name failed to carry entry's traffic:
+// the destination stops preferring it, and the latency tracker takes a
+// strike against it so ranking demotes it once the failure repeats.
+func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
+	pf.sticky.Drop(stickyKey(entry), name)
+	if pf.latency != nil {
+		pf.latency.Fail(name)
+	}
 }
 
 // dialBinding walks the rule's proxy binding in order (first-available
 // fallback) and retries the whole list with backoff on transient failure.
 // Each dial is capped by proxyDialAttemptTimeout (clamped to remaining ctx).
-func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, local *net.TCPAddr) (net.Conn, string, error) {
+// Returns the upstream, the name carrying it, and how many client bytes were
+// already forwarded onto it (the caller bills those; the splice never sees
+// them).
+//
+// A successful dial is NOT evidence the upstream works. Every xray entry is
+// a loopback SOCKS5 inbound, and xray answers CONNECT with success the
+// moment it parses the request — before it has dialed the far side, or even
+// learned whether it can. Measured on a live install: a CONNECT to a
+// blackholed address returns rep=0 in 0.000s. So for xray bindings the dial
+// error is a constant "fine", the fallback list below never advances, and a
+// dead node silently swallows every connection routed to it. That is the
+// difference the user sees between "my set failed over" and "the internet
+// stopped".
+//
+// So when the client opens with a TLS ClientHello we verify the path
+// instead of trusting it: forward the hello and require a byte back within
+// proxyFirstByteTimeout. TLS servers answer within one RTT by definition,
+// so silence means the path is dead, and we move to the next member and
+// replay — safe, because the client has received nothing and a ClientHello
+// carries no side effects. Anything that is not a ClientHello (plaintext
+// HTTP, server-speaks-first protocols, long-poll shapes where silence is
+// legitimate) is forwarded unverified, exactly as before.
+func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, local *net.TCPAddr, client net.Conn) (net.Conn, string, int64, error) {
 	var lastErr error
 	names := pf.orderedNames(entry)
+	key := stickyKey(entry)
+
+	// Read the client's opening bytes once, up front: they are both what we
+	// replay onto each candidate and how we tell a verifiable connection
+	// from an unverifiable one. Only on ports where the client is known to
+	// speak first — waiting on an SSH or SMTP client that is itself waiting
+	// for a banner would just add the timeout to every such connection.
+	var hello []byte
+	if clientSpeaksFirst(local.Port) {
+		var err error
+		hello, err = readOpening(client, proxyClientHelloWait)
+		if err != nil && len(hello) == 0 {
+			return nil, "", 0, fmt.Errorf("client sent nothing: %w", err)
+		}
+	}
+	verify := looksLikeTLSClientHello(hello)
+
 	for round := 1; round <= proxyDialMaxRounds; round++ {
 		for _, name := range names {
 			p, err := pf.store.GetByName(ctx, name)
@@ -295,9 +390,18 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 			cancel()
 			if err != nil {
 				lastErr = err
+				pf.noteUpstreamFailure(entry, name)
 				continue
 			}
-			return c, name, nil
+			up, err := pf.primeUpstream(c, hello, verify)
+			if err != nil {
+				_ = c.Close()
+				lastErr = fmt.Errorf("proxy %q: %w", name, err)
+				pf.noteUpstreamFailure(entry, name)
+				continue
+			}
+			pf.sticky.Set(key, name)
+			return up, name, int64(len(hello)), nil
 		}
 		if ctx.Err() != nil {
 			break
@@ -305,12 +409,95 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 		if round < proxyDialMaxRounds {
 			select {
 			case <-ctx.Done():
-				return nil, "", ctx.Err()
+				return nil, "", 0, ctx.Err()
 			case <-time.After(proxyDialBackoffBase * time.Duration(round)):
 			}
 		}
 	}
-	return nil, "", lastErr
+	return nil, "", 0, lastErr
+}
+
+// primeUpstream forwards the client's opening bytes onto a freshly dialed
+// upstream and, when verify is set, waits for the first byte of the reply.
+// The bytes it reads ahead are handed back in front of the connection so
+// the splice still delivers them. Any error means this upstream is not
+// carrying the connection — the caller closes it and tries the next.
+func (pf *proxyForwarder) primeUpstream(c net.Conn, hello []byte, verify bool) (net.Conn, error) {
+	if len(hello) == 0 {
+		return c, nil
+	}
+	if _, err := c.Write(hello); err != nil {
+		return nil, fmt.Errorf("forward opening bytes: %w", err)
+	}
+	if !verify {
+		return c, nil
+	}
+	buf := make([]byte, 1024)
+	if err := c.SetReadDeadline(time.Now().Add(proxyFirstByteTimeout)); err != nil {
+		return c, nil // connection can't be verified; don't reject it for that
+	}
+	n, err := c.Read(buf)
+	_ = c.SetReadDeadline(time.Time{})
+	if err != nil && n == 0 {
+		return nil, fmt.Errorf("no reply within %s: %w", proxyFirstByteTimeout, err)
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("no reply within %s", proxyFirstByteTimeout)
+	}
+	return &prefixConn{Conn: c, prefix: buf[:n]}, nil
+}
+
+// readOpening reads whatever the client sends first, up to wait. A client
+// that says nothing (server-speaks-first protocols) yields no bytes and no
+// fatal error — the connection is then forwarded unverified.
+func readOpening(client net.Conn, wait time.Duration) ([]byte, error) {
+	buf := make([]byte, proxyOpeningReadSize)
+	if err := client.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		return nil, err
+	}
+	n, err := client.Read(buf)
+	_ = client.SetReadDeadline(time.Time{})
+	if n > 0 {
+		return buf[:n], nil
+	}
+	return nil, err
+}
+
+// clientSpeaksFirst reports whether port is one where the client opens the
+// conversation, making it safe to wait briefly for its first bytes. TLS
+// ports only: that is where the traffic worth verifying is, and it keeps
+// every server-speaks-first protocol on the untouched path.
+func clientSpeaksFirst(port int) bool {
+	switch port {
+	case 443, 853, 993, 995, 8443:
+		return true
+	}
+	return false
+}
+
+// looksLikeTLSClientHello reports whether b opens a TLS handshake: record
+// type 22 (handshake) followed by a 3.x legacy version. That is the one
+// shape where a silent server is unambiguously a broken path — the peer
+// owes a ServerHello within an RTT — and the one where replaying the
+// opening bytes elsewhere is free of side effects.
+func looksLikeTLSClientHello(b []byte) bool {
+	return len(b) >= 3 && b[0] == 0x16 && b[1] == 0x03
+}
+
+// prefixConn serves already-read bytes before falling through to the
+// connection itself.
+type prefixConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (p *prefixConn) Read(b []byte) (int, error) {
+	if len(p.prefix) > 0 {
+		n := copy(b, p.prefix)
+		p.prefix = p.prefix[n:]
+		return n, nil
+	}
+	return p.Conn.Read(b)
 }
 
 // handleUDP services one UDP flow netstack accepted on the utun: open a
@@ -681,7 +868,17 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 			cancel()
 			if err != nil {
 				lastErr = err
+				pf.noteUpstreamFailure(entry, name)
 				continue
+			}
+			// Only the FIRST association of a flow records the destination's
+			// upstream. A re-association is driven by silence, and silence on
+			// UDP is a property of the path to this host rather than of the
+			// proxy (the same proxy carries a sibling flow fine seconds
+			// later) — so it must not drag this destination's TCP
+			// connections onto a different exit as well.
+			if len(tried) == 0 {
+				pf.sticky.Set(stickyKey(entry), name)
 			}
 			return sess, name, nil
 		}
@@ -715,7 +912,7 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, router: router, decider: decider, latency: latency, traffic: traffic, health: newUDPHealth(), logger: logger}
+	fwd := &proxyForwarder{store: store, table: table, router: router, decider: decider, latency: latency, sticky: newStickyBindings(), traffic: traffic, health: newUDPHealth(), logger: logger}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)
