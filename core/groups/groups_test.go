@@ -211,8 +211,10 @@ func TestMicrosoft_CoversVendorSurface(t *testing.T) {
 		"static.licdn.com",
 		"xsts.auth.xboxlive.com",
 		"session.minecraft.net",
+		// Stays here: it is under the *.visualstudio.com wildcard that
+		// Azure DevOps org URLs also need, so the vscode group claims the
+		// exact name instead of taking the wildcard away.
 		"code.visualstudio.com",
-		"main.vscode-cdn.net",
 	} {
 		if !covered(h) {
 			t.Errorf("microsoft group must cover %q but does not", h)
@@ -224,9 +226,93 @@ func TestMicrosoft_CoversVendorSurface(t *testing.T) {
 		"github.com",
 		"api.githubcopilot.com",
 		"www.nuget.org",
+		// Moved to the vscode group: leaving them here too would make
+		// applying both groups create the same rule twice.
+		"main.vscode-cdn.net",
+		"gallerycdn.vsassets.io",
+		"x.vscode-unpkg.net",
+		"insiders.vscode.dev",
 	} {
 		if covered(h) {
 			t.Errorf("microsoft group must NOT cover %q (it has its own group)", h)
+		}
+	}
+}
+
+// TestVSCode_CoversEditorSurface: the editor is only as routable as its
+// least-obvious host. Updates and extensions do not come from
+// code.visualstudio.com — they come from a PRSS download host and a
+// marketplace CDN on entirely different domains, and a group covering only
+// the website would leave an extension install hanging.
+func TestVSCode_CoversEditorSurface(t *testing.T) {
+	g := FindByKey("vscode")
+	if g == nil {
+		t.Fatal("vscode group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		"code.visualstudio.com",
+		"update.code.visualstudio.com",
+		"vscode.download.prss.microsoft.com", // update + extension payloads
+		"marketplace.visualstudio.com",
+		"gallery.vsassets.io",
+		"gallerycdn.vsassets.io",
+		"main.vscode-cdn.net",
+		"vscode.dev",
+		"insiders.vscode.dev",
+		"x.vscode-unpkg.net",
+		"download.visualstudio.microsoft.com", // C/C++ and C# extension payloads
+		"vscode-sync.trafficmanager.net",
+		"vscode-sync-insiders.trafficmanager.net",
+		"default.exp-tas.com",
+		"global.rel.tunnels.api.visualstudio.com",
+		"v3-euw.cluster.rel.tunnels.api.visualstudio.com", // regional cluster
+		"x.devtunnels.ms",
+		"vsmarketplacebadges.dev",
+	} {
+		if !covered(h) {
+			t.Errorf("vscode group must cover %q but does not", h)
+		}
+	}
+	// The PRSS pin must stay a pin: taking *.prss.microsoft.com would drag
+	// in every other Microsoft product's downloads.
+	for _, h := range []string{
+		"officecdn.download.prss.microsoft.com",
+		"api.githubcopilot.com",
+	} {
+		if covered(h) {
+			t.Errorf("vscode group must NOT cover %q", h)
+		}
+	}
+}
+
+// TestVSCode_WinsAttributionOverMicrosoft: GroupForKey returns the first
+// group that claims a host, so the vscode entry has to sit ahead of the
+// microsoft one in KnownGroups. If it ever moves below it, every VS Code
+// host silently reappears on the dashboard as "Microsoft (all)".
+func TestVSCode_WinsAttributionOverMicrosoft(t *testing.T) {
+	for _, h := range []string{
+		"code.visualstudio.com",
+		"vscode.download.prss.microsoft.com",
+		"marketplace.visualstudio.com",
+		"vscode.blob.core.windows.net",
+		"az764295.vo.msecnd.net",
+		"vscode-redirect.azurewebsites.net",
+	} {
+		key, _, ok := GroupForKey(h)
+		if !ok {
+			t.Errorf("%q is claimed by no group", h)
+			continue
+		}
+		if key != "vscode" {
+			t.Errorf("%q attributed to %q, want \"vscode\"", h, key)
 		}
 	}
 }

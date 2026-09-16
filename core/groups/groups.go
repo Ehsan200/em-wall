@@ -449,6 +449,52 @@ func KnownGroups() []Group {
 			Icon: svgJetBrains(),
 		},
 		{
+			Key:         "vscode",
+			DisplayName: "Visual Studio Code",
+			Description: "VS Code updates, the extension marketplace and the CDNs its payloads stream from, extension dependency downloads, vscode.dev, Settings Sync, the experiment service and dev tunnels. GitHub Copilot has its own group; go.microsoft.com (link forwarding) belongs to Microsoft and raw.githubusercontent.com to GitHub, so neither is included.",
+			Patterns: []string{
+				// Product site and the update feed the editor polls on launch.
+				// Exact hosts, not *.visualstudio.com: that wildcard is Azure
+				// DevOps' too and stays with the microsoft group.
+				"code.visualstudio.com",
+				"update.code.visualstudio.com",
+				// Where the update and extension payloads actually come from.
+				// PRSS is Microsoft's shared release service, so the host is
+				// pinned exactly — the rest of prss.microsoft.com is other
+				// products' downloads.
+				"vscode.download.prss.microsoft.com",
+				"vscode.blob.core.windows.net", // legacy download blob
+				"az764295.vo.msecnd.net",       // legacy update CDN, still hit by old builds
+				// Marketplace API plus the CDN the .vsix files stream from
+				// (gallery.vsassets.io, gallerycdn.vsassets.io).
+				"marketplace.visualstudio.com",
+				"*.vsassets.io",
+				"*.vscode-unpkg.net",
+				// Web editor and the CDN serving its assets. (No webview host
+				// here on purpose: webviews render from the vscode-webview://
+				// scheme locally — vscode-webview.net does not resolve.)
+				"*.vscode.dev",
+				"*.vscode-cdn.net",
+				// Where extensions fetch their own binary dependencies from —
+				// the C/C++ and C# extensions are unusable without it.
+				"download.visualstudio.microsoft.com",
+				// Settings Sync (stable + insiders).
+				"vscode-sync.trafficmanager.net",
+				"vscode-sync-insiders.trafficmanager.net",
+				// Experiment/flighting service the editor consults at startup.
+				"default.exp-tas.com",
+				// Remote development: the tunnels control plane and its
+				// regional clusters, plus the per-tunnel forwarding hosts.
+				"*.tunnels.api.visualstudio.com",
+				"*.devtunnels.ms",
+				// External-link redirector the editor opens links through.
+				"vscode-redirect.azurewebsites.net",
+				// Marketplace badges rendered in extension READMEs.
+				"vsmarketplacebadges.dev",
+			},
+			Icon: svgVSCode(),
+		},
+		{
 			Key:         "github",
 			DisplayName: "GitHub",
 			Description: "GitHub web/API, raw content, assets, Pages, GHCR",
@@ -836,7 +882,7 @@ func KnownGroups() []Group {
 		{
 			Key:         "microsoft",
 			DisplayName: "Microsoft (all)",
-			Description: "Microsoft 365 (Outlook/Teams/SharePoint/OneDrive), Entra/Azure AD sign-in, Azure, Windows Update, Bing, MSN, Xbox, LinkedIn + the shared Microsoft CDNs/auth backends they call. GitHub, GitHub Copilot and NuGet have their own groups and are not included.",
+			Description: "Microsoft 365 (Outlook/Teams/SharePoint/OneDrive), Entra/Azure AD sign-in, Azure, Windows Update, Bing, MSN, Xbox, LinkedIn + the shared Microsoft CDNs/auth backends they call. GitHub, GitHub Copilot, VS Code and NuGet have their own groups and are not included.",
 			Patterns: []string{
 				// Corporate + the new consolidated .microsoft TLD
 				// (*.cloud.microsoft, *.static.microsoft,
@@ -980,12 +1026,12 @@ func KnownGroups() []Group {
 				"*.bingapis.com",
 				"*.virtualearth.net",
 				"*.microsofttranslator.com",
-				// Dev tooling that isn't already its own group.
+				// Dev tooling that isn't already its own group. The
+				// *.visualstudio.com wildcard stays because Azure DevOps org
+				// URLs live under it; the VS Code-only hosts moved to the
+				// vscode group, which sits earlier so it wins attribution for
+				// the specific names it lists.
 				"*.visualstudio.com",
-				"*.vsassets.io",
-				"*.vscode.dev",
-				"*.vscode-cdn.net",
-				"*.vscode-unpkg.net",
 				"*.powershellgallery.com",
 				"*.appcenter.ms",
 				"*.sysinternals.com",
@@ -1330,6 +1376,16 @@ func svgAtlassian() string {
 		`<g transform="translate(12,12) scale(1.6667)">` +
 		`<path fill="#2684FF" d="M7.12 11.084a.593.593 0 0 0-1.005.104L.06 23.293a.61.61 0 0 0 .546.882h8.435a.588.588 0 0 0 .546-.336c1.815-3.75.716-9.451-2.467-12.755z"/>` +
 		`<path fill="#0052CC" d="M11.434.284a13.7 13.7 0 0 0-.799 13.541l4.078 8.15a.61.61 0 0 0 .546.338h8.435a.61.61 0 0 0 .546-.882S12.49.775 12.45.696a.583.583 0 0 0-1.015-.412z"/>` +
+		`</g></svg>`
+}
+
+// svgVSCode: the VS Code folded-ribbon mark (24x24 source path, scaled
+// and centred inside the 64x64 badge).
+func svgVSCode() string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" preserveAspectRatio="xMidYMid meet">` +
+		`<rect x="2" y="2" width="60" height="60" rx="14" ry="14" fill="#ffffff" stroke="#dfe1e6" stroke-width="1.5"/>` +
+		`<g transform="translate(12,12) scale(1.6667)">` +
+		`<path fill="#0098FF" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261a1 1 0 0 0-.001 1.479L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/>` +
 		`</g></svg>`
 }
 
