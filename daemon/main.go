@@ -49,6 +49,7 @@ func main() {
 		xrayDataDir    = flag.String("xray-data-dir", "/usr/local/share/em-wall", "directory containing xray's geoip.dat + geosite.dat (XRAY_LOCATION_ASSET)")
 		xrayRuntimeDir = flag.String("xray-runtime-dir", "/usr/local/var/em-wall/xray", "directory where the supervisor writes the generated xray config")
 		xrayLogDir     = flag.String("xray-log-dir", "/usr/local/var/log", "directory where xray writes its access/error logs; empty disables xray logging")
+		logFile        = flag.String("log-file", "/usr/local/var/log/em-wall.log", "file launchd redirects our stdout/stderr to, trimmed when it outgrows the cap; empty disables trimming")
 	)
 	flag.Parse()
 
@@ -292,11 +293,15 @@ func main() {
 		}
 	}()
 
-	// Xray log-cap watcher: every minute, check whether xray's access/
-	// error log files have crossed the cap; restart xray to truncate
-	// them if so. Restart also runs unconditionally on every config
-	// change via Reconcile, so this is the only path that triggers a
-	// restart purely for log-size reasons.
+	// Log-cap watcher: every minute, check whether xray's access/error
+	// log files have crossed the cap; restart xray to truncate them if
+	// so. Restart also runs unconditionally on every config change via
+	// Reconcile, so this is the only path that triggers a restart purely
+	// for log-size reasons.
+	//
+	// The daemon's own log rides the same tick. It is written by launchd
+	// rather than by us, so it needs trimming in place instead of a
+	// restart — see rotateDaemonLogIfTooLarge.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -308,6 +313,7 @@ func main() {
 				return
 			case <-t.C:
 				xraySup.RotateLogsIfTooLarge()
+				rotateDaemonLogIfTooLarge(*logFile, daemonLogCapBytes, daemonLogKeepBytes, log.Default())
 			}
 		}
 	}()

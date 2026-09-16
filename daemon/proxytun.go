@@ -136,7 +136,25 @@ type proxyForwarder struct {
 	sticky  *stickyBindings    // remembers which upstream a destination is on; nil disables
 	traffic *trafficAggregator // nil disables byte accounting
 	health  *udpHealth         // remembers dead UDP relay paths; nil disables
+	breaker *tcpHealth         // remembers dead TCP paths; nil disables
+	gate    *dialGate          // bounds concurrent dials; nil disables
+	sampler *logSampler        // rate-limits the per-connection log line; nil disables
 	logger  *log.Logger
+}
+
+// logVia writes the per-connection "via proxy" line through the sampler,
+// so a destination being retried in a loop can't turn the log into the
+// bottleneck. prefix distinguishes the TCP and UDP call sites.
+func (pf *proxyForwarder) logVia(prefix, target string, port int, used string) {
+	ok, suppressed := pf.sampler.allow(fmt.Sprintf("%s|%s|%d|%s", prefix, target, port, used))
+	if !ok {
+		return
+	}
+	if suppressed > 0 {
+		pf.logger.Printf("%s: %s:%d via proxy %q (+%d more suppressed)", prefix, target, port, used, suppressed)
+		return
+	}
+	pf.logger.Printf("%s: %s:%d via proxy %q", prefix, target, port, used)
 }
 
 // ipRouteDecider resolves a destination IP to a routing decision for
@@ -279,12 +297,48 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		target = local.IP.String()
 	}
 
+	healthKey := tcpHealthKey(target, local.Port)
+
+	// A destination we already know is dead through this binding is closed
+	// at once rather than walked through the full fallback list again. The
+	// client is going to fail either way; the difference is whether it
+	// costs us fifteen upstream dials and twenty seconds each time it
+	// retries. admit still lets one connection per second through, so the
+	// moment the path comes back this stops happening.
+	if !pf.breaker.admit(healthKey) {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
 	defer cancel()
 
+	// Bound concurrent dials, and release the slot the instant dialing is
+	// over — the splice below may run for hours and holds nothing this
+	// ceiling is protecting.
+	release, got := pf.gate.acquire(ctx)
+	if !got {
+		if ok, n := pf.sampler.allow("gate|" + healthKey); ok {
+			pf.logger.Printf("proxytun: %s:%d — dial ceiling (%d) saturated; dropping (+%d more suppressed)", target, local.Port, proxyMaxConcurrentDials, n)
+		}
+		return
+	}
 	upstream, used, sent, lastErr := pf.dialBinding(ctx, entry, local, conn)
+	release()
 	if upstream == nil {
-		pf.logger.Printf("proxytun: %s:%d — all upstream proxies failed after %d rounds: %v", target, local.Port, proxyDialMaxRounds, lastErr)
+		// Every member of the binding failed: a total failure, and the
+		// one dial outcome strong enough to count against the destination.
+		if d := pf.breaker.strike(healthKey); d > 0 {
+			pf.logger.Printf("proxytun: %s:%d — all upstream proxies failed after %d rounds: %v; pausing this destination for %s",
+				target, local.Port, proxyDialMaxRounds, lastErr, d)
+			return
+		}
+		// Not the transition, so sample it: below the threshold this line
+		// still fires once per client retry, and a retry loop is exactly
+		// the situation where it must not become the bottleneck.
+		if ok, n := pf.sampler.allow("faildial|" + healthKey); ok {
+			pf.logger.Printf("proxytun: %s:%d — all upstream proxies failed after %d rounds: %v (+%d more suppressed)",
+				target, local.Port, proxyDialMaxRounds, lastErr, n)
+		}
 		return
 	}
 	defer upstream.Close()
@@ -294,7 +348,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	stop := pf.keepRouteAlive(local.IP)
 	defer stop()
 
-	pf.logger.Printf("proxytun: %s:%d via proxy %q", target, local.Port, used)
+	pf.logVia("proxytun", target, local.Port, used)
 	// The client's opening bytes were consumed by dialBinding and forwarded
 	// there, so bill them here — SpliceCounted only sees what follows.
 	if sent > 0 {
@@ -312,9 +366,21 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	// udpHealth acts on, and the only one available for a TCP path whose
 	// SOCKS handshake always succeeds. One is not proof (clients abort
 	// connections all the time), so it is a strike, not a verdict:
-	// netprobe demotes a name only on consecutive failures.
-	if btoa == 0 && atob+sent > 0 {
+	// netprobe demotes a name only on consecutive failures, and tcpHealth
+	// only pauses the destination after tcpStrikeThreshold of them.
+	//
+	// A single byte back is proof of the opposite, and clears the record
+	// outright — this is what keeps a destination from being paused for a
+	// path that already recovered.
+	switch {
+	case btoa > 0:
+		pf.breaker.success(healthKey)
+	case atob+sent > 0:
 		pf.noteUpstreamFailure(entry, used)
+		if d := pf.breaker.strike(healthKey); d > 0 {
+			pf.logger.Printf("proxytun: %s:%d — carried no data through %q; pausing this destination for %s",
+				target, local.Port, used, d)
+		}
 	}
 }
 
@@ -553,7 +619,19 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	healthKey := udpHealthKey(target, local.Port)
 
 	dctx, cancel := context.WithTimeout(context.Background(), proxyConnectDeadline)
+	// Associating walks the same binding with the same retry budget as a
+	// TCP dial, so it draws on the same ceiling. Released before the relay
+	// pumps start, for the reason the TCP path releases before splicing.
+	release, got := pf.gate.acquire(dctx)
+	if !got {
+		cancel()
+		if ok, n := pf.sampler.allow(fmt.Sprintf("gate/udp|%s|%d", target, local.Port)); ok {
+			pf.logger.Printf("proxytun/udp: %s:%d — dial ceiling (%d) saturated; dropping (+%d more suppressed)", target, local.Port, proxyMaxConcurrentDials, n)
+		}
+		return
+	}
 	session, used, err := pf.associateUDP(dctx, entry, nil)
+	release()
 	cancel()
 	if session == nil {
 		pf.logger.Printf("proxytun/udp: %s:%d — no usable proxy: %v", target, local.Port, err)
@@ -576,7 +654,7 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	defer stopKeepalive()
 
 	startedAt := time.Now()
-	pf.logger.Printf("proxytun/udp: %s:%d via proxy %q", target, local.Port, used)
+	pf.logVia("proxytun/udp", target, local.Port, used)
 
 	// usedName is the proxy currently carrying the flow (byte accounting
 	// follows it); chain is the human-readable history for the closing log.
@@ -912,7 +990,20 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, ""
 	}
-	fwd := &proxyForwarder{store: store, table: table, router: router, decider: decider, latency: latency, sticky: newStickyBindings(), traffic: traffic, health: newUDPHealth(), logger: logger}
+	fwd := &proxyForwarder{
+		store:   store,
+		table:   table,
+		router:  router,
+		decider: decider,
+		latency: latency,
+		sticky:  newStickyBindings(),
+		traffic: traffic,
+		health:  newUDPHealth(),
+		breaker: newTCPHealth(),
+		gate:    newDialGate(proxyMaxConcurrentDials),
+		sampler: newLogSampler(),
+		logger:  logger,
+	}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)
