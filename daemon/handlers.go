@@ -811,9 +811,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err != nil {
 			return nil, err
 		}
+		subNames, live, err := d.xrayOrigins(ctx)
+		if err != nil {
+			return nil, err
+		}
 		out := make([]ipc.XrayDTO, len(list))
 		for i, c := range list {
-			out[i] = xrayToDTO(c)
+			out[i] = xrayToDTOWithOrigin(c, subNames, live)
 		}
 		return out, nil
 	})
@@ -838,7 +842,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := d.xraySup.Reconcile(ctx); err != nil {
 			return nil, fmt.Errorf("entry stored, but xray reconcile failed: %w", err)
 		}
-		return xrayToDTO(added), nil
+		return d.xrayDTO(ctx, added), nil
 	})
 
 	s.Handle(ipc.MethodXrayUpdate, func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -1239,14 +1243,66 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		if err != nil {
 			return nil, err
 		}
+		imported, err := d.xrayStore.ImportedNames(ctx, p.SubID)
+		if err != nil {
+			return nil, err
+		}
 		out := make([]ipc.XraySubNodeDTO, len(nodes))
 		for i, n := range nodes {
 			out[i] = ipc.XraySubNodeDTO{
 				Fingerprint: n.Fingerprint, Name: n.Name, Active: n.Active,
 				Disabled: disabled[n.Fingerprint], LatencyMs: n.LastLatencyMs,
+				ImportedAs: imported[n.Fingerprint],
 			}
 		}
 		return out, nil
+	})
+
+	// Promote one pool node into a standalone entry. The entry is a COPY
+	// of the node's outbound, never a reference: pool rows are replaced
+	// wholesale on every fetch, so a rule bound to this entry must not
+	// depend on one surviving. The origin is recorded only so the UI can
+	// mark the node as already promoted and flag the entry if its source
+	// node later disappears.
+	s.Handle(ipc.MethodXraySubImportNode, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubImportNodeParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		node, err := d.xrayStore.GetNode(ctx, p.SubID, p.Fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		// Re-importing the same node would mint a second entry pointing at
+		// the same server under a deduped name, which is never what the
+		// button means. Hand back the existing one instead.
+		if imported, err := d.xrayStore.ImportedNames(ctx, p.SubID); err == nil {
+			if name := imported[p.Fingerprint]; name != "" {
+				existing, err := d.xrayStore.GetByName(ctx, name)
+				if err == nil {
+					return d.xrayDTO(ctx, existing), nil
+				}
+			}
+		}
+
+		name, err := d.uniqueXrayName(ctx, p.Name, node.Name)
+		if err != nil {
+			return nil, err
+		}
+		added, err := d.xrayStore.Add(ctx, xray.Config{
+			Name:           name,
+			Outbound:       node.Outbound,
+			Enabled:        true,
+			SubID:          p.SubID,
+			SubFingerprint: p.Fingerprint,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := d.xraySup.Reconcile(ctx); err != nil {
+			return nil, fmt.Errorf("entry stored, but xray reconcile failed: %w", err)
+		}
+		return d.xrayDTO(ctx, added), nil
 	})
 
 	s.Handle(ipc.MethodXraySubSetNodeDisabled, func(ctx context.Context, raw json.RawMessage) (any, error) {

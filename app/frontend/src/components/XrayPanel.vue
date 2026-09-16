@@ -20,6 +20,12 @@ type XrayRow = {
   socksPort: number;
   enabled: boolean;
   dialer: string;
+  // Provenance for an entry promoted out of a subscription's node pool.
+  // subName is the subscription it was copied from ('' when hand-written);
+  // sourceGone marks one whose node has left that pool, so nothing is
+  // refreshing it any more.
+  subName: string;
+  sourceGone: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -586,6 +592,15 @@ defineExpose({ refresh });
               </span>
               <span v-if="row.dialer" class="tag" style="font-size: 11px; background: rgba(110,168,255,0.15); color: var(--accent)"
                     :title="'dialer: ' + row.dialer">master · {{ row.dialer }}</span>
+              <span v-if="row.subName && !row.sourceGone" class="tag"
+                    style="font-size: 11px; background: var(--panel-2); color: var(--text-dim)"
+                    :title="`Copied from a node in subscription “${row.subName}”. It is an independent entry — refreshing that subscription does not update it.`">
+                from {{ row.subName }}
+              </span>
+              <span v-else-if="row.subName" class="tag tag-block" style="font-size: 11px"
+                    :title="`This entry was copied from subscription “${row.subName}”, but that node is no longer in its pool — the provider dropped it or changed its server. The entry still points at whatever it was copied from; re-add a current node if it has stopped working.`">
+                ⚠ source node gone
+              </span>
               <code style="font-size: 11px; color: var(--text-dim)">127.0.0.1:{{ row.socksPort }}</code>
               <span v-if="testingIds.has(row.id)" class="tag" style="font-size: 11px">testing…</span>
               <span v-else-if="testResults[row.id]" class="tag"

@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import {
   ListXraySubs, AddXraySub, UpdateXraySub, DeleteXraySub,
   SetXraySubEnabled, RefreshXraySub, XraySubNodes, SetXraySubNodeDisabled,
-  XrayObservatory,
+  ImportXraySubNode, XrayObservatory,
 } from '../../wailsjs/go/main/App';
 
 // Subscriptions are URL-fetched pools of nodes. They are consumed only
@@ -18,6 +18,9 @@ type Sub = {
 };
 type Node = {
   fingerprint: string; name: string; active: boolean; disabled: boolean; latencyMs: number;
+  // Name of the standalone xray entry already promoted out of this node,
+  // '' if there is none.
+  importedAs: string;
 };
 
 const emit = defineEmits<{ (e: 'changed'): void }>();
@@ -241,6 +244,35 @@ async function toggleNode(subId: number, n: Node) {
   }
 }
 
+// Promote a pool node into a standalone xray entry so rules and outbound
+// sets can target it by name. The daemon derives the entry name from the
+// node's and dedupes it; re-clicking an already-promoted node hands back
+// the existing entry rather than minting a second one, so the button is
+// safe to hit twice.
+//
+// Reconciling restarts xray (a new entry means a new inbound), which drops
+// live connections — the same cost as adding an entry by hand, and the
+// reason this is a deliberate click rather than something automatic.
+const importing = ref<string>('');
+const imported = ref<{ node: string; entry: string } | null>(null);
+
+async function importNode(subId: number, n: Node) {
+  if (n.importedAs) return;
+  importing.value = n.fingerprint;
+  error.value = '';
+  try {
+    const entry = await ImportXraySubNode(subId, n.fingerprint, '');
+    imported.value = { node: n.name, entry: (entry as any)?.name || '' };
+    window.setTimeout(() => { imported.value = null; }, 6000);
+    await loadNodes(subId);
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    importing.value = '';
+  }
+}
+
 // ---- Observatory (best-effort live latency + winner) ----
 
 async function pollObs() {
@@ -280,6 +312,11 @@ defineExpose({ refresh });
     </div>
 
     <div v-if="error" class="error" style="margin: 0">{{ error }}</div>
+    <div v-if="imported" class="muted" style="margin: 0; font-size: 12px">
+      Added <strong>{{ imported.node }}</strong> as xray entry
+      <code>{{ imported.entry }}</code> — target it in a rule as
+      <code>xray:{{ imported.entry }}</code>.
+    </div>
 
     <!-- New / edit form -->
     <div v-if="draft.open || editing"
@@ -377,9 +414,18 @@ defineExpose({ refresh });
             <span v-if="n.disabled" class="tag tag-off" style="font-size: 10px">disabled</span>
             <span v-else-if="n.active" class="tag tag-route" style="font-size: 10px">active</span>
             <span v-else class="tag" style="font-size: 10px; background: rgba(141,141,160,0.15); color: var(--text-dim)">idle</span>
+            <span v-if="n.importedAs" class="tag tag-route" style="font-size: 10px"
+                  :title="`Already an xray entry — target it in a rule as xray:${n.importedAs}`">
+              xray:{{ n.importedAs }}
+            </span>
           </div>
           <div class="row" style="gap: 8px; align-items: center">
             <span class="muted" style="font-size: 11px; font-variant-numeric: tabular-nums">{{ nodeLatency(n) }}</span>
+            <button v-if="n.importedAs" disabled title="An xray entry already exists for this node">✓ Added</button>
+            <button v-else @click="importNode(s.id, n)" :disabled="busy || importing === n.fingerprint"
+                    title="Create a standalone xray entry from this node so rules and sets can target it. Restarts xray.">
+              {{ importing === n.fingerprint ? 'Adding…' : '+ Add' }}
+            </button>
             <button @click="toggleNode(s.id, n)" :disabled="busy">{{ n.disabled ? 'Enable' : 'Disable' }}</button>
           </div>
         </div>

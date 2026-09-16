@@ -31,9 +31,20 @@ type Config struct {
 	// streamSettings.sockopt.dialerProxy is wired through a per-master
 	// leastPing balancer over the referenced nodes. Comma-separated typed
 	// refs — see ParseDialer. Empty for an ordinary entry.
-	Dialer    string    `gorm:"column:dialer;type:text;not null;default:''"`
-	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
+	Dialer string `gorm:"column:dialer;type:text;not null;default:''"`
+	// Origin of an entry promoted out of a subscription's node pool, zero
+	// and empty for a hand-written one. The entry is an independent COPY,
+	// not a reference: SubNode rows are volatile (ReplaceNodes wipes and
+	// rebuilds the pool on every fetch), so a rule bound to this entry must
+	// not depend on one surviving. What the origin buys is visibility — the
+	// subscription panel can mark a node already promoted, and an entry
+	// whose source node is gone (provider dropped it, or rotated its server
+	// so the fingerprint changed) can say so instead of silently pointing
+	// at a node that no longer exists.
+	SubID          int64     `gorm:"not null;default:0;index;column:sub_id"`
+	SubFingerprint string    `gorm:"not null;default:'';column:sub_fingerprint"`
+	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt      time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
 func (Config) TableName() string { return "xray_configs" }
@@ -90,6 +101,41 @@ func ValidName(name string) bool {
 
 func normalizeName(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// SuggestName derives a ValidName from arbitrary text — in practice a
+// subscription node's display name, which providers write for humans:
+// "🇩🇪 DE-Frankfurt-01 | 2x", "香港 01". Everything outside the entry
+// charset collapses to a single dash, so the result stays readable rather
+// than being hashed into something the user can't recognise in a rule.
+//
+// The result is a SUGGESTION, not a unique name: callers must still
+// resolve collisions, because two nodes routinely differ only in
+// characters this strips.
+func SuggestName(raw string) string {
+	n := normalizeName(raw)
+	var b strings.Builder
+	dash := false
+	for _, r := range n {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+			dash = false
+			continue
+		}
+		// One dash per run of junk, and never a leading one.
+		if !dash && b.Len() > 0 {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 64 {
+		out = strings.Trim(out[:64], "-")
+	}
+	if out == "" {
+		return "node"
+	}
+	return out
 }
 
 // InternalProxyName is the hidden proxy.Proxy name the supervisor

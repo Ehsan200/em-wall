@@ -81,6 +81,7 @@ const (
 	MethodXraySubRefresh         = "xraysub.refresh" // fetch now (ID, or 0 = all due)
 	MethodXraySubNodes           = "xraysub.nodes"
 	MethodXraySubSetNodeDisabled = "xraysub.setNodeDisabled"
+	MethodXraySubImportNode      = "xraysub.importNode" // promote one pool node to a standalone entry
 	// Outbound sets — a named, ordered bundle of xray entries / proxies a
 	// rule can bind to as one unit ("xrayset:NAME"). Constants read
 	// "XraySets*" (plural) to keep them clearly apart from
@@ -372,9 +373,17 @@ type XrayDTO struct {
 	// Dialer, when non-empty, marks this entry a "master": its sockopt is
 	// tunneled through a leastPing balancer over the referenced nodes.
 	// Comma-separated typed refs: xray:NAME / xraysub:NAME / proxy:NAME.
-	Dialer    string `json:"dialer"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	Dialer string `json:"dialer"`
+	// Origin, when this entry was promoted out of a subscription's node
+	// pool. SubName is the subscription it came from, empty for a
+	// hand-written entry. SourceGone marks a promoted entry whose node is
+	// no longer in that pool — dropped by the provider, or rotated so its
+	// fingerprint changed. The entry still works if the server it points
+	// at is still up; the flag says nobody is refreshing it any more.
+	SubName    string `json:"subName"`
+	SourceGone bool   `json:"sourceGone"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
 }
 
 type XrayAddParams struct {
@@ -508,12 +517,26 @@ type XraySubNodeDTO struct {
 	Active      bool   `json:"active"`
 	Disabled    bool   `json:"disabled"`
 	LatencyMs   int    `json:"latencyMs"` // -1 = unknown
+	// ImportedAs names the standalone xray entry already promoted out of
+	// this node, empty if there is none. Drives the node row's Add /
+	// Added state.
+	ImportedAs string `json:"importedAs"`
 }
 
 type XraySubSetNodeDisabledParams struct {
 	SubID       int64  `json:"subId"`
 	Fingerprint string `json:"fingerprint"`
 	Disabled    bool   `json:"disabled"`
+}
+
+// XraySubImportNodeParams promotes one node of a subscription's pool into
+// a standalone xray entry, so a rule or an outbound set can target it by
+// name. Name is optional — blank derives one from the node's display name
+// via xray.SuggestName, deduped against existing entries.
+type XraySubImportNodeParams struct {
+	SubID       int64  `json:"subId"`
+	Fingerprint string `json:"fingerprint"`
+	Name        string `json:"name"`
 }
 
 // XrayObservatoryResult carries the current balancer winners (fingerprints

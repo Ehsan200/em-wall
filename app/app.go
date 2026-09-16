@@ -609,6 +609,17 @@ func (a *App) SetXraySubNodeDisabled(subID int64, fingerprint string, disabled b
 	}, nil)
 }
 
+// ImportXraySubNode promotes one node of a subscription's pool into a
+// standalone xray entry, which rules and outbound sets can then target by
+// name. Pass an empty name to have one derived from the node's own.
+func (a *App) ImportXraySubNode(subID int64, fingerprint, name string) (ipc.XrayDTO, error) {
+	var out ipc.XrayDTO
+	err := a.call(ipc.MethodXraySubImportNode, ipc.XraySubImportNodeParams{
+		SubID: subID, Fingerprint: fingerprint, Name: name,
+	}, &out)
+	return out, err
+}
+
 // ---- Install / uninstall (local, no daemon needed) ----
 //
 // These methods don't go over IPC — they manipulate the host directly

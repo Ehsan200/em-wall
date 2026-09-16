@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -442,6 +443,62 @@ func (s *Store) DisabledFingerprints(ctx context.Context, subID int64) (map[stri
 		m[o.Fingerprint] = true
 	}
 	return m, nil
+}
+
+// GetNode returns one node of a subscription by fingerprint. Used when
+// promoting a node into a standalone entry, which needs its outbound JSON.
+func (s *Store) GetNode(ctx context.Context, subID int64, fingerprint string) (SubNode, error) {
+	var n SubNode
+	err := s.db.WithContext(ctx).
+		Where("sub_id = ? AND fingerprint = ?", subID, fingerprint).First(&n).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return SubNode{}, ErrNotFound
+	}
+	if err != nil {
+		return SubNode{}, err
+	}
+	return n, nil
+}
+
+// ImportedNames returns fingerprint → entry name for every entry promoted
+// out of this subscription's pool, so the node list can mark which of its
+// nodes already has one.
+func (s *Store) ImportedNames(ctx context.Context, subID int64) (map[string]string, error) {
+	var cs []Config
+	if err := s.db.WithContext(ctx).
+		Select("name", "sub_fingerprint").
+		Where("sub_id = ? AND sub_fingerprint <> ?", subID, "").Find(&cs).Error; err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(cs))
+	for _, c := range cs {
+		m[c.SubFingerprint] = c.Name
+	}
+	return m, nil
+}
+
+// LiveNodeKeys returns the set of "subID\x00fingerprint" keys currently in
+// any subscription's pool. An entry promoted out of a pool whose key is
+// absent has lost its source node — the provider dropped it, or rotated
+// its server so the fingerprint changed. One query rather than one per
+// entry, since the caller checks the whole entry list at once.
+func (s *Store) LiveNodeKeys(ctx context.Context) (map[string]bool, error) {
+	var ns []SubNode
+	if err := s.db.WithContext(ctx).Select("sub_id", "fingerprint").Find(&ns).Error; err != nil {
+		return nil, err
+	}
+	m := make(map[string]bool, len(ns))
+	for _, n := range ns {
+		m[NodeKey(n.SubID, n.Fingerprint)] = true
+	}
+	return m, nil
+}
+
+// NodeKey is the composite identity of a node within a subscription. NUL
+// separates the parts because a fingerprint is hex and a decimal ID can't
+// contain one, so no pair of inputs can collide.
+func NodeKey(subID int64, fingerprint string) string {
+	return strconv.FormatInt(subID, 10) + "\x00" + fingerprint
 }
 
 // CountNodes returns total and active node counts for a subscription.
