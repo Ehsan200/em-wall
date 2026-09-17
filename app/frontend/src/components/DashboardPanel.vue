@@ -113,7 +113,7 @@ const BRAND: Record<string, string> = {
   'perplexity': '#22b8cd', 'huggingface': '#ffd21e', 'mistral': '#ff7000',
   'grok': '#e7e9ea', 'x': '#1d9bf0', 'telegram': '#229ed9', 'meta': '#0866ff',
   'youtube': '#ff0000', 'spotify': '#1db954', 'soundcloud': '#ff5500',
-  'jetbrains': '#ff318c', 'github': '#e6edf3', 'docker': '#2496ed',
+  'jetbrains': '#ff318c', 'vscode': '#0098ff', 'github': '#e6edf3', 'docker': '#2496ed',
   'homebrew': '#fbb040', 'android-studio': '#3ddc84', 'telemetry-common': '#6c5ce7',
   'python': '#3776ab', 'golang': '#00add8', 'maven': '#c71a36', 'npm': '#cb3837',
   'rust': '#dea584', 'ruby': '#cc342d', 'dotnet': '#a67bff', 'php': '#777bb4',

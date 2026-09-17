@@ -49,6 +49,7 @@ var categories = map[string]string{
 	"docker":         CategoryDev,
 	"homebrew":       CategoryDev,
 	"jetbrains":      CategoryDev,
+	"vscode":         CategoryDev,
 	"android-studio": CategoryDev,
 	"python":         CategoryDev,
 	"golang":         CategoryDev,

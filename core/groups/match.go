@@ -31,6 +31,7 @@ var brandColors = map[string]string{
 	"airbnb":           "#ff5a5f", // Airbnb coral
 	"booking":          "#0071c2", // Booking.com blue (lightened from #003580 for dark bg)
 	"jetbrains":        "#ff318c", // JetBrains magenta
+	"vscode":           "#0098ff", // VS Code blue
 	"github":           "#e6edf3", // GitHub near-white
 	"docker":           "#2496ed", // Docker blue
 	"homebrew":         "#fbb040", // Homebrew amber
