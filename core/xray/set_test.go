@@ -212,3 +212,61 @@ func TestCanonicalizeInterface(t *testing.T) {
 		}
 	}
 }
+
+func TestSetExpansionsDropsDisabledMembers(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	live, err := s.Add(ctx, Config{Name: "live", Outbound: `{"protocol":"freedom"}`, Enabled: true})
+	if err != nil {
+		t.Fatalf("Add live: %v", err)
+	}
+	off, err := s.Add(ctx, Config{Name: "off", Outbound: `{"protocol":"freedom"}`, Enabled: true})
+	if err != nil {
+		t.Fatalf("Add off: %v", err)
+	}
+	// GORM's `default:true` swallows a zero-value Enabled on insert, so
+	// the off-switch has to be flipped the way the app flips it.
+	off.Enabled = false
+	if err := s.Update(ctx, off); err != nil {
+		t.Fatalf("disable off: %v", err)
+	}
+	_ = live
+
+	if _, err := s.AddSet(ctx, Set{Name: "mix", Members: "xray:live,xray:off,xray:ghost", Enabled: true}); err != nil {
+		t.Fatalf("AddSet: %v", err)
+	}
+	exp, err := s.SetExpansions(ctx)
+	if err != nil {
+		t.Fatalf("SetExpansions: %v", err)
+	}
+	// "off" is deliberately switched off — its inbound isn't running, so
+	// dialing it is a guaranteed wasted attempt. "ghost" has no entry at
+	// all: a broken ref the UI surfaces, kept so it stays visible.
+	if got, want := exp["mix"], "xray:live,ghost"; got != want {
+		t.Fatalf("expansion = %q, want %q", got, want)
+	}
+}
+
+func TestSetExpansionsOmitsAllDisabledSet(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	off, err := s.Add(ctx, Config{Name: "off", Outbound: `{"protocol":"freedom"}`, Enabled: true})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	off.Enabled = false
+	if err := s.Update(ctx, off); err != nil {
+		t.Fatalf("disable off: %v", err)
+	}
+	if _, err := s.AddSet(ctx, Set{Name: "dead", Members: "xray:off", Enabled: true}); err != nil {
+		t.Fatalf("AddSet: %v", err)
+	}
+	exp, err := s.SetExpansions(ctx)
+	if err != nil {
+		t.Fatalf("SetExpansions: %v", err)
+	}
+	if v, ok := exp["dead"]; ok {
+		t.Fatalf("set with no usable member expanded to %q, want omitted so its rules fail closed", v)
+	}
+}

@@ -105,6 +105,17 @@ func main() {
 	proxyTable := proxy.NewTable(60 * time.Second)
 	router := routing.New(nil)
 	proxyLatency := netprobe.NewLatencyTracker(proxyLatencyTTL)
+	// Demotion and recovery are both worth a log line: "the internet got
+	// slow" is almost always one member of a multi-outbound binding going
+	// bad, and this is the only place that says so out loud.
+	proxyLatency.OnBreakerChange(func(name string, open bool, rate float64, samples int) {
+		if open {
+			log.Printf("netprobe: upstream %q demoted — %.0f%% of last %d attempts failed; ranked last until it recovers",
+				name, rate*100, samples)
+			return
+		}
+		log.Printf("netprobe: upstream %q recovered — %.0f%% failures over last %d attempts", name, rate*100, samples)
+	})
 	trafficAgg := newTrafficAggregator(store, log.Default())
 
 	// Purge retired app-based routing rules (Interface "app:KEY"). The

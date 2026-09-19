@@ -138,10 +138,24 @@ func (st *Store) SetNamesExist(ctx context.Context, names []string) (missing []s
 // it expand to "" and fail closed (NXDOMAIN) rather than silently
 // leaking their traffic out of the default route. Same reasoning as a
 // disabled xray entry making its rule un-dialable.
+// A DISABLED xray MEMBER is dropped from the expansion for the same
+// reason: its SOCKS inbound is not running, so every dial to it is a
+// guaranteed wasted attempt that the caller pays for on every connection
+// (and which drops the destination's sticky binding on the way past). A
+// set left with no usable members is omitted entirely rather than
+// expanded to "", so its rules fail closed like a disabled set's.
 func (st *Store) SetExpansions(ctx context.Context) (map[string]string, error) {
 	sets, err := st.ListSets(ctx)
 	if err != nil {
 		return nil, err
+	}
+	entries, err := st.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	enabled := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		enabled[e.Name] = e.Enabled
 	}
 	out := make(map[string]string, len(sets))
 	for _, s := range sets {
@@ -155,7 +169,23 @@ func (st *Store) SetExpansions(ctx context.Context) (map[string]string, error) {
 			// its rules fail closed, exactly like a disabled set.
 			continue
 		}
-		out[s.Name] = ExpandMembers(refs)
+		live := make([]DialerRef, 0, len(refs))
+		for _, r := range refs {
+			// Only xray members carry an enabled flag; a proxy row has
+			// none, so it is kept and judged by the breaker like any
+			// other upstream. A member whose entry is MISSING is also
+			// kept — that is a broken reference the UI flags, not a
+			// deliberate off-switch, and silently dropping it would hide
+			// it from the expansion the user is shown.
+			if on, known := enabled[r.Name]; r.Kind == DialerKindXray && known && !on {
+				continue
+			}
+			live = append(live, r)
+		}
+		if len(live) == 0 {
+			continue
+		}
+		out[s.Name] = ExpandMembers(live)
 	}
 	return out, nil
 }

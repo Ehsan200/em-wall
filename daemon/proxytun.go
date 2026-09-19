@@ -375,6 +375,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	switch {
 	case btoa > 0:
 		pf.breaker.success(healthKey)
+		pf.noteUpstreamSuccess(used)
 	case atob+sent > 0:
 		pf.noteUpstreamFailure(entry, used)
 		if d := pf.breaker.strike(healthKey); d > 0 {
@@ -391,6 +392,18 @@ func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
 	pf.sticky.Drop(stickyKey(entry), name)
 	if pf.latency != nil {
 		pf.latency.Fail(name)
+	}
+}
+
+// noteUpstreamSuccess records that name actually carried data. Probes run
+// every 30s; connections run continuously, so without this the breaker's
+// window between rounds would be built out of failures alone — a name
+// doing real work would look identical to one sitting idle, and a single
+// bad destination could demote an upstream the rest of the system is
+// using happily.
+func (pf *proxyForwarder) noteUpstreamSuccess(name string) {
+	if pf.latency != nil {
+		pf.latency.Succeed(name)
 	}
 }
 
