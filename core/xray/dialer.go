@@ -200,7 +200,6 @@ func DetectDialerCycle(entries []Config, selfID int64, selfName, selfDialer stri
 	return dfs(self)
 }
 
-
 // sanitizeTag keeps a member key safe as an xray tag suffix.
 func sanitizeTag(key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))

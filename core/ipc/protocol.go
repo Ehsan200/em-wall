@@ -94,7 +94,49 @@ const (
 	MethodPublicIP           = "net.public-ip"
 	MethodRuleExitIP         = "rules.exit-ip"
 	MethodUsageQuery         = "usage.query"
+	// MethodHealthStats reports proxied-connection health over a rolling
+	// window: setup latency, failures by cause, per-upstream outcomes,
+	// xray restarts vs live applies, parked pool nodes.
+	MethodHealthStats = "health.stats"
 )
+
+// HealthStatsDTO is the connection-health snapshot the dashboard polls.
+// Latencies are histogram bin bounds in ms; -1 means no samples.
+type HealthStatsDTO struct {
+	WindowSec     int            `json:"windowSec"`
+	Connections   int            `json:"connections"`
+	Succeeded     int            `json:"succeeded"`
+	Failed        map[string]int `json:"failed"` // cause → count
+	SetupP50Ms    int64          `json:"setupP50Ms"`
+	SetupP95Ms    int64          `json:"setupP95Ms"`
+	ExtraAttempts int            `json:"extraAttempts"` // raced/fallback dials beyond the first
+	UDPFlows      int            `json:"udpFlows"`
+	UDPSilent     int            `json:"udpSilent"`
+
+	Upstreams []UpstreamHealthDTO `json:"upstreams"`
+
+	XrayRestarts    int             `json:"xrayRestarts"`    // of a running process, since daemon start
+	XrayLiveApplies int             `json:"xrayLiveApplies"` // config changes applied without restart
+	ParkedNodes     []ParkedNodeDTO `json:"parkedNodes"`
+}
+
+// UpstreamHealthDTO is one proxy / xray entry's standing.
+type UpstreamHealthDTO struct {
+	Name        string  `json:"name"`
+	Connections int     `json:"connections"` // chosen to carry, in the window
+	Blamed      int     `json:"blamed"`      // failures attributed to it
+	NoData      int     `json:"noData"`
+	SetupP50Ms  int64   `json:"setupP50Ms"`
+	BreakerOpen bool    `json:"breakerOpen"`
+	FailureRate float64 `json:"failureRate"` // breaker window, 0..1
+	RTTMs       int64   `json:"rttMs"`       // last probe RTT; 0 = unknown
+}
+
+// ParkedNodeDTO is a subscription pool node taken out of rotation.
+type ParkedNodeDTO struct {
+	Name  string `json:"name"`
+	Until string `json:"until"` // RFC3339
+}
 
 // Param/result payloads. Plain structs, json-tagged.
 

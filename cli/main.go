@@ -35,6 +35,7 @@ Usage:
 
 Commands:
   status                    daemon health, version, upstream, rule count
+  health                    connection health: failures, setup time, upstreams
   rules list                list stored rules
   rules add <pattern>       add a rule
   rules rm <id>...          delete rules
@@ -91,6 +92,8 @@ func run(args []string, out, errOut io.Writer) int {
 	switch rest[0] {
 	case "status":
 		return a.cmdStatus(rest[1:])
+	case "health":
+		return a.cmdHealth(rest[1:])
 	case "rules", "rule":
 		return a.cmdRules(rest[1:])
 	case "group", "groups":

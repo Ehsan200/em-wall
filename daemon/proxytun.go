@@ -160,6 +160,7 @@ type proxyForwarder struct {
 	gate    *dialGate          // bounds concurrent dials; nil disables
 	sampler *logSampler        // rate-limits the per-connection log line; nil disables
 	witness *uplinkWitness     // proves the uplink was up before blaming a silent upstream; nil = always blame
+	stats   *connStats         // connection health measurements; nil disables
 	logger  *log.Logger
 }
 
@@ -300,6 +301,7 @@ func (pf *proxyForwarder) touchRoute(ip net.IP) {
 
 func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	defer conn.Close()
+	start := time.Now()
 
 	entry, ok := pf.table.Lookup(local.IP)
 	if !ok {
@@ -309,6 +311,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		entry, ok = pf.lookupIPRule(local.IP)
 		if !ok {
 			pf.logger.Printf("proxytun: no proxy mapping for %s (from %s); dropping", local.IP, remote.IP)
+			pf.stats.failed(causeNoMapping)
 			return
 		}
 	}
@@ -327,6 +330,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	// retries. admit still lets one connection per second through, so the
 	// moment the path comes back this stops happening.
 	if !pf.breaker.admit(healthKey) {
+		pf.stats.failed(causePaused)
 		return
 	}
 
@@ -338,6 +342,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	// ceiling is protecting.
 	release, got := pf.gate.acquire(ctx)
 	if !got {
+		pf.stats.failed(causeDialCeiling)
 		if ok, n := pf.sampler.allow("gate|" + healthKey); ok {
 			pf.logger.Printf("proxytun: %s:%d — dial ceiling (%d) saturated; dropping (+%d more suppressed)", target, local.Port, proxyMaxConcurrentDials, n)
 		}
@@ -346,6 +351,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	upstream, used, sent, lastErr := pf.dialBinding(ctx, entry, local, conn)
 	release()
 	if upstream == nil {
+		pf.stats.failed(causeNoUpstream)
 		// Every member of the binding failed: a total failure, and the
 		// one dial outcome strong enough to count against the destination.
 		if d := pf.breaker.strike(healthKey); d > 0 {
@@ -363,6 +369,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		return
 	}
 	defer upstream.Close()
+	pf.stats.established(used, time.Since(start))
 
 	// Keep the fake-IP route + mapping alive for as long as we're splicing,
 	// so the TTL sweep can't cut this connection out from under us.
@@ -398,6 +405,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		pf.breaker.success(healthKey)
 		pf.noteUpstreamSuccess(used)
 	case atob+sent > 0:
+		pf.stats.noData(used)
 		// Blame the upstream only if the uplink demonstrably worked: some
 		// other upstream carried data just now (see uplinkWitness).
 		if pf.witness.otherAlive(used) {
@@ -414,6 +422,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 // the destination stops preferring it, and the latency tracker takes a
 // strike against it so ranking demotes it once the failure repeats.
 func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
+	pf.stats.blamed(name)
 	pf.sticky.Drop(stickyKey(entry), name)
 	if pf.latency != nil {
 		pf.latency.Fail(name)
@@ -606,6 +615,9 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 	wait := proxyFirstByteTimeout // read once: attempts may outlive this call
 	next, inFlight := 0, 0
 	launch := func() {
+		if next > 0 {
+			pf.stats.hedged() // an extra attempt beyond the first
+		}
 		name := names[next]
 		next++
 		inFlight++
@@ -1067,6 +1079,9 @@ func (pf *proxyForwarder) handleUDP(conn net.Conn, local, remote *net.UDPAddr) {
 	// signature, so it's called out rather than left to be eyeballed.
 	sent, recv := sentBytes.Load(), recvBytes.Load()
 	dur := time.Since(startedAt).Round(time.Millisecond)
+	if sent > 0 {
+		pf.stats.udpFlow(recv == 0)
+	}
 	if sent > 0 && recv == 0 {
 		why := "relay black hole?"
 		if noReply.Load() {
@@ -1180,7 +1195,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, logger *log.Logger) (*proxytun.Tunnel, string) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, stats *connStats, logger *log.Logger) (*proxytun.Tunnel, string) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
@@ -1199,6 +1214,7 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		gate:    newDialGate(proxyMaxConcurrentDials),
 		sampler: newLogSampler(),
 		witness: newUplinkWitness(),
+		stats:   stats,
 		logger:  logger,
 	}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)

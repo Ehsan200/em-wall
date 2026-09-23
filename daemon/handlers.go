@@ -1101,6 +1101,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	registerXraySetHandlers(s, d)
 	registerCustomGroupHandlers(s, d)
 	registerPortableHandlers(s, d)
+	registerHealthHandlers(s, d)
 }
 
 // registerXraySubHandlers wires the subscription CRUD + node ops and the

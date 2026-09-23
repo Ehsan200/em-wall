@@ -557,6 +557,15 @@ func (a *App) XrayObservatory() (ipc.XrayObservatoryResult, error) {
 	return out, err
 }
 
+// HealthStats returns proxied-connection health over the daemon's rolling
+// window (setup latency, failures by cause, per-upstream standing, xray
+// restarts vs live applies, parked pool nodes).
+func (a *App) HealthStats() (ipc.HealthStatsDTO, error) {
+	var out ipc.HealthStatsDTO
+	err := a.call(ipc.MethodHealthStats, nil, &out)
+	return out, err
+}
+
 // ---- Xray subscriptions ----
 
 func (a *App) ListXraySubs() ([]ipc.XraySubDTO, error) {

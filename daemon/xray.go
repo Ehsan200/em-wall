@@ -75,6 +75,10 @@ type xraySupervisor struct {
 	running []byte
 	// loadedSlots are the dialer slots in running, for balancer queries.
 	loadedSlots []xray.DialerSlot
+	// Counters for the health view: restarts of a RUNNING process (each one
+	// dropped every connection) vs. changes applied live.
+	restarts    int
+	liveApplies int
 }
 
 // newXraySupervisor probes the binary and returns a supervisor in
@@ -300,6 +304,7 @@ func (s *xraySupervisor) applyLive(ctx context.Context, cfg []byte) bool {
 		s.logger.Printf("xray supervisor: live apply failed: %v — restarting", err)
 		return false
 	}
+	s.liveApplies++
 	s.logger.Printf("xray supervisor: applied live (outbounds -%d +%d, inbounds -%d +%d, routing %v)",
 		len(plan.rmOut), len(plan.addOut), len(plan.rmIn), len(plan.addIn), plan.routing)
 	return true
@@ -501,6 +506,9 @@ func (s *xraySupervisor) syncProxies(ctx context.Context, entries []xray.Config)
 // requirement), then starts a fresh xray against cfgPath. Caller
 // holds s.mu.
 func (s *xraySupervisor) restartLocked(cfgPath string) error {
+	if s.cmd != nil {
+		s.restarts++
+	}
 	s.stopLocked()
 	s.truncateLogsLocked()
 
@@ -563,6 +571,14 @@ func (s *xraySupervisor) stopLocked() {
 		<-done
 	}
 	s.logger.Printf("xray supervisor: stopped pid=%d", cmd.Process.Pid)
+}
+
+// Counters returns restarts of a running process and live applies since
+// the daemon started.
+func (s *xraySupervisor) Counters() (restarts, liveApplies int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.restarts, s.liveApplies
 }
 
 // Stop tears down the subprocess. Hidden proxy rows are intentionally

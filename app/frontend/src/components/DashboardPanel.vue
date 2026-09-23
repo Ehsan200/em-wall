@@ -7,6 +7,7 @@ import {
   Tooltip, Legend,
 } from 'chart.js';
 import { UsageStats, Groups } from '../../wailsjs/go/main/App';
+import ConnectionHealth from './ConnectionHealth.vue';
 import type { ipc } from '../../wailsjs/go/models';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
@@ -314,6 +315,8 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
 <template>
   <div class="panel">
     <div v-if="error" class="error">{{ error }}</div>
+
+    <ConnectionHealth />
 
     <div class="note">
       Shows data volume for <strong>proxied</strong> traffic only (SOCKS / Xray routes).

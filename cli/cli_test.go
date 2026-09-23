@@ -159,6 +159,29 @@ func TestStatusJSON(t *testing.T) {
 	}
 }
 
+func TestHealth(t *testing.T) {
+	s := newStub(t, map[string]stubHandler{
+		ipc.MethodHealthStats: func(json.RawMessage) (any, error) {
+			return ipc.HealthStatsDTO{
+				WindowSec: 900, Connections: 200, Succeeded: 190,
+				Failed:     map[string]int{"no-upstream": 7, "no-data": 3},
+				SetupP50Ms: 750, SetupP95Ms: 3000, XrayRestarts: 0, XrayLiveApplies: 4,
+				Upstreams:   []ipc.UpstreamHealthDTO{{Name: "nyc-direct", Connections: 120, Blamed: 2, SetupP50Ms: 500, RTTMs: 310}},
+				ParkedNodes: []ipc.ParkedNodeDTO{{Name: "nap/usa-1", Until: "2026-09-23T12:00:00Z"}},
+			}, nil
+		},
+	})
+	code, out, _ := runCLI(s.sock, "health")
+	if code != exitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	for _, want := range []string{"10 (5.0%)", "no-upstream", "≤750ms / ≤3000ms", "0 / 4", "nyc-direct", "310ms", "nap/usa-1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("health output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRulesAdd(t *testing.T) {
 	s := newStub(t, map[string]stubHandler{
 		ipc.MethodRulesAdd: func(json.RawMessage) (any, error) {

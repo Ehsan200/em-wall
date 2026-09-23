@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -99,6 +100,30 @@ func (p *nodeParker) parked() map[string]bool {
 			out[k] = true
 		}
 	}
+	return out
+}
+
+// parkedNode is one currently parked member, for the health view.
+type parkedNode struct {
+	Key   string
+	Until time.Time
+}
+
+// list returns the parked members, soonest release first.
+func (p *nodeParker) list() []parkedNode {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	var out []parkedNode
+	for k, st := range p.nodes {
+		if now.Before(st.parkedUntil) {
+			out = append(out, parkedNode{Key: k, Until: st.parkedUntil})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Until.Before(out[j].Until) })
 	return out
 }
 

@@ -141,7 +141,8 @@ func main() {
 	// The netstack handler consults the engine to resolve IP/CIDR rules
 	// for connections that arrive without a DNS-time mapping, so the
 	// engine must exist before the tunnel is built.
-	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, log.Default())
+	connHealth := newConnStats()
+	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
 	}
@@ -188,6 +189,7 @@ func main() {
 		sysDNS:        sysDNS,
 		dnsServer:     dnsServer,
 		latency:       proxyLatency,
+		connHealth:    connHealth,
 		proxyTun:      proxyTunName,
 		listenAddr:    *listenAddr,
 		upstream:      joinCSV(upstreams),
@@ -534,6 +536,7 @@ type handlerDeps struct {
 	sysDNS     *SystemDNS
 	dnsServer  *dnsproxy.Server
 	latency    *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
+	connHealth *connStats               // proxied-connection health window; nil-safe
 	proxyTun   string                   // daemon-owned utun name; "" if proxy routing is disabled
 	listenAddr string
 	upstream   string
