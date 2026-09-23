@@ -53,6 +53,7 @@ type xraySupervisor struct {
 	binaryPath string
 	dataDir    string // contains geoip.dat + geosite.dat
 	runtimeDir string // generated config + scratch
+	apiAddr    string // xray API address; "" = apiServerAddr() (tests override)
 	logDir     string // where xray writes its own access/error logs
 	xrayStore  *xray.Store
 	proxyStore *proxy.Store
@@ -66,11 +67,11 @@ type xraySupervisor struct {
 	tail     *xrayLineRing // last N stdout/stderr lines, surfaced via RecentLines
 	lastExit string        // most recent unexpected exit description (empty until one happens)
 
-	// loadedSlots snapshots the dialer slots baked into the currently
-	// running config (seeded on every successful (re)start). SyncDialer-
-	// Members diffs desired-vs-loaded to drive live xray-api add/remove of
-	// slot members without a restart; a change to the *set* of slotted
-	// masters instead forces a full Reconcile.
+	// running is the config the live process currently reflects — what it
+	// was started with, advanced by every successful live apply. Reconcile
+	// diffs against it to change the process without restarting it.
+	running []byte
+	// loadedSlots are the dialer slots in running, for balancer queries.
 	loadedSlots []xray.DialerSlot
 }
 
@@ -240,51 +241,64 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("xray supervisor: mkdir runtime: %w", err)
 	}
 	cfgPath := filepath.Join(s.runtimeDir, "config.json")
-	prev, _ := os.ReadFile(cfgPath) // absent/unreadable → treated as changed
 	if err := os.WriteFile(cfgPath, cfg, 0o644); err != nil {
 		return fmt.Errorf("xray supervisor: write config: %w", err)
 	}
 
 	// Restarting kills every live connection through every entry at once,
-	// so it must be a consequence of an actual change and not of merely
-	// being asked. Reconcile is called on each settings write, subscription
-	// refresh and group sync, most of which leave the generated config
-	// byte-identical — restarting on those is how a routine background
-	// refresh turns into "everything dropped".
-	if s.cmd != nil && bytes.Equal(prev, cfg) && sameSlots(slots, s.loadedSlots) {
-		return nil
+	// so a running process is brought to the new config through the API
+	// whenever the change allows it (see xray_live.go) — only a structural
+	// change, or an API failure, falls through to a restart. Reconcile is
+	// called on every settings write, subscription refresh and group sync;
+	// most of those change nothing and cost nothing here.
+	if s.cmd != nil && s.running != nil {
+		if bytes.Equal(s.running, cfg) {
+			s.loadedSlots = slots
+			return nil
+		}
+		if s.applyLive(ctx, cfg) {
+			s.running = cfg
+			s.loadedSlots = slots
+			return nil
+		}
 	}
 
 	if err := s.restartLocked(cfgPath); err != nil {
 		return err
 	}
+	s.running = cfg
 	s.loadedSlots = slots
 	return nil
 }
 
-// sameSlots reports whether two resolved slot sets are identical down to
-// member keys. Config equality alone isn't enough to skip a restart: live
-// member add/remove (SyncDialerMembers) moves the RUNNING process away from
-// what's on disk, and a slot set that no longer matches has to be
-// reconverged by a real restart.
-func sameSlots(a, b []xray.DialerSlot) bool {
-	if len(a) != len(b) {
+// applyLive tries to bring the running process to cfg without a restart.
+// It reports whether that succeeded; on false the caller restarts, which
+// converges from whatever state a partial apply left behind.
+func (s *xraySupervisor) applyLive(ctx context.Context, cfg []byte) bool {
+	oldLC, err := parseLiveConfig(s.running)
+	if err != nil {
+		s.logger.Printf("xray supervisor: live apply: parse running config: %v — restarting", err)
 		return false
 	}
-	for i := range a {
-		if a[i].Index != b[i].Index || a[i].Master != b[i].Master ||
-			strings.Join(a[i].Aliases, ",") != strings.Join(b[i].Aliases, ",") {
-			return false
-		}
-		if len(a[i].Members) != len(b[i].Members) {
-			return false
-		}
-		for j := range a[i].Members {
-			if a[i].Members[j].Key != b[i].Members[j].Key {
-				return false
-			}
-		}
+	newLC, err := parseLiveConfig(cfg)
+	if err != nil {
+		s.logger.Printf("xray supervisor: live apply: parse new config: %v — restarting", err)
+		return false
 	}
+	plan := planLive(oldLC, newLC)
+	if plan.restart {
+		s.logger.Printf("xray supervisor: structural config change — restarting")
+		return false
+	}
+	if plan.empty() {
+		return true
+	}
+	if err := s.applyLiveLocked(ctx, plan, cfg); err != nil {
+		s.logger.Printf("xray supervisor: live apply failed: %v — restarting", err)
+		return false
+	}
+	s.logger.Printf("xray supervisor: applied live (outbounds -%d +%d, inbounds -%d +%d, routing %v)",
+		len(plan.rmOut), len(plan.addOut), len(plan.rmIn), len(plan.addIn), plan.routing)
 	return true
 }
 
@@ -575,10 +589,16 @@ func (s *xraySupervisor) truncateLogsLocked() {
 	}
 }
 
-// RotateLogsIfTooLarge restarts xray when either log file has crossed
-// xrayLogCapBytes — restart truncates as a side-effect. Called
-// periodically from main.go's watcher goroutine. No-op when disabled,
-// when no logs are configured, or when nothing is currently running.
+// RotateLogsIfTooLarge truncates xray's log files in place once either
+// has crossed xrayLogCapBytes. Called periodically from main.go's watcher
+// goroutine. No-op when disabled or when no logs are configured.
+//
+// It must never restart xray: a restart drops every live connection
+// through every entry, and a busy observatory (a pool with dead nodes
+// warns on every failed ping) fills the cap in about a day — so rotating
+// by restart turned a log-size housekeeping tick into a daily outage.
+// Truncating is enough on its own: xray opens its logs with O_APPEND, so
+// its next write lands at the new end of the file.
 func (s *xraySupervisor) RotateLogsIfTooLarge() {
 	if !s.enabled || s.logDir == "" {
 		return
@@ -596,18 +616,8 @@ func (s *xraySupervisor) RotateLogsIfTooLarge() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cmd == nil {
-		// Not running — just truncate in place; next start will be
-		// fresh anyway, but doing this now prevents the cap-exceeded
-		// state from lingering on disk.
-		s.truncateLogsLocked()
-		return
-	}
-	cfgPath := filepath.Join(s.runtimeDir, "config.json")
-	s.logger.Printf("xray supervisor: log files exceeded %d bytes — rotating", xrayLogCapBytes)
-	if err := s.restartLocked(cfgPath); err != nil {
-		s.logger.Printf("xray supervisor: rotate-restart failed: %v", err)
-	}
+	s.logger.Printf("xray supervisor: log files exceeded %d bytes — truncating", xrayLogCapBytes)
+	s.truncateLogsLocked()
 }
 
 // xrayLogWriter splits xray's stdout/stderr into lines, re-prints

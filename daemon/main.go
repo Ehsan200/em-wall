@@ -305,14 +305,11 @@ func main() {
 	}()
 
 	// Log-cap watcher: every minute, check whether xray's access/error
-	// log files have crossed the cap; restart xray to truncate them if
-	// so. Restart also runs unconditionally on every config change via
-	// Reconcile, so this is the only path that triggers a restart purely
-	// for log-size reasons.
+	// log files have crossed the cap and truncate them in place if so
+	// (never by restarting xray — see RotateLogsIfTooLarge).
 	//
-	// The daemon's own log rides the same tick. It is written by launchd
-	// rather than by us, so it needs trimming in place instead of a
-	// restart — see rotateDaemonLogIfTooLarge.
+	// The daemon's own log rides the same tick; it is written by launchd,
+	// so it is trimmed in place too — see rotateDaemonLogIfTooLarge.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

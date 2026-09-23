@@ -35,6 +35,10 @@ type GenerateOptions struct {
 	ObservatoryTimeout  string
 }
 
+// slotBalancerExpected is how many best-ranked members a dialer slot's
+// leastLoad balancer spreads connections over (see Generate).
+const slotBalancerExpected = 2
+
 // Generate produces a full xray-core JSON config from entries.
 //
 // For each enabled entry the config gets:
@@ -67,20 +71,19 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		Settings map[string]any `json:"settings"`
 	}
 	type cfg struct {
-		Log         map[string]any    `json:"log,omitempty"`
-		API         json.RawMessage   `json:"api,omitempty"`
-		Stats       json.RawMessage   `json:"stats,omitempty"`
-		Inbounds    []inbound         `json:"inbounds"`
-		Outbounds   []json.RawMessage `json:"outbounds"`
-		BurstObservatory json.RawMessage `json:"burstObservatory,omitempty"`
-		Routing     struct {
+		Log              map[string]any    `json:"log,omitempty"`
+		API              json.RawMessage   `json:"api,omitempty"`
+		Policy           json.RawMessage   `json:"policy,omitempty"`
+		Stats            json.RawMessage   `json:"stats,omitempty"`
+		Inbounds         []inbound         `json:"inbounds"`
+		Outbounds        []json.RawMessage `json:"outbounds"`
+		BurstObservatory json.RawMessage   `json:"burstObservatory,omitempty"`
+		Routing          struct {
 			DomainStrategy string            `json:"domainStrategy"`
 			Rules          []json.RawMessage `json:"rules"`
 			Balancers      []json.RawMessage `json:"balancers,omitempty"`
 		} `json:"routing"`
 	}
-
-	hasSlots := len(opt.DialerSlots) > 0
 
 	// Index masters so the entry loop can inject sockopt.dialerProxy.
 	masters := make(map[string]DialerSlot, len(opt.DialerSlots))
@@ -100,11 +103,30 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	}
 	out.Routing.DomainStrategy = "AsIs"
 
-	// gRPC API (only when dialer slots exist): a dokodemo inbound + the
-	// service list the supervisor's live AddOutbound/RemoveOutbound and
-	// balancer-info calls need. The api routing rule is added first so
-	// api traffic can't be swallowed by a user catch-all rule.
-	if hasSlots {
+	// Explicit connection policy. xray's defaults close a connection after
+	// 300s without traffic, which silently cuts long-lived but quiet
+	// streams — SSH sessions, IMAP IDLE (29 min), push and chat sockets,
+	// idle WebSockets. connIdle is raised past those; the half-close
+	// timers keep xray's defaults so finished transfers are still reaped
+	// promptly.
+	out.Policy = json.RawMessage(`{"levels":{"0":{"handshake":8,"connIdle":1800,"uplinkOnly":2,"downlinkOnly":5}}}`)
+
+	// Blackhole FIRST. xray sends anything no routing rule matches to its
+	// first outbound; every inbound here has an explicit rule, so nothing
+	// should ever reach it — but if something does, it must fail closed,
+	// and the first outbound must not move when an entry is added or
+	// renamed, or live config updates couldn't reproduce it.
+	out.Outbounds = append(out.Outbounds, json.RawMessage(`{"tag":"`+TagBlock+`","protocol":"blackhole"}`))
+
+	// gRPC API: a dokodemo inbound + the service list the supervisor's
+	// live add/remove and balancer-info calls need. The api routing rule is
+	// added first so api traffic can't be swallowed by a user catch-all
+	// rule. Always on: the supervisor applies config changes to the running
+	// process through this API (inbounds, outbounds, the whole routing
+	// section) instead of restarting it, and a restart drops every live
+	// connection through every entry. With the API gated on dialer slots,
+	// a config without masters could only ever be changed by restart.
+	{
 		out.API = json.RawMessage(`{"tag":"` + ApiTag + `","services":["HandlerService","RoutingService","ObservatoryService","StatsService"]}`)
 		out.Stats = json.RawMessage(`{}`)
 		out.Inbounds = append(out.Inbounds, inbound{
@@ -217,19 +239,33 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		}
 
 		// leastLoad reads the burst observatory's live health-ping window
-		// and picks the single (expected:1) lowest-RTT healthy member; a
-		// node whose recent pings fail sinks immediately, so the balancer
-		// switches off a degraded node within a ping or two. No maxRTT cap
-		// is set on purpose: if EVERY node is slow (local network down) we
-		// still want the least-bad one rather than a total blackout.
-		bal, _ := json.Marshal(map[string]any{
+		// and spreads connections over the best `expected` healthy members;
+		// a node whose recent pings fail sinks immediately, so the balancer
+		// switches off a degraded node within a ping or two. Two, not one:
+		// with a single winner every connection of every master sharing the
+		// slot rides one node, and that node dying drops all of them at
+		// once. Spreading costs nothing in exit stability — a master's exit
+		// IP is its own server whichever node carries the tunnel. No maxRTT
+		// cap is set on purpose: if EVERY node is slow (local network down)
+		// we still want the least-bad ones rather than a total blackout.
+		//
+		// fallbackTag covers the moments leastLoad has nothing to rank:
+		// right after xray starts (no ping has completed yet — measured:
+		// every master connection failed for the first ~interval) and when
+		// every member's last pings failed. Either way a member that might
+		// work beats a guaranteed failure.
+		balancer := map[string]any{
 			"tag":      SlotBalancerTag(slot.Index),
 			"selector": []string{SlotOutboundPrefix(slot.Index)},
 			"strategy": map[string]any{
 				"type":     "leastLoad",
-				"settings": map[string]any{"expected": 1},
+				"settings": map[string]any{"expected": slotBalancerExpected},
 			},
-		})
+		}
+		if len(slot.Members) > 0 {
+			balancer["fallbackTag"] = SlotMemberTag(slot.Index, slot.Members[0].Key)
+		}
+		bal, _ := json.Marshal(balancer)
 		out.Routing.Balancers = append(out.Routing.Balancers, bal)
 
 		rule, _ := json.Marshal(map[string]any{
@@ -245,7 +281,12 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	// classic observatory (periodic averaged probe), burst keeps a rolling
 	// health-ping window per node, so leastLoad reacts to a failing node on
 	// the next ping instead of waiting out a 60s average.
-	if len(slots) > 0 {
+	//
+	// Emitted even with no slots: it idles with nothing matching its
+	// selector, and having it present from the start means the first
+	// master a user adds applies live instead of restarting xray (the
+	// observatory is not something the API can add).
+	{
 		probeURL := strings.TrimSpace(opt.ObservatoryProbeURL)
 		if probeURL == "" {
 			probeURL = DefaultProbeURL
@@ -273,10 +314,10 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		})
 	}
 
-	// Always-present outbounds so user rules can reference them.
+	// Always-present outbounds so user rules can reference them (TagBlock
+	// was emitted first, above).
 	out.Outbounds = append(out.Outbounds,
 		json.RawMessage(`{"tag":"`+TagDirect+`","protocol":"freedom"}`),
-		json.RawMessage(`{"tag":"`+TagBlock+`","protocol":"blackhole"}`),
 	)
 
 	return json.MarshalIndent(out, "", "  ")

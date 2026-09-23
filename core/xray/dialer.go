@@ -29,11 +29,17 @@ const (
 // with pool_size / interval. 10s keeps that near-zero even for a large
 // pool, while still being ~6x faster than the old 60s cycle. The pool is
 // further bounded by each subscription's EffectiveCap, capping probe fan-out.
+//
+// Window and timeout are sized for a lossy uplink: with 2 samples and a 3s
+// timeout, one retransmitted handshake failed a node and a second flipped
+// the balancer, so on a flaky link nodes churned constantly (and the
+// failures filled the error log). Three samples and 5s ride out a single
+// slow ping; a node that is actually dead still fails every one.
 const (
 	DefaultProbeURL      = "http://www.gstatic.com/generate_204"
 	DefaultProbeInterval = "10s" // per-node health-ping cadence (gentle on CPU)
-	DefaultProbeSampling = 2     // rolling window of samples per node
-	DefaultProbeTimeout  = "3s"  // a ping past this counts as a failure
+	DefaultProbeSampling = 3     // rolling window of samples per node
+	DefaultProbeTimeout  = "5s"  // a ping past this counts as a failure
 	// ObservatorySelectorPrefix matches every slot member outbound so a
 	// single top-level burst observatory feeds all per-master balancers.
 	ObservatorySelectorPrefix = "slot"
@@ -194,23 +200,6 @@ func DetectDialerCycle(entries []Config, selfID int64, selfName, selfDialer stri
 	return dfs(self)
 }
 
-// MemberOutboundJSON returns a slot member's outbound with its tag set
-// (and legacy xhttp shapes healed) — identical to what Generate bakes, so
-// a live `xray api ado` adds a byte-for-byte equivalent outbound. Wrap the
-// result in {"outbounds":[...]} to feed the CLI.
-func MemberOutboundJSON(slotIndex int, key string, raw []byte) (json.RawMessage, error) {
-	var ob map[string]any
-	if err := json.Unmarshal(raw, &ob); err != nil {
-		return nil, fmt.Errorf("xray: slot %d member %q: outbound JSON: %w", slotIndex, key, err)
-	}
-	ob["tag"] = SlotMemberTag(slotIndex, key)
-	healXHTTPExtra(ob)
-	b, err := json.Marshal(ob)
-	if err != nil {
-		return nil, fmt.Errorf("xray: slot %d member %q: re-marshal: %w", slotIndex, key, err)
-	}
-	return b, nil
-}
 
 // sanitizeTag keeps a member key safe as an xray tag suffix.
 func sanitizeTag(key string) string {

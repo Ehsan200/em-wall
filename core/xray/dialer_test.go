@@ -232,7 +232,7 @@ func TestGenerate_DialerSlot(t *testing.T) {
 	}
 }
 
-func TestGenerate_ApiBlockGatedOnSlots(t *testing.T) {
+func TestGenerate_ApiBlockAlwaysOn(t *testing.T) {
 	member := DialerMember{Key: "fp1", Outbound: json.RawMessage(`{"protocol":"freedom"}`)}
 	withSlots, err := Generate([]Config{{Name: "m", Enabled: true, Dialer: "xray:x", Outbound: `{"protocol":"freedom"}`}},
 		GenerateOptions{DialerSlots: []DialerSlot{{Master: "m", Index: 0, Members: []DialerMember{member}}}})
@@ -267,18 +267,19 @@ func TestGenerate_ApiBlockGatedOnSlots(t *testing.T) {
 		t.Errorf("api inbound missing when slots present")
 	}
 
-	// No slots → no api block.
+	// No slots → the api block is still there: every config change is
+	// applied to the running process through it.
 	noSlots, _ := Generate([]Config{{Name: "a", Enabled: true, Outbound: `{"protocol":"freedom"}`}}, GenerateOptions{})
 	var plain struct {
 		API json.RawMessage `json:"api"`
 	}
 	_ = json.Unmarshal(noSlots, &plain)
-	if len(plain.API) != 0 {
-		t.Errorf("api block emitted with no slots: %s", plain.API)
+	if len(plain.API) == 0 {
+		t.Errorf("api block missing with no slots")
 	}
 }
 
-func TestGenerate_NoSlotsNoObservatory(t *testing.T) {
+func TestGenerate_NoSlotsNoBalancers(t *testing.T) {
 	raw, err := Generate([]Config{{Name: "a", Enabled: true, Outbound: `{"protocol":"freedom"}`}}, GenerateOptions{})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -290,8 +291,10 @@ func TestGenerate_NoSlotsNoObservatory(t *testing.T) {
 		} `json:"routing"`
 	}
 	_ = json.Unmarshal(raw, &cfg)
-	if len(cfg.BurstObservatory) != 0 {
-		t.Errorf("burst observatory emitted with no slots: %s", cfg.BurstObservatory)
+	// The observatory is always present (so the first master applies
+	// live); with no slots it simply has nothing to probe.
+	if len(cfg.BurstObservatory) == 0 {
+		t.Errorf("burst observatory missing with no slots")
 	}
 	if len(cfg.Routing.Balancers) != 0 {
 		t.Errorf("balancers emitted with no slots: %s", cfg.Routing.Balancers)

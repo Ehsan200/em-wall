@@ -159,6 +159,7 @@ type proxyForwarder struct {
 	breaker *tcpHealth         // remembers dead TCP paths; nil disables
 	gate    *dialGate          // bounds concurrent dials; nil disables
 	sampler *logSampler        // rate-limits the per-connection log line; nil disables
+	witness *uplinkWitness     // proves the uplink was up before blaming a silent upstream; nil = always blame
 	logger  *log.Logger
 }
 
@@ -397,7 +398,11 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 		pf.breaker.success(healthKey)
 		pf.noteUpstreamSuccess(used)
 	case atob+sent > 0:
-		pf.noteUpstreamFailure(entry, used)
+		// Blame the upstream only if the uplink demonstrably worked: some
+		// other upstream carried data just now (see uplinkWitness).
+		if pf.witness.otherAlive(used) {
+			pf.noteUpstreamFailure(entry, used)
+		}
 		if d := pf.breaker.strike(healthKey); d > 0 {
 			pf.logger.Printf("proxytun: %s:%d — carried no data through %q; pausing this destination for %s",
 				target, local.Port, used, d)
@@ -422,6 +427,7 @@ func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
 // bad destination could demote an upstream the rest of the system is
 // using happily.
 func (pf *proxyForwarder) noteUpstreamSuccess(name string) {
+	pf.witness.saw(name)
 	if pf.latency != nil {
 		pf.latency.Succeed(name)
 	}
@@ -495,6 +501,9 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 				if n != used {
 					pf.noteUpstreamFailure(entry, n)
 				}
+			}
+			if verify {
+				pf.witness.saw(used) // it answered the hello: data came back
 			}
 			pf.sticky.Set(key, used)
 			return up, used, int64(len(hello)), nil
@@ -1189,6 +1198,7 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		breaker: newTCPHealth(),
 		gate:    newDialGate(proxyMaxConcurrentDials),
 		sampler: newLogSampler(),
+		witness: newUplinkWitness(),
 		logger:  logger,
 	}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)

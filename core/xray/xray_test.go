@@ -107,6 +107,28 @@ func TestGenerateRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal generated config: %v\n%s", err, raw)
 	}
 
+	// The API inbound and its rule are always present (live config
+	// updates depend on them); this test is about the entry pairs.
+	ins := cfg.Inbounds[:0]
+	for _, in := range cfg.Inbounds {
+		if in.Tag != ApiTag {
+			ins = append(ins, in)
+		}
+	}
+	cfg.Inbounds = ins
+	rules := cfg.Routing.Rules[:0]
+	for _, r := range cfg.Routing.Rules {
+		if r.OutboundTag != ApiTag {
+			rules = append(rules, r)
+		}
+	}
+	cfg.Routing.Rules = rules
+	// Blackhole is emitted first (fail-closed default outbound).
+	if got := cfg.Outbounds[0]["tag"]; got != TagBlock {
+		t.Errorf("outbound[0].tag = %v, want %q first", got, TagBlock)
+	}
+	cfg.Outbounds = cfg.Outbounds[1:]
+
 	// Disabled entries should not appear.
 	if len(cfg.Inbounds) != 2 {
 		t.Fatalf("inbounds: got %d, want 2 (disabled-zulu must be skipped)", len(cfg.Inbounds))
@@ -128,8 +150,8 @@ func TestGenerateRoundTrip(t *testing.T) {
 	// Each enabled entry produces one outbound, with the tag
 	// overridden to match the routing rule. Plus direct + block are
 	// always appended so user rules can reference them.
-	if len(cfg.Outbounds) != 4 {
-		t.Fatalf("outbounds: got %d, want 4 (2 entries + direct + block)", len(cfg.Outbounds))
+	if len(cfg.Outbounds) != 3 {
+		t.Fatalf("outbounds after block: got %d, want 3 (2 entries + direct)", len(cfg.Outbounds))
 	}
 	if got := cfg.Outbounds[0]["tag"]; got != OutboundTag("alpha") {
 		t.Errorf("outbound[0].tag = %v, want %q", got, OutboundTag("alpha"))
@@ -172,8 +194,8 @@ func TestGenerateNoEnabledFallback(t *testing.T) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if len(cfg.Inbounds) != 0 {
-		t.Errorf("inbounds with no entries: got %d, want 0", len(cfg.Inbounds))
+	if len(cfg.Inbounds) != 1 {
+		t.Errorf("inbounds with no entries: got %d, want only the api inbound", len(cfg.Inbounds))
 	}
 	// With no entries the config still ships direct + block so user
 	// rules can reference them and xray has at least one outbound to
@@ -236,9 +258,12 @@ func TestGenerateUserRulesPrecedeAutoPairs(t *testing.T) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if len(cfg.Routing.Rules) < 2 {
-		t.Fatalf("expected user rule + per-entry pair, got %d", len(cfg.Routing.Rules))
+	// The api rule always leads (so a user catch-all can't swallow api
+	// traffic); user rules come right after it, before the auto pairs.
+	if len(cfg.Routing.Rules) < 3 || cfg.Routing.Rules[0]["outboundTag"] != ApiTag {
+		t.Fatalf("expected api rule, then user rule + per-entry pair, got %v", cfg.Routing.Rules)
 	}
+	cfg.Routing.Rules = cfg.Routing.Rules[1:]
 	if cfg.Routing.Rules[0]["outboundTag"] != "block" {
 		t.Errorf("first rule is not the user rule: %v", cfg.Routing.Rules[0])
 	}
@@ -274,7 +299,7 @@ func TestGenerateHealsXHTTPExtraString(t *testing.T) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	first := cfg.Outbounds[0]
+	first := outboundByTag(cfg.Outbounds, OutboundTag("alpha"))
 	ss, _ := first["streamSettings"].(map[string]any)
 	xh, _ := ss["xhttpSettings"].(map[string]any)
 	if _, ok := xh["extra"].(map[string]any); !ok {
@@ -298,7 +323,7 @@ func TestGenerateHealsXHTTPExtraString(t *testing.T) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("Unmarshal beta: %v", err)
 	}
-	xh, _ = cfg.Outbounds[0]["streamSettings"].(map[string]any)["xhttpSettings"].(map[string]any)
+	xh, _ = outboundByTag(cfg.Outbounds, OutboundTag("beta"))["streamSettings"].(map[string]any)["xhttpSettings"].(map[string]any)
 	if _, present := xh["extra"]; present {
 		t.Errorf("invalid extra string should have been dropped, got %v", xh["extra"])
 	}
@@ -325,4 +350,13 @@ func TestValidateRoutingRules(t *testing.T) {
 			t.Errorf("ValidateRoutingRules(%q) = nil, want error", in)
 		}
 	}
+}
+
+func outboundByTag(obs []map[string]any, tag string) map[string]any {
+	for _, o := range obs {
+		if o["tag"] == tag {
+			return o
+		}
+	}
+	return nil
 }
