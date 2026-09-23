@@ -200,7 +200,7 @@ func (d *handlerDeps) buildBundle(ctx context.Context, sel ipc.ExportSelection) 
 				continue
 			}
 			bundle.Masters = append(bundle.Masters, portable.BundleXray{
-				Name: e.Name, Outbound: e.Outbound, Enabled: e.Enabled, Dialer: e.Dialer,
+				Name: e.Name, Outbound: e.Outbound, Enabled: e.Enabled, Dialer: e.Dialer, Mux: e.Mux,
 			})
 		}
 		return bundle, nil
@@ -327,7 +327,7 @@ func (d *handlerDeps) applyBundle(ctx context.Context, b portable.Bundle) (ipc.I
 	importedMaster := false
 	for _, m := range b.Masters {
 		_, err := d.xrayStore.Add(ctx, xray.Config{
-			Name: m.Name, Outbound: m.Outbound, Enabled: m.Enabled, Dialer: m.Dialer,
+			Name: m.Name, Outbound: m.Outbound, Enabled: m.Enabled, Dialer: m.Dialer, Mux: m.Mux,
 		})
 		switch {
 		case err == nil:

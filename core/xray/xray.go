@@ -41,6 +41,9 @@ type Config struct {
 	// whose source node is gone (provider dropped it, or rotated its server
 	// so the fingerprint changed) can say so instead of silently pointing
 	// at a node that no longer exists.
+	// Mux opts the entry into connection multiplexing (see mux.go). Applied
+	// only where it helps and is compatible; ignored otherwise.
+	Mux            bool      `gorm:"not null;default:false;column:mux"`
 	SubID          int64     `gorm:"not null;default:0;index;column:sub_id"`
 	SubFingerprint string    `gorm:"not null;default:'';column:sub_fingerprint"`
 	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime"`

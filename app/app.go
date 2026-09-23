@@ -459,17 +459,17 @@ func (a *App) ListXray() ([]ipc.XrayDTO, error) {
 	return out, err
 }
 
-func (a *App) AddXray(name, outbound string, enabled bool, dialer string) (ipc.XrayDTO, error) {
+func (a *App) AddXray(name, outbound string, enabled bool, dialer string, mux bool) (ipc.XrayDTO, error) {
 	var out ipc.XrayDTO
 	err := a.call(ipc.MethodXrayAdd, ipc.XrayAddParams{
-		Name: name, Outbound: outbound, Enabled: enabled, Dialer: dialer,
+		Name: name, Outbound: outbound, Enabled: enabled, Dialer: dialer, Mux: mux,
 	}, &out)
 	return out, err
 }
 
-func (a *App) UpdateXray(id int64, name, outbound string, enabled bool, dialer string) error {
+func (a *App) UpdateXray(id int64, name, outbound string, enabled bool, dialer string, mux bool) error {
 	return a.call(ipc.MethodXrayUpdate, ipc.XrayUpdateParams{
-		ID: id, Name: name, Outbound: outbound, Enabled: enabled, Dialer: dialer,
+		ID: id, Name: name, Outbound: outbound, Enabled: enabled, Dialer: dialer, Mux: mux,
 	}, nil)
 }
 

@@ -176,6 +176,9 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			return nil, fmt.Errorf("xray: entry %q: outbound JSON: %w", e.Name, err)
 		}
 		ob["tag"] = OutboundTag(e.Name)
+		if e.Mux {
+			applyMux(ob)
+		}
 		// Master entry: tunnel its own transport through the dialer chain.
 		if _, ok := masters[normalizeName(e.Name)]; ok {
 			injectDialerProxy(ob, DialerOutboundTag(e.Name))

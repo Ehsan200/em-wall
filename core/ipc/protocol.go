@@ -416,6 +416,10 @@ type XrayDTO struct {
 	// tunneled through a leastPing balancer over the referenced nodes.
 	// Comma-separated typed refs: xray:NAME / xraysub:NAME / proxy:NAME.
 	Dialer string `json:"dialer"`
+	// Mux opts the entry into connection multiplexing. MuxNote says why it
+	// won't take effect for this outbound (empty = it will).
+	Mux     bool   `json:"mux"`
+	MuxNote string `json:"muxNote"`
 	// Origin, when this entry was promoted out of a subscription's node
 	// pool. SubName is the subscription it came from, empty for a
 	// hand-written entry. SourceGone marks a promoted entry whose node is
@@ -433,6 +437,7 @@ type XrayAddParams struct {
 	Outbound string `json:"outbound"`
 	Enabled  bool   `json:"enabled"`
 	Dialer   string `json:"dialer"`
+	Mux      bool   `json:"mux"`
 }
 
 type XrayUpdateParams struct {
@@ -441,6 +446,7 @@ type XrayUpdateParams struct {
 	Outbound string `json:"outbound"`
 	Enabled  bool   `json:"enabled"`
 	Dialer   string `json:"dialer"`
+	Mux      bool   `json:"mux"`
 }
 
 // XraySetDTO is the public view of one outbound set. Members are typed

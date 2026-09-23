@@ -835,6 +835,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			Outbound: p.Outbound,
 			Enabled:  p.Enabled,
 			Dialer:   p.Dialer,
+			Mux:      p.Mux,
 		})
 		if err != nil {
 			return nil, err
@@ -866,6 +867,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			Outbound: p.Outbound,
 			Enabled:  p.Enabled,
 			Dialer:   p.Dialer,
+			Mux:      p.Mux,
 		}); err != nil {
 			return nil, err
 		}

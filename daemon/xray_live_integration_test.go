@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -305,4 +306,131 @@ func startHTTP204(t *testing.T) string {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
+}
+
+// Mux must actually collapse connections into shared tunnels: five client
+// connections through a mux entry reach the server over far fewer TCP
+// connections than through the same entry without mux. Runs a second xray
+// as a local VMess-over-WebSocket server behind a counting relay.
+func TestMuxSharesTunnels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: runs a real xray")
+	}
+	bin := os.Getenv("EMWALL_XRAY_BIN")
+	if bin == "" {
+		bin = "/usr/local/bin/em-wall-xray"
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("no xray binary at %s", bin)
+	}
+	echo := startEcho(t)
+	const uuid = "b831381d-6324-4d53-ad4f-8cda48b30811"
+
+	// Server: vmess+ws → freedom.
+	srvPort := freePort(t)
+	srvCfg := `{"inbounds":[{"tag":"in","listen":"127.0.0.1","port":` + strconv.Itoa(srvPort) + `,"protocol":"vmess",` +
+		`"settings":{"clients":[{"id":"` + uuid + `"}]},"streamSettings":{"network":"ws","wsSettings":{"path":"/w"}}}],` +
+		`"outbounds":[{"protocol":"freedom"}]}`
+	srvDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(srvDir, "s.json"), []byte(srvCfg), 0o644)
+	srv := &xraySupervisor{binaryPath: bin, dataDir: srvDir, runtimeDir: srvDir, enabled: true,
+		logger: log.New(io.Discard, "", 0), tail: newXrayLineRing(xrayRecentLineCap)}
+	t.Cleanup(srv.Stop)
+	srv.mu.Lock()
+	if err := srv.restartLocked(filepath.Join(srvDir, "s.json")); err != nil {
+		srv.mu.Unlock()
+		t.Fatal(err)
+	}
+	srv.mu.Unlock()
+	waitListening(t, srvPort)
+
+	relayAddr, accepted := startCountingRelay(t, "127.0.0.1:"+strconv.Itoa(srvPort))
+	_, relayPortS, _ := net.SplitHostPort(relayAddr)
+	outbound := `{"protocol":"vmess","settings":{"vnext":[{"address":"127.0.0.1","port":` + relayPortS +
+		`,"users":[{"id":"` + uuid + `","security":"auto"}]}]},"streamSettings":{"network":"ws","wsSettings":{"path":"/w"}}}`
+
+	run := func(mux bool) int64 {
+		t.Helper()
+		start := accepted()
+		port := freePort(t)
+		raw, err := xray.Generate([]xray.Config{{Name: "e", SocksPort: port, Enabled: true, Mux: mux, Outbound: outbound}},
+			xray.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfgS := strings.NewReplacer(
+			`"port": `+strconv.Itoa(xray.ApiPort), `"port": `+strconv.Itoa(freePort(t)),
+			`127.0.0.1:`+strconv.Itoa(xray.MetricsPort), `127.0.0.1:`+strconv.Itoa(freePort(t)),
+		).Replace(string(raw))
+		var cfg map[string]any
+		_ = json.Unmarshal([]byte(cfgS), &cfg)
+		delete(cfg, "log")
+		out, _ := json.Marshal(cfg)
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "c.json"), out, 0o644)
+		cli := &xraySupervisor{binaryPath: bin, dataDir: dir, runtimeDir: dir, enabled: true,
+			logger: log.New(io.Discard, "", 0), tail: newXrayLineRing(xrayRecentLineCap)}
+		defer cli.Stop()
+		cli.mu.Lock()
+		if err := cli.restartLocked(filepath.Join(dir, "c.json")); err != nil {
+			cli.mu.Unlock()
+			t.Fatal(err)
+		}
+		cli.mu.Unlock()
+		waitListening(t, port)
+		var conns []net.Conn
+		for i := 0; i < 5; i++ {
+			c := dialVia(t, port, echo)
+			roundTrip(t, c, "hello "+strconv.Itoa(i))
+			conns = append(conns, c)
+		}
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		return accepted() - start
+	}
+
+	plain := run(false)
+	muxed := run(true)
+	t.Logf("server TCP connections for 5 streams: plain %d, mux %d", plain, muxed)
+	if plain < 5 {
+		t.Fatalf("without mux: %d server connections for 5 streams, want 5", plain)
+	}
+	if muxed >= plain || muxed > 2 {
+		t.Fatalf("with mux: %d server connections for 5 streams (plain %d), want tunnels shared", muxed, plain)
+	}
+}
+
+// startCountingRelay forwards TCP to target and counts accepted conns.
+func startCountingRelay(t *testing.T, target string) (string, func() int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var n int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			n++
+			mu.Unlock()
+			go func() {
+				defer c.Close()
+				up, err := net.Dial("tcp", target)
+				if err != nil {
+					return
+				}
+				defer up.Close()
+				go func() { _, _ = io.Copy(up, c) }()
+				_, _ = io.Copy(c, up)
+			}()
+		}
+	}()
+	return ln.Addr().String(), func() int64 { mu.Lock(); defer mu.Unlock(); return n }
 }

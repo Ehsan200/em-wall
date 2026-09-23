@@ -131,7 +131,16 @@ func xrayToDTO(c xray.Config) ipc.XrayDTO {
 		SocksPort: c.SocksPort,
 		Enabled:   c.Enabled,
 		Dialer:    c.Dialer,
+		Mux:       c.Mux,
+		MuxNote:   muxNote(c),
 		CreatedAt: c.CreatedAt.Format(time.RFC3339),
 		UpdatedAt: c.UpdatedAt.Format(time.RFC3339),
 	}
+}
+
+// muxNote explains why an entry's mux setting won't take effect for its
+// outbound; empty when it will (or can).
+func muxNote(c xray.Config) string {
+	_, why := xray.MuxSupport(c.Outbound)
+	return why
 }

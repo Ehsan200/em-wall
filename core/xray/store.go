@@ -172,6 +172,7 @@ func (s *Store) Update(ctx context.Context, c Config) error {
 		"outbound":   c.Outbound,
 		"enabled":    c.Enabled,
 		"dialer":     c.Dialer,
+		"mux":        c.Mux,
 		"updated_at": c.UpdatedAt,
 	}
 
