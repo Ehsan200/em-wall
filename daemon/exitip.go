@@ -40,7 +40,11 @@ func probeExitIPVia(ctx context.Context, dc dialContext) (exitIP, country, regio
 	if err != nil {
 		return "", "", "", "", false
 	}
-	client := &http.Client{Transport: &http.Transport{DialContext: dc}}
+	// One-shot request on a throwaway Transport: without DisableKeepAlives
+	// the connection is parked in its idle pool, and a zero-value Transport
+	// has no IdleConnTimeout — so every probe would hold a SOCKS stream
+	// through xray (and xray's upstream connection) open indefinitely.
+	client := &http.Client{Transport: &http.Transport{DialContext: dc, DisableKeepAlives: true}}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", "", "", false
