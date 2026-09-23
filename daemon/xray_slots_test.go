@@ -14,6 +14,11 @@ func slot(idx int, master string, keys ...string) xray.DialerSlot {
 	return xray.DialerSlot{Index: idx, Master: master, Members: members}
 }
 
+func withAliases(s xray.DialerSlot, aliases ...string) xray.DialerSlot {
+	s.Aliases = aliases
+	return s
+}
+
 // sameSlots is what stops Reconcile from restarting xray — and dropping every
 // live connection — when nothing has actually changed. It has to be exact:
 // live member add/remove moves the running process away from the config on
@@ -34,6 +39,7 @@ func TestSameSlots(t *testing.T) {
 		{"master renamed", []xray.DialerSlot{slot(0, "other", "a", "b"), slot(1, "m2", "c")}, false},
 		{"index changed", []xray.DialerSlot{slot(2, "m1", "a", "b"), slot(1, "m2", "c")}, false},
 		{"empty vs empty", nil, false},
+		{"alias added", []xray.DialerSlot{withAliases(slot(0, "m1", "a", "b"), "m3"), slot(1, "m2", "c")}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

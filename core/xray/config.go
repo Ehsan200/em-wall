@@ -85,7 +85,9 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	// Index masters so the entry loop can inject sockopt.dialerProxy.
 	masters := make(map[string]DialerSlot, len(opt.DialerSlots))
 	for _, s := range opt.DialerSlots {
-		masters[normalizeName(s.Master)] = s
+		for _, m := range s.SlotMasters() {
+			masters[normalizeName(m)] = s
+		}
 	}
 
 	out := cfg{Inbounds: []inbound{}, Outbounds: []json.RawMessage{}}
@@ -186,14 +188,19 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			Settings: map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
 		})
 
-		dialerOut, _ := json.Marshal(map[string]any{
-			"tag":      DialerOutboundTag(slot.Master),
-			"protocol": "socks",
-			"settings": map[string]any{
-				"servers": []any{map[string]any{"address": "127.0.0.1", "port": SlotPort(slot.Index)}},
-			},
-		})
-		out.Outbounds = append(out.Outbounds, dialerOut)
+		// One dialer outbound per master (owner + aliases), all into the
+		// same slot inbound: each master's sockopt keeps pointing at its
+		// own stable tag, so aliasing never changes an entry's outbound.
+		for _, m := range slot.SlotMasters() {
+			dialerOut, _ := json.Marshal(map[string]any{
+				"tag":      DialerOutboundTag(m),
+				"protocol": "socks",
+				"settings": map[string]any{
+					"servers": []any{map[string]any{"address": "127.0.0.1", "port": SlotPort(slot.Index)}},
+				},
+			})
+			out.Outbounds = append(out.Outbounds, dialerOut)
+		}
 
 		for _, m := range slot.Members {
 			var mob map[string]any

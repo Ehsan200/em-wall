@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -294,5 +295,70 @@ func TestGenerate_NoSlotsNoObservatory(t *testing.T) {
 	}
 	if len(cfg.Routing.Balancers) != 0 {
 		t.Errorf("balancers emitted with no slots: %s", cfg.Routing.Balancers)
+	}
+}
+
+// Masters sharing one slot each keep their own dialer outbound (so their
+// sockopt wiring is unchanged) but the member outbounds — what the
+// observatory probes — exist once.
+func TestGenerate_SharedSlotAliases(t *testing.T) {
+	mk := func(name string) Config {
+		return Config{
+			Name: name, Enabled: true, Dialer: "xraysub:sub1",
+			Outbound: `{"protocol":"vless","settings":{"vnext":[{"address":"m.example","port":443,"users":[{"id":"y"}]}]}}`,
+		}
+	}
+	member := DialerMember{
+		Key:      "fp1",
+		Outbound: json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"node.example","port":443,"users":[{"id":"x"}]}]}}`),
+	}
+	raw, err := Generate([]Config{mk("a"), mk("b"), mk("c")}, GenerateOptions{
+		DialerSlots: []DialerSlot{{Master: "a", Aliases: []string{"b", "c"}, Index: 0, Members: []DialerMember{member}}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var cfg struct {
+		Outbounds []struct {
+			Tag            string         `json:"tag"`
+			Settings       map[string]any `json:"settings"`
+			StreamSettings struct {
+				Sockopt struct {
+					DialerProxy string `json:"dialerProxy"`
+				} `json:"sockopt"`
+			} `json:"streamSettings"`
+		} `json:"outbounds"`
+		Routing struct {
+			Balancers []json.RawMessage `json:"balancers"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	dialers, members := map[string]bool{}, 0
+	wired := map[string]string{}
+	for _, o := range cfg.Outbounds {
+		switch {
+		case strings.HasPrefix(o.Tag, "dialer-"):
+			dialers[o.Tag] = true
+		case strings.HasPrefix(o.Tag, SlotOutboundPrefix(0)):
+			members++
+		case strings.HasPrefix(o.Tag, "out-"):
+			wired[o.Tag] = o.StreamSettings.Sockopt.DialerProxy
+		}
+	}
+	for _, m := range []string{"a", "b", "c"} {
+		if !dialers[DialerOutboundTag(m)] {
+			t.Errorf("missing dialer outbound for %q", m)
+		}
+		if got := wired[OutboundTag(m)]; got != DialerOutboundTag(m) {
+			t.Errorf("master %q dialerProxy = %q, want %q", m, got, DialerOutboundTag(m))
+		}
+	}
+	if members != 1 {
+		t.Errorf("slot member outbounds = %d, want 1 (shared, not copied per master)", members)
+	}
+	if len(cfg.Routing.Balancers) != 1 {
+		t.Errorf("balancers = %d, want 1", len(cfg.Routing.Balancers))
 	}
 }

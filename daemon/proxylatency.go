@@ -72,11 +72,21 @@ func multiBindingProxyNames(rs []rules.Rule) []string {
 
 // probeProxies probes each name (concurrency-capped) against the daemon's
 // configured test endpoint and records the outcome in the tracker.
+//
+// Outcomes are recorded only once the whole round is in. When EVERY probe
+// in a multi-name round fails, the common cause is the local uplink, not
+// the upstreams — recording it would open every breaker at once and leave
+// the ranking with nothing but equally-"dead" names, then close them all
+// again together (observed as every member of every set flapping in
+// lockstep through a local outage). Such a round is dropped; ranking keeps
+// its last good picture until the link returns.
 func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.LatencyTracker, names []string, host string, port int) {
 	target := netprobe.Target{Host: host, Port: port}
 	sem := make(chan struct{}, proxyProbeParallel)
 	var wg sync.WaitGroup
-	for _, name := range names {
+	results := make([]netprobe.Result, len(names))
+	probed := make([]bool, len(names))
+	for i, name := range names {
 		p, err := store.GetByName(ctx, name)
 		if err != nil {
 			tracker.Record(name, 0, false)
@@ -87,15 +97,34 @@ func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.Lat
 			tracker.Record(name, 0, false)
 			continue
 		}
+		probed[i] = true
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(name string, d proxy.Dialer) {
+		go func(i int, d proxy.Dialer) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			pctx, cancel := context.WithTimeout(ctx, proxyProbeTimeout)
-			tracker.Probe(pctx, d, name, target)
+			results[i] = netprobe.Measure(pctx, d, target)
 			cancel()
-		}(name, dialer)
+		}(i, dialer)
 	}
 	wg.Wait()
+
+	n, ok := 0, 0
+	for i := range names {
+		if probed[i] {
+			n++
+			if results[i].OK {
+				ok++
+			}
+		}
+	}
+	if n > 1 && ok == 0 {
+		return
+	}
+	for i, name := range names {
+		if probed[i] {
+			tracker.Record(name, results[i].Latency, results[i].OK)
+		}
+	}
 }

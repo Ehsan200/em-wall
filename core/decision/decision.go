@@ -65,13 +65,12 @@ type InterfaceExpander interface {
 type Engine struct {
 	src   RuleSource
 	exp   InterfaceExpander
-	cache atomic.Pointer[[]rules.Rule]
+	cache atomic.Pointer[rules.Index]
 }
 
 func New(src RuleSource) *Engine {
 	e := &Engine{src: src}
-	empty := []rules.Rule{}
-	e.cache.Store(&empty)
+	e.cache.Store(rules.NewIndex(nil))
 	return e
 }
 
@@ -100,13 +99,15 @@ func (e *Engine) Reload(ctx context.Context) error {
 			}
 		}
 	}
-	e.cache.Store(&list)
+	// Compile once per reload: Decide runs for every DNS query and
+	// DecideIP for every unmapped connection, and the index turns their
+	// per-rule parse/normalize/split work into a few map lookups.
+	e.cache.Store(rules.NewIndex(list))
 	return nil
 }
 
 func (e *Engine) Decide(name string) Decision {
-	list := *e.cache.Load()
-	r := rules.MostSpecific(list, name)
+	r := e.cache.Load().MostSpecific(name)
 	if r == nil {
 		return Decision{Outcome: OutcomeAllow}
 	}
@@ -127,8 +128,7 @@ func (e *Engine) Decide(name string) Decision {
 // learn whether that IP should be routed through a proxy. Domain rules are
 // ignored here (see rules.MostSpecificIP).
 func (e *Engine) DecideIP(ip net.IP) Decision {
-	list := *e.cache.Load()
-	r := rules.MostSpecificIP(list, ip)
+	r := e.cache.Load().MostSpecificIP(ip)
 	if r == nil {
 		return Decision{Outcome: OutcomeAllow}
 	}

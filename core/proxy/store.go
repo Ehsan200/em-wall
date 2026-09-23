@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -18,6 +20,46 @@ import (
 // is fine.
 type Store struct {
 	db *gorm.DB
+
+	// byName is an in-memory copy of every row keyed by canonical name.
+	// GetByName sits on the hot path — every routed DNS query and every
+	// upstream attempt of every proxied connection — and the connection
+	// pool is a single SQLite conn, so without this every one of those
+	// lookups queued behind the others (and behind every other writer of
+	// this store). nil means "not loaded"; each write resets it and the
+	// next read reloads. fillMu serialises reload against invalidation so
+	// a reload that raced a write can never store the pre-write rows.
+	byName atomic.Pointer[map[string]Proxy]
+	fillMu sync.Mutex
+}
+
+// invalidate drops the name cache after a write.
+func (s *Store) invalidate() {
+	s.fillMu.Lock()
+	s.byName.Store(nil)
+	s.fillMu.Unlock()
+}
+
+// names returns the name cache, loading it from the DB when cold.
+func (s *Store) names(ctx context.Context) (map[string]Proxy, error) {
+	if m := s.byName.Load(); m != nil {
+		return *m, nil
+	}
+	s.fillMu.Lock()
+	defer s.fillMu.Unlock()
+	if m := s.byName.Load(); m != nil {
+		return *m, nil
+	}
+	var rows []Proxy
+	if err := s.db.WithContext(ctx).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	m := make(map[string]Proxy, len(rows))
+	for _, p := range rows {
+		m[p.Name] = p
+	}
+	s.byName.Store(&m)
+	return m, nil
 }
 
 // Open opens the SQLite database at path and migrates the proxies
@@ -67,6 +109,7 @@ func (s *Store) Add(ctx context.Context, p Proxy) (Proxy, error) {
 		}
 		return Proxy{}, fmt.Errorf("insert proxy: %w", err)
 	}
+	s.invalidate()
 	return p, nil
 }
 
@@ -94,6 +137,7 @@ func (s *Store) Update(ctx context.Context, p Proxy) error {
 	res := s.db.WithContext(ctx).Model(&Proxy{}).
 		Where("id = ?", p.ID).
 		Updates(fields)
+	s.invalidate()
 	if res.Error != nil {
 		if isUniqueErr(res.Error) {
 			return ErrDuplicate
@@ -108,6 +152,7 @@ func (s *Store) Update(ctx context.Context, p Proxy) error {
 
 func (s *Store) Delete(ctx context.Context, id int64) error {
 	res := s.db.WithContext(ctx).Delete(&Proxy{}, id)
+	s.invalidate()
 	if res.Error != nil {
 		return fmt.Errorf("delete proxy: %w", res.Error)
 	}
@@ -133,12 +178,15 @@ func (s *Store) GetByName(ctx context.Context, name string) (Proxy, error) {
 	if n == "" {
 		return Proxy{}, ErrNotFound
 	}
-	var p Proxy
-	err := s.db.WithContext(ctx).First(&p, "name = ?", n).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	m, err := s.names(ctx)
+	if err != nil {
+		return Proxy{}, err
+	}
+	p, ok := m[n]
+	if !ok {
 		return Proxy{}, ErrNotFound
 	}
-	return p, err
+	return p, nil
 }
 
 func (s *Store) List(ctx context.Context) ([]Proxy, error) {

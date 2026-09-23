@@ -32,7 +32,12 @@ const (
 	// stubTCPRefuse fails the CONNECT itself (a proxy that at least admits
 	// it can't reach the destination).
 	stubTCPRefuse
+	// stubTCPSlow answers like stubTCPHealthy, but only after stubSlowDelay:
+	// a path that works and is merely slow.
+	stubTCPSlow
 )
+
+var stubSlowDelay = 600 * time.Millisecond
 
 // stubServerHello is what stubTCPHealthy answers with — shaped like a TLS
 // ServerHello record so the test data matches what the verification is
@@ -66,7 +71,10 @@ func startStubSOCKS5TCP(t *testing.T, mode stubTCPMode) int {
 				buf := make([]byte, 4096)
 				for {
 					n, err := conn.Read(buf)
-					if n > 0 && mode == stubTCPHealthy {
+					if n > 0 && mode == stubTCPSlow {
+						time.Sleep(stubSlowDelay)
+					}
+					if n > 0 && (mode == stubTCPHealthy || mode == stubTCPSlow) {
 						if _, werr := conn.Write(stubServerHello); werr != nil {
 							return
 						}

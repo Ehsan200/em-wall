@@ -272,7 +272,8 @@ func sameSlots(a, b []xray.DialerSlot) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Index != b[i].Index || a[i].Master != b[i].Master {
+		if a[i].Index != b[i].Index || a[i].Master != b[i].Master ||
+			strings.Join(a[i].Aliases, ",") != strings.Join(b[i].Aliases, ",") {
 			return false
 		}
 		if len(a[i].Members) != len(b[i].Members) {
@@ -306,17 +307,28 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 	}
 	sort.Slice(masters, func(i, j int) bool { return masters[i].Name < masters[j].Name })
 
+	// Masters whose dialers name the same refs share one slot (see
+	// DialerSlot.Aliases). The grouping key is the sorted ref list, so it
+	// only changes when a Dialer field does — routine node churn moves the
+	// members of a shared slot, never the aliasing itself.
 	var slots []xray.DialerSlot
-	for idx, m := range masters {
-		if idx >= xray.SlotCount {
-			s.logger.Printf("xray supervisor: %d masters exceed slot pool of %d — %q and later route direct",
-				len(masters), xray.SlotCount, m.Name)
-			break
-		}
+	slotByKey := make(map[string]int) // dialer key → index into slots
+	idx := 0
+	for _, m := range masters {
 		refs, err := xray.ParseDialer(m.Dialer)
 		if err != nil {
 			s.logger.Printf("xray supervisor: master %q has invalid dialer %q: %v", m.Name, m.Dialer, err)
 			continue
+		}
+		key := dialerGroupKey(refs)
+		if i, ok := slotByKey[key]; ok {
+			slots[i].Aliases = append(slots[i].Aliases, m.Name)
+			continue
+		}
+		if idx >= xray.SlotCount {
+			s.logger.Printf("xray supervisor: dialers exceed slot pool of %d — %q and later route direct",
+				xray.SlotCount, m.Name)
+			break
 		}
 		members, err := s.resolveDialerMembers(ctx, refs, byName)
 		if err != nil {
@@ -326,9 +338,23 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 			s.logger.Printf("xray supervisor: master %q dialer has no reachable members yet — routing direct", m.Name)
 			continue
 		}
+		slotByKey[key] = len(slots)
 		slots = append(slots, xray.DialerSlot{Master: m.Name, Index: idx, Members: members})
+		idx++
 	}
 	return slots, nil
+}
+
+// dialerGroupKey identifies a dialer by the set of refs it names, ignoring
+// order: the balancer picks by health, not by position, so two masters
+// listing the same refs differently are served by the same slot.
+func dialerGroupKey(refs []xray.DialerRef) string {
+	parts := make([]string, len(refs))
+	for i, r := range refs {
+		parts[i] = r.Kind + ":" + r.Name
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // resolveDialerMembers expands a master's dialer refs into concrete

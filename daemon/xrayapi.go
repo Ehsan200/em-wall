@@ -203,7 +203,9 @@ func sameSlotMasters(a, b []xray.DialerSlot) bool {
 }
 
 func slotMasterKey(s xray.DialerSlot) string {
-	return strconv.Itoa(s.Index) + ":" + strings.ToLower(s.Master)
+	// Aliases are part of the key: moving a master into or out of a shared
+	// slot rewires its dialer outbound, which only a restart can bake.
+	return strconv.Itoa(s.Index) + ":" + strings.ToLower(strings.Join(s.SlotMasters(), ","))
 }
 
 func membersByKey(slot xray.DialerSlot) map[string]xray.DialerMember {

@@ -113,10 +113,23 @@ type DialerMember struct {
 // DialerSlot is a fully resolved per-master balancer slot: the master
 // entry whose sockopt is wired to it, the slot index (→ port + tags),
 // and the member outbounds the balancer selects among.
+//
+// Aliases are further masters whose Dialer resolves to the very same refs.
+// They share this slot's inbound, balancer and members instead of getting a
+// copy each: every copy is a full set of outbounds the burst observatory
+// health-pings on its own, so six masters on one subscription used to mean
+// six probes per node per interval — through the same link the user's
+// traffic is trying to use.
 type DialerSlot struct {
 	Master  string
+	Aliases []string
 	Index   int
 	Members []DialerMember
+}
+
+// SlotMasters returns every master wired to the slot, owner first.
+func (s DialerSlot) SlotMasters() []string {
+	return append([]string{s.Master}, s.Aliases...)
 }
 
 // Slot tag / port helpers. A slot's member outbounds all share the
