@@ -35,6 +35,9 @@ const (
 	// stubTCPSlow answers like stubTCPHealthy, but only after stubSlowDelay:
 	// a path that works and is merely slow.
 	stubTCPSlow
+	// stubTCPClose grants CONNECT, reads the client's first bytes and closes:
+	// an exit that could not reach or resolve the destination.
+	stubTCPClose
 )
 
 var stubSlowDelay = 600 * time.Millisecond
@@ -66,6 +69,10 @@ func startStubSOCKS5TCP(t *testing.T, mode stubTCPMode) int {
 					return
 				}
 				if mode == stubTCPRefuse {
+					return
+				}
+				if mode == stubTCPClose {
+					_, _ = conn.Read(make([]byte, 4096))
 					return
 				}
 				buf := make([]byte, 4096)

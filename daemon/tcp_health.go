@@ -173,6 +173,33 @@ func (h *tcpHealth) strike(key string) time.Duration {
 // works, and a path that works is not one we have anything to remember
 // about — including the escalation level, so a site that broke this
 // morning doesn't start at a minute's penalty tonight.
+// condemn applies the next penalty immediately, without waiting for
+// tcpStrikeThreshold strikes — for failures that are a verdict on the
+// destination rather than a hint (see errDestinationRefused). Repeats climb
+// the same ladder as strikes do, and one byte received still clears it.
+func (h *tcpHealth) condemn(key string) time.Duration {
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	h.pruneLocked(now)
+	e := h.entries[key]
+	if e == nil {
+		e = &tcpHealthEntry{}
+		h.entries[key] = e
+	}
+	e.seen = now
+	e.strikes = 0
+	d := tcpPenaltyLadder[e.level]
+	if e.level < len(tcpPenaltyLadder)-1 {
+		e.level++
+	}
+	e.until = now.Add(d)
+	return d
+}
+
 func (h *tcpHealth) success(key string) {
 	if h == nil {
 		return

@@ -91,7 +91,11 @@ func (d *handlerDeps) poolNodeNames(ctx context.Context) map[string]string {
 			continue
 		}
 		for _, n := range nodes {
-			out[n.Fingerprint] = sub.Name + "/" + n.Name
+			name := n.Name
+			if !strings.HasPrefix(name, sub.Name+"/") { // stored names often carry it already
+				name = sub.Name + "/" + name
+			}
+			out[n.Fingerprint] = name
 		}
 	}
 	return out

@@ -25,6 +25,7 @@ import (
 //   - dial-ceiling: dialGate was saturated
 //   - no-mapping:  a connection to a fake IP with no table entry
 //   - no-data:     spliced, sent bytes, never got one back
+//   - dest-refused: every member's exit turned the destination away
 
 const (
 	connStatsWindow = 15 // one-minute buckets
@@ -34,6 +35,7 @@ const (
 	causeDialCeiling = "dial-ceiling"
 	causeNoMapping   = "no-mapping"
 	causeNoData      = "no-data"
+	causeDestRefused = "dest-refused"
 )
 
 // setupBinsMs are the upper bounds of the setup-latency histogram; the

@@ -23,6 +23,7 @@ async function refresh() {
 
 const CAUSE_LABELS: Record<string, string> = {
   'no-upstream': 'no upstream answered',
+  'dest-refused': 'unreachable at exit',
   'no-data': 'connected, no reply',
   'paused': 'destination paused',
   'dial-ceiling': 'dial limit hit',

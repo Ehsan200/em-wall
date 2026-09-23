@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -134,5 +135,51 @@ func TestDialBindingForwardsUnverifiedOpening(t *testing.T) {
 	_ = up.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := up.Read(buf); err != nil {
 		t.Fatalf("upstream never answered — opening bytes were not forwarded: %v", err)
+	}
+}
+
+// Every member's exit closing on the hello is a verdict on the destination
+// (typically a name that doesn't resolve at the exit): one round, a
+// distinguishable error, no retry rounds making the client wait.
+func TestDialBindingAllRefusedStopsAfterOneRound(t *testing.T) {
+	compressTCPTimers(t)
+	proxyFirstByteTimeout = 5 * time.Second
+	compressHedge(t, 20*time.Millisecond)
+	ports := map[string]int{
+		"a": startStubSOCKS5TCP(t, stubTCPClose),
+		"b": startStubSOCKS5TCP(t, stubTCPClose),
+	}
+	fakeIP := net.IPv4(198, 18, 0, 25)
+	pf := tcpTestForwarder(t, fakeIP, "nx.example", []string{"a", "b"}, ports)
+
+	start := time.Now()
+	up, _, _, err := dialThrough(t, pf, fakeIP, clientHello)
+	if up != nil {
+		t.Fatalf("expected no upstream")
+	}
+	if !errors.Is(err, errDestinationRefused) {
+		t.Fatalf("err = %v, want errDestinationRefused", err)
+	}
+	// One round is two fast closes; a second round would add the backoff.
+	if el := time.Since(start); el > proxyDialBackoffBase {
+		t.Fatalf("took %s — retried rounds after a verdict", el)
+	}
+}
+
+// A silent member is not a refusal: the round is inconclusive and the
+// normal retry path applies.
+func TestDialBindingMixedCloseAndSilenceIsNotRefused(t *testing.T) {
+	compressTCPTimers(t)
+	compressHedge(t, 20*time.Millisecond)
+	ports := map[string]int{
+		"a": startStubSOCKS5TCP(t, stubTCPClose),
+		"b": startStubSOCKS5TCP(t, stubTCPSilent),
+	}
+	fakeIP := net.IPv4(198, 18, 0, 26)
+	pf := tcpTestForwarder(t, fakeIP, "maybe.example", []string{"a", "b"}, ports)
+
+	_, _, _, err := dialThrough(t, pf, fakeIP, clientHello)
+	if err == nil || errors.Is(err, errDestinationRefused) {
+		t.Fatalf("err = %v, want an ordinary failure", err)
 	}
 }

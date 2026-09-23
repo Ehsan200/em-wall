@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ehsan/em-wall/core/decision"
@@ -350,6 +353,18 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	}
 	upstream, used, sent, lastErr := pf.dialBinding(ctx, entry, local, conn)
 	release()
+	if upstream == nil && errors.Is(lastErr, errDestinationRefused) {
+		// A verdict on the destination, not a flaky path: pause it now, so
+		// the client's retries fail in ~0s and it moves on (a video player
+		// falls back to another host) instead of waiting out another walk.
+		pf.stats.failed(causeDestRefused)
+		d := pf.breaker.condemn(healthKey)
+		if ok, n := pf.sampler.allow("refused|" + healthKey); ok {
+			pf.logger.Printf("proxytun: %s:%d — every upstream refused it (%v); pausing this destination for %s (+%d more suppressed)",
+				target, local.Port, lastErr, d, n)
+		}
+		return
+	}
 	if upstream == nil {
 		pf.stats.failed(causeNoUpstream)
 		// Every member of the binding failed: a total failure, and the
@@ -517,7 +532,7 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 			pf.sticky.Set(key, used)
 			return up, used, int64(len(hello)), nil
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(lastErr, errDestinationRefused) {
 			break
 		}
 		if round < proxyDialMaxRounds {
@@ -529,6 +544,22 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 		}
 	}
 	return nil, "", 0, lastErr
+}
+
+// errUpstreamRefused marks one member whose exit actively closed the
+// connection before answering the ClientHello — as opposed to staying
+// silent. xray's SOCKS inbound accepts every CONNECT, so this is how an
+// exit that could not reach (or resolve) the destination shows up.
+var errUpstreamRefused = errors.New("upstream closed the connection before replying")
+
+// errDestinationRefused is a whole race round of errUpstreamRefused: every
+// member reached its exit and every exit turned the destination away.
+var errDestinationRefused = errors.New("every upstream refused the destination")
+
+// upstreamClosed reports a read error that means the far side closed or
+// reset the connection, not a timeout.
+func upstreamClosed(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // appendFailed records name in failed once.
@@ -642,6 +673,7 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 	hedge := time.NewTimer(proxyHedgeDelay)
 	defer hedge.Stop()
 	var lastErr error
+	refused := 0
 	for inFlight > 0 {
 		select {
 		case r := <-results:
@@ -652,6 +684,9 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 				return r.conn, r.name, failed, nil
 			}
 			lastErr = r.err
+			if errors.Is(r.err, errUpstreamRefused) {
+				refused++
+			}
 			failed = appendFailed(failed, r.name)
 			if next < len(names) {
 				launch()
@@ -667,6 +702,13 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 			drain(inFlight)
 			return nil, "", failed, ctx.Err()
 		}
+	}
+	if refused == len(names) {
+		// Every member reached its exit and was turned away: the
+		// destination itself is unreachable (typically a name that doesn't
+		// resolve at the exit — FakeIP answered it locally). Another round
+		// would only make the client wait longer for the same answer.
+		return nil, "", failed, fmt.Errorf("%w: %v", errDestinationRefused, lastErr)
 	}
 	return nil, "", failed, lastErr
 }
@@ -713,6 +755,9 @@ func (pf *proxyForwarder) primeUpstream(c net.Conn, hello []byte, wait time.Dura
 	n, err := c.Read(buf)
 	_ = c.SetReadDeadline(time.Time{})
 	if err != nil && n == 0 {
+		if upstreamClosed(err) {
+			return nil, fmt.Errorf("%w: %v", errUpstreamRefused, err)
+		}
 		return nil, fmt.Errorf("no reply within %s: %w", wait, err)
 	}
 	if n == 0 {

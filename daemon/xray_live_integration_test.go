@@ -42,7 +42,7 @@ func TestLiveApplyKeepsUntouchedStreams(t *testing.T) {
 	}
 
 	echo := startEcho(t)
-	apiPort, slotPort := freePort(t), freePort(t)
+	apiPort, slotPort, metricsPort := freePort(t), freePort(t), freePort(t)
 	ports := map[string]int{"a": freePort(t), "b": freePort(t), "c": freePort(t), "m": freePort(t)}
 	freedom := func(name string) xray.Config {
 		return xray.Config{Name: name, SocksPort: ports[name], Enabled: true, Outbound: `{"protocol":"freedom"}`}
@@ -72,6 +72,8 @@ func TestLiveApplyKeepsUntouchedStreams(t *testing.T) {
 			}
 		}
 		delete(cfg, "log") // keep the test's xray off the real log files
+		// ...and off the live install's fixed metrics port.
+		cfg["metrics"].(map[string]any)["listen"] = "127.0.0.1:" + strconv.Itoa(metricsPort)
 		out, _ := json.Marshal(cfg)
 		return out
 	}

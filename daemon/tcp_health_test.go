@@ -315,3 +315,28 @@ func TestLogSamplerNilIsInert(t *testing.T) {
 		t.Fatalf("nil sampler: allow=%v suppressed=%d, want true/0", ok, n)
 	}
 }
+
+// condemn pauses at once (no strike threshold), climbs the same ladder on
+// repeats, and a success clears it.
+func TestTCPHealthCondemn(t *testing.T) {
+	now := time.Unix(0, 0)
+	h := newTCPHealth()
+	h.now = func() time.Time { return now }
+	const k = "nx.example:443"
+
+	if d := h.condemn(k); d != tcpPenaltyLadder[0] {
+		t.Fatalf("first condemn = %s, want %s", d, tcpPenaltyLadder[0])
+	}
+	h.admit(k) // the one probe per interval
+	if h.admit(k) {
+		t.Fatalf("condemned destination admitted twice within the probe interval")
+	}
+	now = now.Add(tcpPenaltyLadder[0])
+	if d := h.condemn(k); d != tcpPenaltyLadder[1] {
+		t.Fatalf("second condemn = %s, want %s", d, tcpPenaltyLadder[1])
+	}
+	h.success(k)
+	if !h.admit(k) {
+		t.Fatalf("success did not clear the penalty")
+	}
+}
