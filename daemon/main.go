@@ -304,6 +304,23 @@ func main() {
 		}
 	}()
 
+	// Pool node health: park subscription nodes that stay dead so the
+	// observatory stops probing them (see xray_nodepark.go).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(nodeHealthPollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				xraySup.PollNodeHealth(ctx)
+			}
+		}
+	}()
+
 	// Log-cap watcher: every minute, check whether xray's access/error
 	// log files have crossed the cap and truncate them in place if so
 	// (never by restarting xray — see RotateLogsIfTooLarge).

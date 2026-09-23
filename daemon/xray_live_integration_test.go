@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -224,4 +225,84 @@ func roundTrip(t *testing.T, c net.Conn, msg string) {
 		t.Fatalf("%s: stream broken: %q %v", msg, line, err)
 	}
 	_ = c.SetDeadline(time.Time{})
+}
+
+// The generated metrics endpoint must expose per-node observatory health in
+// the shape the parker reads, against the real binary.
+func TestObservatoryMetricsReportDeadNode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: runs a real xray")
+	}
+	bin := os.Getenv("EMWALL_XRAY_BIN")
+	if bin == "" {
+		bin = "/usr/local/bin/em-wall-xray"
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("no xray binary at %s", bin)
+	}
+	probe := startHTTP204(t)
+	apiPort, slotPort, metricsPort, mPort := freePort(t), freePort(t), freePort(t), freePort(t)
+	m := xray.Config{Name: "m", SocksPort: mPort, Enabled: true, Dialer: "xraysub:s", Outbound: `{"protocol":"freedom"}`}
+	slots := []xray.DialerSlot{{Master: "m", Index: 0, Members: []xray.DialerMember{
+		{Key: "good", Outbound: json.RawMessage(`{"protocol":"freedom"}`)},
+		{Key: "dead", Outbound: json.RawMessage(`{"protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":` + strconv.Itoa(freePort(t)) + `}]}}`)},
+	}}}
+	raw, err := xray.Generate([]xray.Config{m}, xray.GenerateOptions{
+		DialerSlots: slots, ObservatoryProbeURL: "http://" + probe + "/generate_204", ObservatoryInterval: "1s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgS := strings.NewReplacer(
+		strconv.Itoa(xray.ApiPort), strconv.Itoa(apiPort),
+		strconv.Itoa(xray.SlotPort(0)), strconv.Itoa(slotPort),
+		strconv.Itoa(xray.MetricsPort), strconv.Itoa(metricsPort),
+	).Replace(string(raw))
+	var cfg map[string]any
+	_ = json.Unmarshal([]byte(cfgS), &cfg)
+	delete(cfg, "log")
+	out, _ := json.Marshal(cfg)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, out, 0o644)
+	s := &xraySupervisor{
+		binaryPath: bin, dataDir: dir, runtimeDir: dir, enabled: true,
+		metricsAddr: "127.0.0.1:" + strconv.Itoa(metricsPort),
+		logger:      log.New(io.Discard, "", 0), tail: newXrayLineRing(xrayRecentLineCap),
+	}
+	t.Cleanup(s.Stop)
+	s.mu.Lock()
+	if err := s.restartLocked(path); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		byTag, err := s.fetchObservatory(context.Background())
+		if err == nil {
+			good, dead := byTag[xray.SlotMemberTag(0, "good")], byTag[xray.SlotMemberTag(0, "dead")]
+			if good.Alive && dead.dead() {
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("observatory never reported good alive + dead dead")
+}
+
+func startHTTP204(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String()
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -74,6 +75,7 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		Log              map[string]any    `json:"log,omitempty"`
 		API              json.RawMessage   `json:"api,omitempty"`
 		Policy           json.RawMessage   `json:"policy,omitempty"`
+		Metrics          json.RawMessage   `json:"metrics,omitempty"`
 		Stats            json.RawMessage   `json:"stats,omitempty"`
 		Inbounds         []inbound         `json:"inbounds"`
 		Outbounds        []json.RawMessage `json:"outbounds"`
@@ -109,6 +111,9 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	// idle WebSockets. connIdle is raised past those; the half-close
 	// timers keep xray's defaults so finished transfers are still reaped
 	// promptly.
+	// Metrics endpoint (loopback only) for per-node observatory health.
+	out.Metrics = json.RawMessage(`{"tag":"` + MetricsTag + `","listen":"127.0.0.1:` + strconv.Itoa(MetricsPort) + `"}`)
+
 	out.Policy = json.RawMessage(`{"levels":{"0":{"handshake":8,"connIdle":1800,"uplinkOnly":2,"downlinkOnly":5}}}`)
 
 	// Blackhole FIRST. xray sends anything no routing rule matches to its

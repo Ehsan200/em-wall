@@ -21,10 +21,19 @@ const (
 // API (dokodemo-door inbound tagged ApiTag). The supervisor drives live
 // AddOutbound/RemoveOutbound + balancer-info calls against it via the
 // `xray api` CLI. Kept clear of the entry (11800–11899) and slot
-// (11900–11931) ranges. Only emitted when at least one dialer slot exists.
+// (11900–11931) ranges. Always emitted.
 const (
 	ApiPort = 11932
 	ApiTag  = "api"
+)
+
+// MetricsPort is the loopback port xray's metrics HTTP endpoint listens on.
+// Its /debug/vars carries the burst observatory's per-outbound health
+// (alive, delay, ping counts) — the only per-node health signal the CLI
+// API doesn't expose — which the supervisor polls to park dead pool nodes.
+const (
+	MetricsPort = 11933
+	MetricsTag  = "metrics"
 )
 
 // nextFreePort returns the lowest port in [PortStart, PortEnd] not in

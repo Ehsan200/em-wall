@@ -50,14 +50,16 @@ const xrayLogCapBytes = 50 * 1024 * 1024
 const xrayRecentLineCap = 80
 
 type xraySupervisor struct {
-	binaryPath string
-	dataDir    string // contains geoip.dat + geosite.dat
-	runtimeDir string // generated config + scratch
-	apiAddr    string // xray API address; "" = apiServerAddr() (tests override)
-	logDir     string // where xray writes its own access/error logs
-	xrayStore  *xray.Store
-	proxyStore *proxy.Store
-	logger     *log.Logger
+	binaryPath  string
+	dataDir     string      // contains geoip.dat + geosite.dat
+	runtimeDir  string      // generated config + scratch
+	apiAddr     string      // xray API address; "" = apiServerAddr() (tests override)
+	metricsAddr string      // xray metrics address; "" = xray.MetricsPort (tests override)
+	parker      *nodeParker // parks pool nodes that stay dead; nil parks nothing
+	logDir      string      // where xray writes its own access/error logs
+	xrayStore   *xray.Store
+	proxyStore  *proxy.Store
+	logger      *log.Logger
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd     // current child process, nil if none running
@@ -88,6 +90,7 @@ func newXraySupervisor(binary, dataDir, runtimeDir, logDir string, xs *xray.Stor
 		proxyStore: ps,
 		logger:     logger,
 		tail:       newXrayLineRing(xrayRecentLineCap),
+		parker:     newNodeParker(),
 	}
 	if fi, err := os.Stat(binary); err == nil && !fi.IsDir() {
 		sup.enabled = true
@@ -327,6 +330,7 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 	// members of a shared slot, never the aliasing itself.
 	var slots []xray.DialerSlot
 	slotByKey := make(map[string]int) // dialer key → index into slots
+	parked := s.parker.parked()
 	idx := 0
 	for _, m := range masters {
 		refs, err := xray.ParseDialer(m.Dialer)
@@ -348,6 +352,7 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 		if err != nil {
 			return nil, err
 		}
+		members = withoutParked(members, parked)
 		if len(members) == 0 {
 			s.logger.Printf("xray supervisor: master %q dialer has no reachable members yet — routing direct", m.Name)
 			continue

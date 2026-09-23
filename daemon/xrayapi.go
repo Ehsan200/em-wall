@@ -63,4 +63,3 @@ func (s *xraySupervisor) BalancerInfoRaw(ctx context.Context) ([]byte, error) {
 	}
 	return s.runAPI(ctx, "bi", tags...)
 }
-
