@@ -200,6 +200,17 @@ func (h *tcpHealth) condemn(key string) time.Duration {
 	return d
 }
 
+// reset forgets every destination's record. After a network change the
+// old verdicts describe the old network.
+func (h *tcpHealth) reset() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.entries = make(map[string]*tcpHealthEntry)
+	h.mu.Unlock()
+}
+
 func (h *tcpHealth) success(key string) {
 	if h == nil {
 		return

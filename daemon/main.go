@@ -86,6 +86,8 @@ func main() {
 	// but still keeps hidden proxy rows in sync.
 	xraySup := newXraySupervisor(*xrayBinary, *xrayDataDir, *xrayRuntimeDir, *xrayLogDir,
 		xrayStore, proxyStore, log.Default())
+	routes := &routeKeys{} // published by the supervisor, read by the proxy tunnel
+	xraySup.routes = routes
 	if err := xraySup.Reconcile(context.Background()); err != nil {
 		log.Printf("em-walld: initial xray reconcile failed (continuing): %v", err)
 	}
@@ -142,7 +144,7 @@ func main() {
 	// for connections that arrive without a DNS-time mapping, so the
 	// engine must exist before the tunnel is built.
 	connHealth := newConnStats()
-	proxyTunnel, proxyTunName := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, log.Default())
+	proxyTunnel, proxyTunName, proxyFwd := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, routes, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
 	}
@@ -280,6 +282,28 @@ func main() {
 		trafficAgg.Run(ctx)
 	}()
 
+	// probeNow asks the latency prober for an immediate round (network change).
+	probeNow := make(chan struct{}, 1)
+
+	// Proxy-health reset on a real network change or a wake from sleep:
+	// every verdict (paused destinations, demoted upstreams, measured
+	// latencies) was learned on the old network. Clear it and re-measure at
+	// once, so the first minute isn't spent on stale verdicts.
+	netReset := newNetResetter(func(reason string) {
+		proxyFwd.resetHealth()
+		proxyLatency.Reset()
+		select {
+		case probeNow <- struct{}{}:
+		default: // a round is already queued
+		}
+		log.Printf("em-walld: %s → proxy health reset, re-probing upstreams", reason)
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		netReset.watchSleep(ctx)
+	}()
+
 	// Proxy latency prober: ranks multi-outbound route bindings by measured
 	// latency. Probes ONLY proxies bound alongside another (nothing to rank
 	// otherwise), so a single-outbound setup does no network work here.
@@ -292,17 +316,18 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
+			case <-probeNow: // network changed: re-measure now, not in 30s
 			case <-t.C:
-				rs, err := store.List(ctx)
-				if err != nil {
-					continue
-				}
-				names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
-				if len(names) == 0 {
-					continue
-				}
-				probeProxies(ctx, proxyStore, proxyLatency, names, rankHost, rankPort)
 			}
+			rs, err := store.List(ctx)
+			if err != nil {
+				continue
+			}
+			names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
+			if len(names) == 0 {
+				continue
+			}
+			probeProxies(ctx, proxyStore, proxyLatency, names, rankHost, rankPort)
 		}
 	}()
 
@@ -445,6 +470,8 @@ func main() {
 	go func() {
 		defer wg.Done()
 		watchNetworkChanges(ctx, func() {
+			netReset.networkEvent() // resets proxy health only if the route really moved
+
 			if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref != "true" {
 				return // hijack off — nothing to keep pointed anywhere
 			}

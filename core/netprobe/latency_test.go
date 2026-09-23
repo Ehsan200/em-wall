@@ -296,3 +296,18 @@ func TestBreaker_WindowEntriesExpire(t *testing.T) {
 		t.Fatalf("stale failures still holding the breaker open: %+v", h)
 	}
 }
+
+func TestLatencyTrackerReset(t *testing.T) {
+	tr := NewLatencyTracker(time.Minute)
+	for i := 0; i < 6; i++ {
+		tr.Record("dead", 0, false)
+	}
+	tr.Record("fast", 10*time.Millisecond, true)
+	tr.Reset()
+	if snap := tr.Snapshot(); len(snap) != 0 {
+		t.Fatalf("after Reset: %+v", snap)
+	}
+	if got := tr.Rank([]string{"dead", "fast"}); got[0] != "dead" {
+		t.Fatalf("after Reset both are unknown and keep binding order, got %v", got)
+	}
+}

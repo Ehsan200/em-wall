@@ -122,6 +122,16 @@ func (h *udpHealth) strike(key string) time.Duration {
 
 // success clears a destination's record. A path that works is not a path
 // we have anything to remember about.
+// reset forgets every destination's record (see tcpHealth.reset).
+func (h *udpHealth) reset() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.entries = make(map[string]*udpHealthEntry)
+	h.mu.Unlock()
+}
+
 func (h *udpHealth) success(key string) {
 	if h == nil {
 		return

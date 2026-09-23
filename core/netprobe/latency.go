@@ -298,6 +298,17 @@ func (t *LatencyTracker) Probe(ctx context.Context, c Connector, name string, ta
 	return r
 }
 
+// Reset forgets every name's measurements and breaker state. For a network
+// change: latencies and failure windows measured on the previous network
+// say nothing about this one, and a breaker opened by the old network's
+// outage would otherwise keep a working upstream ranked last until its
+// cooldown ran out. Names return as unknown until the next probe round.
+func (t *LatencyTracker) Reset() {
+	t.mu.Lock()
+	t.samples = make(map[string]sample)
+	t.mu.Unlock()
+}
+
 // Health is a name's current standing, for logging and status output.
 type Health struct {
 	Name        string

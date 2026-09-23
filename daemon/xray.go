@@ -56,6 +56,7 @@ type xraySupervisor struct {
 	apiAddr     string      // xray API address; "" = apiServerAddr() (tests override)
 	metricsAddr string      // xray metrics address; "" = xray.MetricsPort (tests override)
 	parker      *nodeParker // parks pool nodes that stay dead; nil parks nothing
+	routes      *routeKeys  // route keys published for the proxy tunnel; nil-safe
 	logDir      string      // where xray writes its own access/error logs
 	xrayStore   *xray.Store
 	proxyStore  *proxy.Store
@@ -206,6 +207,8 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("xray supervisor: list: %w", err)
 	}
+
+	s.routes.set(xrayRouteKeys(entries))
 
 	if err := s.syncProxies(ctx, entries); err != nil {
 		return err

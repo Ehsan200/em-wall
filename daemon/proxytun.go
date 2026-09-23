@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -164,6 +165,7 @@ type proxyForwarder struct {
 	sampler *logSampler        // rate-limits the per-connection log line; nil disables
 	witness *uplinkWitness     // proves the uplink was up before blaming a silent upstream; nil = always blame
 	stats   *connStats         // connection health measurements; nil disables
+	routes  *routeKeys         // which upstreams share a way in; nil = all independent
 	logger  *log.Logger
 }
 
@@ -248,6 +250,60 @@ func (pf *proxyForwarder) recordTraffic(host, proxyName string, sent, recv int64
 // without needing a branch here.
 func stickyKey(entry proxy.Entry) string { return entry.Hostname }
 
+// resetHealth drops every destination verdict after a network change.
+// Sticky bindings are kept on purpose: which exit a site is on is still
+// worth keeping stable, and a binding whose member fails is dropped by the
+// normal path anyway.
+func (pf *proxyForwarder) resetHealth() {
+	if pf == nil {
+		return
+	}
+	pf.breaker.reset()
+	pf.health.reset()
+}
+
+// incumbent is the upstream a connection should prefer: the one this exact
+// host last used, else the one its site last used. A site like YouTube
+// spreads over dozens of hosts (rr1---sn-…, rr5---sn-…); without the site
+// fallback every new host re-ranks from scratch and can land on a member
+// that doesn't work for that site, while a sibling host already found one
+// that does. It is only a starting preference — RankFrom still demotes an
+// unhealthy incumbent and still lets a much faster member take over.
+func (pf *proxyForwarder) incumbent(entry proxy.Entry) string {
+	if n := pf.sticky.Get(stickyKey(entry)); n != "" {
+		return n
+	}
+	return pf.sticky.Get(siteKey(entry.Hostname))
+}
+
+// siteKey groups a hostname with its siblings under the registrable
+// domain: "rr1---sn-abc.googlevideo.com" → "site:googlevideo.com". A
+// heuristic, not a public-suffix lookup: the last two labels, or three
+// under a two-letter country code with a generic second level
+// ("x.co.uk"). IP literals and bare two-label names have no siblings to
+// learn from and return "".
+func siteKey(host string) string {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" || net.ParseIP(host) != nil {
+		return ""
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) <= 2 {
+		return ""
+	}
+	n := 2
+	if tld, sld := labels[len(labels)-1], labels[len(labels)-2]; len(tld) == 2 {
+		switch sld {
+		case "co", "com", "net", "org", "gov", "edu", "ac":
+			n = 3
+		}
+	}
+	if len(labels) <= n {
+		return ""
+	}
+	return "site:" + strings.Join(labels[len(labels)-n:], ".")
+}
+
 // orderedNames returns the binding's proxy names best-first when a latency
 // tracker is wired, else the binding's original order. The destination's
 // current upstream (if any) is passed as the ranking incumbent, so it is
@@ -259,7 +315,7 @@ func (pf *proxyForwarder) orderedNames(entry proxy.Entry) []string {
 	if pf.latency == nil {
 		return entry.ProxyNames
 	}
-	return pf.latency.RankFrom(entry.ProxyNames, pf.sticky.Get(stickyKey(entry)))
+	return pf.latency.RankFrom(entry.ProxyNames, pf.incumbent(entry))
 }
 
 // Route keepalive. An active flow doesn't re-query DNS, so its fake-IP host
@@ -439,6 +495,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
 	pf.stats.blamed(name)
 	pf.sticky.Drop(stickyKey(entry), name)
+	pf.sticky.Drop(siteKey(entry.Hostname), name) // don't hand a failing member to siblings
 	if pf.latency != nil {
 		pf.latency.Fail(name)
 	}
@@ -530,6 +587,7 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 				pf.witness.saw(used) // it answered the hello: data came back
 			}
 			pf.sticky.Set(key, used)
+			pf.sticky.Set(siteKey(entry.Hostname), used)
 			return up, used, int64(len(hello)), nil
 		}
 		if ctx.Err() != nil || errors.Is(lastErr, errDestinationRefused) {
@@ -644,12 +702,13 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 	defer cancel()
 	results := make(chan dialResult, len(names))
 	wait := proxyFirstByteTimeout // read once: attempts may outlive this call
-	next, inFlight := 0, 0
+	next, inFlight := 0, 0        // next = how many members have been launched
+	order := diverseOrder(names, pf.routeOf)
 	launch := func() {
 		if next > 0 {
 			pf.stats.hedged() // an extra attempt beyond the first
 		}
-		name := names[next]
+		name := order[next]
 		next++
 		inFlight++
 		go func() {
@@ -711,6 +770,38 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 		return nil, "", failed, fmt.Errorf("%w: %v", errDestinationRefused, lastErr)
 	}
 	return nil, "", failed, lastErr
+}
+
+// diverseOrder reorders a ranked binding so that consecutive launches
+// cover different routes (see routekeys.go) before any route is tried
+// twice: the best member first, then the best member on a route not yet
+// tried, and so on, falling back to rank order once every route has been
+// used. Within a route, rank order is kept, so the sticky incumbent still
+// goes first and every member is still reached.
+func diverseOrder(ranked []string, routeOf func(string) string) []string {
+	if len(ranked) < 3 {
+		return ranked // two members: nothing to reorder
+	}
+	out := make([]string, 0, len(ranked))
+	used := make([]bool, len(ranked))
+	seen := map[string]bool{}
+	for len(out) < len(ranked) {
+		picked := -1
+		for i, n := range ranked {
+			if !used[i] && !seen[routeOf(n)] {
+				picked = i
+				break
+			}
+		}
+		if picked < 0 { // every route tried once: start the next pass
+			seen = map[string]bool{}
+			continue
+		}
+		used[picked] = true
+		seen[routeOf(ranked[picked])] = true
+		out = append(out, ranked[picked])
+	}
+	return out
 }
 
 // attemptVerified dials one member and proves the path with the client's
@@ -1213,6 +1304,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 			// connections onto a different exit as well.
 			if len(tried) == 0 {
 				pf.sticky.Set(stickyKey(entry), name)
+				pf.sticky.Set(siteKey(entry.Hostname), name)
 			}
 			return sess, name, nil
 		}
@@ -1240,11 +1332,11 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, stats *connStats, logger *log.Logger) (*proxytun.Tunnel, string) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, stats *connStats, routes *routeKeys, logger *log.Logger) (*proxytun.Tunnel, string, *proxyForwarder) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
-		return nil, ""
+		return nil, "", nil
 	}
 	fwd := &proxyForwarder{
 		store:   store,
@@ -1260,18 +1352,19 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		sampler: newLogSampler(),
 		witness: newUplinkWitness(),
 		stats:   stats,
+		routes:  routes,
 		logger:  logger,
 	}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)
 		_ = tun.Close()
-		return nil, ""
+		return nil, "", nil
 	}
 	// Must be set before Start: a destination whose UDP relay is known dead
 	// is refused with ICMP rather than swallowed, so the client never waits
 	// out a QUIC handshake it can't win.
 	tunnel.SetUDPFilter(fwd.admitUDP)
 	logger.Printf("em-walld: proxy tunnel up on %s (addr %s)", tunnel.IfaceName(), proxyUTUNAddr)
-	return tunnel, tunnel.IfaceName()
+	return tunnel, tunnel.IfaceName(), fwd
 }
