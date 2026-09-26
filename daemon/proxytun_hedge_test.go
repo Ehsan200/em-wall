@@ -166,6 +166,34 @@ func TestDialBindingAllRefusedStopsAfterOneRound(t *testing.T) {
 	}
 }
 
+// An exit that can't reach its own server closes the stream exactly like
+// one refusing the destination. With no member proven to carry data
+// recently (uplink down after a network change, dead exit) the round is an
+// ordinary failure, not a verdict that pauses the destination.
+func TestDialBindingAllRefusedUnprovenIsNotRefused(t *testing.T) {
+	compressTCPTimers(t)
+	compressHedge(t, 20*time.Millisecond)
+	ports := map[string]int{
+		"a": startStubSOCKS5TCP(t, stubTCPClose),
+		"b": startStubSOCKS5TCP(t, stubTCPClose),
+	}
+	fakeIP := net.IPv4(198, 18, 0, 27)
+	pf := tcpTestForwarder(t, fakeIP, "down.example", []string{"a", "b"}, ports)
+	pf.witness = newUplinkWitness()
+	pf.witness.saw("elsewhere") // another exit working proves nothing about a or b
+
+	_, _, _, err := dialThrough(t, pf, fakeIP, clientHello)
+	if err == nil || errors.Is(err, errDestinationRefused) {
+		t.Fatalf("err = %v, want an ordinary failure", err)
+	}
+
+	pf.witness.saw("b")
+	_, _, _, err = dialThrough(t, pf, fakeIP, clientHello)
+	if !errors.Is(err, errDestinationRefused) {
+		t.Fatalf("err = %v, want errDestinationRefused once b is proven", err)
+	}
+}
+
 // A silent member is not a refusal: the round is inconclusive and the
 // normal retry path applies.
 func TestDialBindingMixedCloseAndSilenceIsNotRefused(t *testing.T) {

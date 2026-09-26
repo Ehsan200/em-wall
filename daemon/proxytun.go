@@ -732,7 +732,7 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 	hedge := time.NewTimer(proxyHedgeDelay)
 	defer hedge.Stop()
 	var lastErr error
-	refused := 0
+	var refused []string
 	for inFlight > 0 {
 		select {
 		case r := <-results:
@@ -744,7 +744,7 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 			}
 			lastErr = r.err
 			if errors.Is(r.err, errUpstreamRefused) {
-				refused++
+				refused = append(refused, r.name)
 			}
 			failed = appendFailed(failed, r.name)
 			if next < len(names) {
@@ -762,11 +762,17 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 			return nil, "", failed, ctx.Err()
 		}
 	}
-	if refused == len(names) {
+	if len(refused) == len(names) && pf.witness.anyProven(refused) {
 		// Every member reached its exit and was turned away: the
 		// destination itself is unreachable (typically a name that doesn't
 		// resolve at the exit — FakeIP answered it locally). Another round
 		// would only make the client wait longer for the same answer.
+		//
+		// Only when one of those exits recently carried data, though. An
+		// exit that can't reach its own server — uplink down after a
+		// network change, dead node, pool host that won't resolve — closes
+		// the stream exactly the same way, and condemning every
+		// destination for that pauses the whole machine on a 1m ladder.
 		return nil, "", failed, fmt.Errorf("%w: %v", errDestinationRefused, lastErr)
 	}
 	return nil, "", failed, lastErr

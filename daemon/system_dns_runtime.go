@@ -212,17 +212,21 @@ func (d *handlerDeps) refreshUpstreamIfStale(ctx context.Context) (bool, error) 
 	current := splitCSV(d.upstream)
 	d.mu.Unlock()
 
-	// Cheap health check: if any current upstream still answers, leave
+	// Cheap health check: if every current upstream still answers, leave
 	// it alone. ValidateResolvers runs them in parallel with a 1.5s
 	// timeout each, so this finishes well within the 10s tick.
 	if len(current) > 0 {
-		if working := ValidateResolvers(ctx, current); len(working) > 0 {
+		if working := ValidateResolvers(ctx, current); len(working) == len(current) {
 			return false, nil
 		}
 	}
 
-	// Current upstream is dead — typically because the user moved
-	// networks. Re-pick from sources that read fresh state.
+	// Some or all of the current upstream is dead — typically because the
+	// user moved networks. A partly dead list is re-picked too: a flaky
+	// survivor would otherwise keep answering this check while every name
+	// it drops (xray's own server lookups included) times out. Re-pick
+	// from sources that read fresh state; it's a no-op when the fresh
+	// list matches.
 	return d.repickUpstream(ctx)
 }
 

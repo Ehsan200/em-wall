@@ -29,3 +29,29 @@ func TestUplinkWitness(t *testing.T) {
 		t.Fatalf("nil witness must keep always-blame behaviour")
 	}
 }
+
+func TestUplinkWitnessAnyProven(t *testing.T) {
+	now := time.Unix(1000, 0)
+	w := newUplinkWitness()
+	w.now = func() time.Time { return now }
+
+	if w.anyProven([]string{"a", "b"}) {
+		t.Fatalf("nothing carried yet: a refusal can't be trusted")
+	}
+	w.saw("c")
+	if w.anyProven([]string{"a", "b"}) {
+		t.Fatalf("an unrelated exit working says nothing about a or b")
+	}
+	w.saw("b")
+	if !w.anyProven([]string{"a", "b"}) {
+		t.Fatalf("b carried data just now: its refusal is a verdict")
+	}
+	now = now.Add(refusalProofWindow + time.Second)
+	if w.anyProven([]string{"a", "b"}) {
+		t.Fatalf("stale evidence must not count")
+	}
+	var nilW *uplinkWitness
+	if !nilW.anyProven([]string{"x"}) {
+		t.Fatalf("nil witness must keep always-condemn behaviour")
+	}
+}

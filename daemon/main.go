@@ -466,11 +466,46 @@ func main() {
 	// mask the now-dead local resolver, so an unconditional recompute off
 	// fresh DHCP/scutil state is what actually follows the user onto the new
 	// network without a manual deactivate/activate.
+	//
+	// The pick made AT the event sees a half-up network: the new router's
+	// resolver may answer while the public fallback isn't routable yet, and
+	// the list validated then (observed: a lone flaky 192.16.95.1, no
+	// 1.1.1.1) would stay live for good — the poll only re-picks once
+	// every entry is dead. So each event also schedules settle re-picks;
+	// a new event restarts them. repickUpstream is a no-op when nothing
+	// changed.
+	var settleMu sync.Mutex
+	var settleTimers []*time.Timer
+	scheduleSettleRepick := func() {
+		settleMu.Lock()
+		defer settleMu.Unlock()
+		for _, t := range settleTimers {
+			t.Stop()
+		}
+		settleTimers = settleTimers[:0]
+		for _, after := range []time.Duration{10 * time.Second, 45 * time.Second} {
+			settleTimers = append(settleTimers, time.AfterFunc(after, func() {
+				if ctx.Err() != nil {
+					return
+				}
+				if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref != "true" {
+					return
+				}
+				if active, _ := deps.sysDNS.IsActive(); !active {
+					return // the poll's activation retry owns this case
+				}
+				if changed, err := deps.repickUpstream(ctx); err == nil && changed {
+					log.Printf("em-walld: network settled → upstream now %s", deps.upstream)
+				}
+			}))
+		}
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		watchNetworkChanges(ctx, func() {
 			netReset.networkEvent() // resets proxy health only if the route really moved
+			scheduleSettleRepick()
 
 			if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref != "true" {
 				return // hijack off — nothing to keep pointed anywhere

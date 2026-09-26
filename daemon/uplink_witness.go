@@ -56,3 +56,30 @@ func (w *uplinkWitness) otherAlive(name string) bool {
 	}
 	return false
 }
+
+// refusalProofWindow is how recently a member must have carried data for
+// its close-on-hello to count as the destination refusing. Longer than
+// uplinkWitnessWindow: this vouches for one exit, not the link at an
+// instant, and a busy exit feeds it on every dial.
+const refusalProofWindow = 60 * time.Second
+
+// anyProven reports whether any of names carried data within
+// refusalProofWindow. xray closes a SOCKS stream the same way when the far
+// side refuses the destination and when it can't reach its own server
+// (uplink down, dead exit, pool node that won't resolve), so a refusal is
+// only a verdict on the destination from an exit that demonstrably works.
+// A nil receiver answers true, keeping the old always-condemn behaviour.
+func (w *uplinkWitness) anyProven(names []string) bool {
+	if w == nil {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cutoff := w.now().Add(-refusalProofWindow)
+	for _, n := range names {
+		if t, ok := w.last[n]; ok && t.After(cutoff) {
+			return true
+		}
+	}
+	return false
+}
