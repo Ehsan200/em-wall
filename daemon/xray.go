@@ -57,6 +57,7 @@ type xraySupervisor struct {
 	metricsAddr string      // xray metrics address; "" = xray.MetricsPort (tests override)
 	parker      *nodeParker // parks pool nodes that stay dead; nil parks nothing
 	routes      *routeKeys  // route keys published for the proxy tunnel; nil-safe
+	live        *liveConns  // open proxied connections, marked stale on a path change; nil-safe
 	logDir      string      // where xray writes its own access/error logs
 	xrayStore   *xray.Store
 	proxyStore  *proxy.Store
@@ -266,7 +267,10 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 			s.loadedSlots = slots
 			return nil
 		}
-		if s.applyLive(ctx, cfg) {
+		if plan, ok := s.applyLive(ctx, cfg); ok {
+			if n := s.live.markStale(changedPathEntries(plan, s.loadedSlots)); n > 0 {
+				s.logger.Printf("xray supervisor: %d open connection(s) were on a changed path — closing any that stall", n)
+			}
 			s.running = cfg
 			s.loadedSlots = slots
 			return nil
@@ -284,33 +288,33 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 // applyLive tries to bring the running process to cfg without a restart.
 // It reports whether that succeeded; on false the caller restarts, which
 // converges from whatever state a partial apply left behind.
-func (s *xraySupervisor) applyLive(ctx context.Context, cfg []byte) bool {
+func (s *xraySupervisor) applyLive(ctx context.Context, cfg []byte) (livePlan, bool) {
 	oldLC, err := parseLiveConfig(s.running)
 	if err != nil {
 		s.logger.Printf("xray supervisor: live apply: parse running config: %v — restarting", err)
-		return false
+		return livePlan{}, false
 	}
 	newLC, err := parseLiveConfig(cfg)
 	if err != nil {
 		s.logger.Printf("xray supervisor: live apply: parse new config: %v — restarting", err)
-		return false
+		return livePlan{}, false
 	}
 	plan := planLive(oldLC, newLC)
 	if plan.restart {
 		s.logger.Printf("xray supervisor: structural config change — restarting")
-		return false
+		return livePlan{}, false
 	}
 	if plan.empty() {
-		return true
+		return plan, true
 	}
 	if err := s.applyLiveLocked(ctx, plan, cfg); err != nil {
 		s.logger.Printf("xray supervisor: live apply failed: %v — restarting", err)
-		return false
+		return livePlan{}, false
 	}
 	s.liveApplies++
 	s.logger.Printf("xray supervisor: applied live (outbounds -%d +%d, inbounds -%d +%d, routing %v)",
 		len(plan.rmOut), len(plan.addOut), len(plan.rmIn), len(plan.addIn), plan.routing)
-	return true
+	return plan, true
 }
 
 // resolveDialerSlots turns every enabled master entry (one with a

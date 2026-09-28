@@ -88,6 +88,8 @@ func main() {
 		xrayStore, proxyStore, log.Default())
 	routes := &routeKeys{} // published by the supervisor, read by the proxy tunnel
 	xraySup.routes = routes
+	liveConns := newLiveConns(log.Default()) // marked by the supervisor, swept for the proxy tunnel
+	xraySup.live = liveConns
 	if err := xraySup.Reconcile(context.Background()); err != nil {
 		log.Printf("em-walld: initial xray reconcile failed (continuing): %v", err)
 	}
@@ -154,6 +156,9 @@ func main() {
 	proxyTunnel, proxyTunName, proxyFwd := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, routes, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
+	}
+	if proxyFwd != nil {
+		proxyFwd.live = liveConns
 	}
 
 	pf := pfctl.New(nil)
@@ -241,6 +246,7 @@ func main() {
 	// Detached handler-spawned background work (e.g. a new subscription's
 	// initial fetch) should cancel on daemon shutdown.
 	deps.bgCtx = ctx
+	go liveConns.run(ctx)
 
 	var wg sync.WaitGroup
 	wg.Add(6)

@@ -113,7 +113,7 @@ func TestLiveApplyKeepsUntouchedStreams(t *testing.T) {
 	apply := func(step string, next []byte) {
 		t.Helper()
 		s.mu.Lock()
-		ok := s.applyLive(context.Background(), next)
+		_, ok := s.applyLive(context.Background(), next)
 		if ok {
 			s.running = next
 		}
@@ -435,4 +435,156 @@ func startCountingRelay(t *testing.T, target string) (string, func() int64) {
 		}
 	}()
 	return ln.Addr().String(), func() int64 { mu.Lock(); defer mu.Unlock(); return n }
+}
+
+// A dialer change applied live leaves the old stream on the old member —
+// xray never closes it — so the stale-path sweep must: a stream through the
+// changed master that stalls is closed, a new stream takes the new member,
+// and a stream through another master is neither marked nor touched.
+// Runs the real binary; the dead member is a SOCKS stub that answers once
+// and then swallows everything.
+func TestStalePathAfterLiveDialerChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: runs a real xray")
+	}
+	bin := os.Getenv("EMWALL_XRAY_BIN")
+	if bin == "" {
+		bin = "/usr/local/bin/em-wall-xray"
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("no xray binary at %s", bin)
+	}
+	prev := stalePathStallTimeout
+	stalePathStallTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { stalePathStallTimeout = prev })
+
+	echo := startEcho(t)
+	dying := startDyingSOCKS5(t)
+	apiPort, metricsPort := freePort(t), freePort(t)
+	slotPorts := []int{freePort(t), freePort(t)}
+	ports := map[string]int{"m": freePort(t), "n": freePort(t)}
+	master := func(name string) xray.Config {
+		return xray.Config{Name: name, SocksPort: ports[name], Enabled: true, Dialer: "xraysub:" + name, Outbound: `{"protocol":"freedom"}`}
+	}
+	entries := []xray.Config{master("m"), master("n")}
+	freedomMember := func(key string) xray.DialerMember {
+		return xray.DialerMember{Key: key, Outbound: json.RawMessage(`{"protocol":"freedom"}`)}
+	}
+	deadMember := xray.DialerMember{Key: "dead", Outbound: json.RawMessage(
+		`{"protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":` + strconv.Itoa(dying) + `}]}}`)}
+	gen := func(slots []xray.DialerSlot) []byte {
+		raw, err := xray.Generate(entries, xray.GenerateOptions{DialerSlots: slots})
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		var cfg map[string]any
+		_ = json.Unmarshal(raw, &cfg)
+		for _, in := range cfg["inbounds"].([]any) {
+			m := in.(map[string]any)
+			switch m["tag"] {
+			case xray.ApiTag:
+				m["port"] = apiPort
+			case xray.SlotInboundTag(0):
+				m["port"] = slotPorts[0]
+			case xray.SlotInboundTag(1):
+				m["port"] = slotPorts[1]
+			}
+		}
+		for _, ob := range cfg["outbounds"].([]any) {
+			m := ob.(map[string]any)
+			for i, s := range slots {
+				if m["tag"] == xray.DialerOutboundTag(s.Master) {
+					m["settings"].(map[string]any)["servers"].([]any)[0].(map[string]any)["port"] = slotPorts[i]
+				}
+			}
+		}
+		delete(cfg, "log")
+		cfg["metrics"].(map[string]any)["listen"] = "127.0.0.1:" + strconv.Itoa(metricsPort)
+		out, _ := json.Marshal(cfg)
+		return out
+	}
+
+	before := []xray.DialerSlot{
+		{Master: "m", Index: 0, Members: []xray.DialerMember{deadMember}},
+		{Master: "n", Index: 1, Members: []xray.DialerMember{freedomMember("good-n")}},
+	}
+	after := []xray.DialerSlot{
+		{Master: "m", Index: 0, Members: []xray.DialerMember{freedomMember("good-m")}},
+		before[1],
+	}
+
+	dir := t.TempDir()
+	s := &xraySupervisor{
+		binaryPath: bin, dataDir: dir, runtimeDir: dir, enabled: true,
+		apiAddr: "127.0.0.1:" + strconv.Itoa(apiPort),
+		logger:  log.New(io.Discard, "", 0), tail: newXrayLineRing(xrayRecentLineCap),
+	}
+	t.Cleanup(s.Stop)
+	cfg := gen(before)
+	cfgPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(cfgPath, cfg, 0o644)
+	s.mu.Lock()
+	if err := s.restartLocked(cfgPath); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.running, s.loadedSlots = cfg, before
+	pid := s.cmd.Process.Pid
+	s.mu.Unlock()
+	waitListening(t, ports["m"])
+	waitListening(t, ports["n"])
+	waitListening(t, "127.0.0.1:"+strconv.Itoa(apiPort))
+
+	live := newLiveConns(nil)
+	track := func(name string, up net.Conn) net.Conn {
+		client, _ := tcpPair(t)
+		tr, untrack := live.track(xray.InternalProxyName(name), client, up)
+		t.Cleanup(untrack)
+		return tr
+	}
+	// m's stream: the dead member answers the first exchange, then nothing.
+	oldM := track("m", dialVia(t, ports["m"], echo))
+	_ = oldM.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.WriteString(oldM, "first\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(oldM, make([]byte, len(stubServerHello))); err != nil {
+		t.Fatalf("m: first exchange: %v", err)
+	}
+	_ = oldM.SetDeadline(time.Time{})
+	streamN := track("n", dialVia(t, ports["n"], echo))
+	roundTrip(t, streamN, "n before")
+
+	s.mu.Lock()
+	next := gen(after)
+	plan, ok := s.applyLive(context.Background(), next)
+	if ok {
+		s.running = next
+	}
+	marked := live.markStale(changedPathEntries(plan, s.loadedSlots))
+	s.loadedSlots = after
+	alive := s.cmd != nil && s.cmd.Process.Pid == pid
+	s.mu.Unlock()
+	if !ok || !alive {
+		t.Fatalf("live apply ok=%v, same process=%v; xray output:\n%s", ok, alive, strings.Join(s.RecentLines(), "\n"))
+	}
+	if marked != 1 {
+		t.Fatalf("marked %d connection(s), want only m's", marked)
+	}
+
+	// Does xray close the old stream on its own when its member is removed?
+	// Recorded, not asserted: the sweep must work either way.
+	_, _ = io.WriteString(oldM, "second\n")
+	_ = oldM.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := oldM.Read(make([]byte, 64))
+	ne, isNet := err.(net.Error)
+	xrayClosed := err != nil && !(isNet && ne.Timeout())
+	t.Logf("xray closed the old stream itself after rmo: %v (%v)", xrayClosed, err)
+	_ = oldM.SetReadDeadline(time.Time{})
+
+	if n := live.sweep(time.Now()); !xrayClosed && n != 1 {
+		t.Fatalf("sweep closed %d, want m's stalled stream", n)
+	}
+	roundTrip(t, dialVia(t, ports["m"], echo), "m after, on the new member")
+	roundTrip(t, streamN, "n after")
 }

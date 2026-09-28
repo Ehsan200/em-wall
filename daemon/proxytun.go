@@ -180,6 +180,7 @@ type proxyForwarder struct {
 	witness *uplinkWitness     // proves the uplink was up before blaming a silent upstream; nil = always blame
 	stats   *connStats         // connection health measurements; nil disables
 	routes  *routeKeys         // which upstreams share a way in; nil = all independent
+	live    *liveConns         // open splices, for closing stalled ones after a path change; nil disables
 	logger  *log.Logger
 }
 
@@ -489,7 +490,9 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	// conn→upstream is bytes the client sent; upstream→conn is bytes it
 	// received. SpliceCounted reports deltas live so long-lived streams
 	// register on the usage dashboard before they close.
-	res := proxy.SpliceObserved(conn, upstream, proxyTrafficFlushInterval, func(a, b int64) {
+	tracked, untrack := pf.live.track(used, conn, upstream)
+	defer untrack()
+	res := proxy.SpliceObserved(conn, tracked, proxyTrafficFlushInterval, func(a, b int64) {
 		pf.recordTraffic(entry.Hostname, used, a, b)
 	})
 	atob, btoa := res.AtoB, res.BtoA
