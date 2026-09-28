@@ -504,3 +504,103 @@ func TestUnsettled(t *testing.T) {
 		}
 	}
 }
+
+// --- stability ---
+
+func TestRank_StableBeatsSlightlyFasterFlaky(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	tr.Record("steady", 300*time.Millisecond, true)
+	tr.Record("jumpy", 0, false) // dropped a connection a moment ago…
+	tr.Record("jumpy", 200*time.Millisecond, true)
+	if got := tr.Rank([]string{"jumpy", "steady"}); got[0] != "steady" {
+		t.Fatalf("rank = %v, want steady first: 100ms is not worth a fresh failure", got)
+	}
+	// …and once that failure has faded, raw speed decides again.
+	advance(recentFailWindow + time.Second)
+	tr.Record("steady", 300*time.Millisecond, true)
+	tr.Record("jumpy", 200*time.Millisecond, true)
+	if got := tr.Rank([]string{"steady", "jumpy"}); got[0] != "jumpy" {
+		t.Fatalf("rank = %v, want jumpy first after its failure faded", got)
+	}
+}
+
+func TestRank_MuchFasterStillWinsDespiteFailure(t *testing.T) {
+	tr, _ := clockedTracker(t)
+	tr.Record("steady", 900*time.Millisecond, true)
+	tr.Record("fast", 0, false)
+	tr.Record("fast", 150*time.Millisecond, true)
+	if got := tr.Rank([]string{"steady", "fast"}); got[0] != "fast" {
+		t.Fatalf("rank = %v, want fast first: 6x faster outweighs one failure", got)
+	}
+}
+
+func TestRank_FailureRateWeighsCost(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	// Same RTT and the same most recent failure, so the recent-failure
+	// penalty is equal; lossy failed twice as often over the window.
+	for i := 0; i < 10; i++ {
+		tr.Record("clean", 250*time.Millisecond, i != 5)
+		tr.Record("lossy", 250*time.Millisecond, i != 1 && i != 3 && i != 5)
+		advance(10 * time.Second)
+	}
+	if got := tr.Rank([]string{"lossy", "clean"}); got[0] != "clean" {
+		t.Fatalf("rank = %v, want clean first", got)
+	}
+}
+
+// --- uplink-wide failures ---
+
+// On a lossy uplink every name fails a third of the time together. That is
+// the uplink; no single member deserves the breaker for it.
+func TestBreaker_LossyUplinkDemotesNobody(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	names := []string{"a", "b", "c", "d"}
+	for i := 0; i < breakerWindow; i++ {
+		for _, n := range names {
+			tr.Record(n, 300*time.Millisecond, i%3 != 0)
+		}
+		advance(10 * time.Second)
+	}
+	for _, n := range names {
+		if h := healthOf(t, tr, n); h.Open {
+			t.Fatalf("%s demoted for an uplink-wide failure rate: %+v", n, h)
+		}
+	}
+}
+
+// One name failing far more than its peers is still demoted.
+func TestBreaker_WorseThanPeersStillOpens(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	for i := 0; i < breakerWindow; i++ {
+		tr.Record("a", 300*time.Millisecond, true)
+		tr.Record("b", 300*time.Millisecond, true)
+		tr.Record("c", 300*time.Millisecond, i%10 != 0)
+		tr.Record("bad", 300*time.Millisecond, i%2 == 1)
+		advance(10 * time.Second)
+	}
+	if h := healthOf(t, tr, "bad"); !h.Open {
+		t.Fatalf("a member failing half its attempts among clean peers must open: %+v", h)
+	}
+}
+
+// Outages that hit most names at once are the uplink and never add up to
+// flapping.
+func TestOutage_LockstepOutagesDoNotFlap(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	names := []string{"a", "b", "c"}
+	for round := 0; round < flapOutages+1; round++ {
+		for _, n := range names {
+			tr.Record(n, 0, false)
+			tr.Record(n, 0, false)
+		}
+		for _, n := range names {
+			tr.Record(n, 300*time.Millisecond, true)
+		}
+		advance(time.Minute)
+	}
+	for _, n := range names {
+		if h := healthOf(t, tr, n); h.Open {
+			t.Fatalf("%s demoted for outages the whole uplink shared: %+v", n, h)
+		}
+	}
+}

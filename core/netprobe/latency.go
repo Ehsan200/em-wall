@@ -86,6 +86,16 @@ const (
 	flapOutages = 3
 	flapWindow  = 10 * time.Minute
 
+	// breakerRelativeMargin: a failure rate only opens the breaker when it
+	// is this much worse than the median of the other names. On a lossy
+	// uplink every upstream fails a third of its attempts together; an
+	// absolute threshold then demoted every member of every set at once
+	// (observed), which is the uplink's fault, not theirs, and leaves the
+	// ranking with nothing to prefer. The same holds for outages: one that
+	// starts while at least half the other names are also down is the
+	// uplink, and does not count toward the flap rule.
+	breakerRelativeMargin = 0.25
+
 	// resetGrace follows a Reset (network change, wake from sleep): for
 	// this long failures are not recorded, only successes. The reset fires
 	// as the new network comes up — often before routes and DNS work — and
@@ -120,6 +130,21 @@ const (
 	rankHysteresisFloor    = 40 * time.Millisecond
 )
 
+// Stability. Healthy names are ranked by an effective cost, not raw RTT: a
+// member that answers 40ms faster but dropped a connection a minute ago
+// costs more in practice than a slightly slower one that has not failed —
+// every drop is a reset the client sees, a probe RTT is a few ms of setup.
+// So cost = rtt × (1 + failRateWeight × window failure rate), plus a
+// penalty for a recent failure that fades linearly to zero over
+// recentFailWindow. Close pings are decided by stability; a much faster
+// member still wins. The same cost feeds the hysteresis margins, so an
+// incumbent is only displaced by a member that is better all told.
+const (
+	failRateWeight    = 2.0
+	recentFailPenalty = 150 * time.Millisecond
+	recentFailWindow  = 10 * time.Minute
+)
+
 // outcome is one observation of a name: a probe result, or a real
 // connection that did or didn't carry data.
 type outcome struct {
@@ -132,6 +157,8 @@ type sample struct {
 	ok    bool
 	at    time.Time
 	fails int // consecutive failures; reset by any success
+
+	lastFail time.Time // most recent failure, probe or traffic; for stability
 
 	// window holds the last breakerWindow outcomes, oldest first.
 	window []outcome
@@ -152,6 +179,17 @@ type sample struct {
 // suspect reports an outage in progress: deadStrikeThreshold consecutive
 // failures and no success since.
 func (s sample) suspect() bool { return s.fails >= deadStrikeThreshold }
+
+// cost is a healthy name's effective ranking cost (see failRateWeight).
+func (s sample) cost(rate float64, now time.Time) time.Duration {
+	c := time.Duration(float64(s.rtt) * (1 + failRateWeight*rate))
+	if !s.lastFail.IsZero() {
+		if age := now.Sub(s.lastFail); age < recentFailWindow {
+			c += time.Duration(float64(recentFailPenalty) * float64(recentFailWindow-age) / float64(recentFailWindow))
+		}
+	}
+	return c
+}
 
 // cooldown is how long the current open spell lasts at minimum.
 func (s sample) cooldown() time.Duration {
@@ -250,6 +288,7 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 	} else {
 		s.ok = false
 		s.fails++
+		s.lastFail = now
 	}
 	// A traffic outcome shouldn't refresh the sample's freshness either:
 	// staleness is about when the name was last MEASURED, and treating a
@@ -270,7 +309,9 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 	isSuspect := s.suspect()
 	switch {
 	case isSuspect && !wasSuspect:
-		s.outages = append(trimTimes(s.outages, now, flapWindow), now)
+		if !t.mostOthersDownLocked(name) {
+			s.outages = append(trimTimes(s.outages, now, flapWindow), now)
+		}
 	case wasSuspect && !isSuspect:
 		// The outage is over. Its failures were the streak's to judge, and
 		// the streak already did; left in the window they would make a node
@@ -281,7 +322,11 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 
 	was := s.open
 	rate, n := failureRate(s.window)
-	s.open = evaluateBreaker(s, rate, n, now)
+	baseline := 0.0
+	if !s.open && rate >= breakerOpenRate {
+		baseline = t.peerFailureRateLocked(name)
+	}
+	s.open = evaluateBreaker(s, rate, n, now, baseline)
 	if s.open && !was {
 		if !s.closedAt.IsZero() && now.Sub(s.closedAt) > breakerTripMemory {
 			s.trips = 0
@@ -314,7 +359,10 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 // with the streak's failures, and a node that is simply down would open
 // the breaker — and then need a near-clean window to close — when all it
 // needs is to answer once.
-func evaluateBreaker(s sample, rate float64, n int, now time.Time) bool {
+//
+// baseline is the median failure rate of the other names (see
+// breakerRelativeMargin); the rate must beat it by the margin as well.
+func evaluateBreaker(s sample, rate float64, n int, now time.Time, baseline float64) bool {
 	if !s.open {
 		if len(trimTimes(s.outages, now, flapWindow)) >= flapOutages {
 			return true
@@ -322,7 +370,7 @@ func evaluateBreaker(s sample, rate float64, n int, now time.Time) bool {
 		if s.suspect() {
 			return false
 		}
-		return n >= breakerMinSamples && rate >= breakerOpenRate
+		return n >= breakerMinSamples && rate >= breakerOpenRate && rate-baseline >= breakerRelativeMargin
 	}
 	// Open. Stay that way until the cooldown has elapsed, the recent
 	// record is clean, and the tail of the window is consecutive success.
@@ -356,6 +404,67 @@ func trimOutcomes(w []outcome, now time.Time) []outcome {
 		return w
 	}
 	return append(w[:0], w[cut:]...)
+}
+
+// mostOthersDownLocked reports whether at least half of the names other
+// than self are in an outage right now — the uplink, not self. Needs two
+// or more others to say anything. Caller holds t.mu.
+func (t *LatencyTracker) mostOthersDownLocked(self string) bool {
+	total, down := 0, 0
+	for n, s := range t.samples {
+		if n == self {
+			continue
+		}
+		total++
+		if s.suspect() {
+			down++
+		}
+	}
+	return total >= 2 && down*2 >= total
+}
+
+// peerFailureRateLocked is the median window failure rate of the names
+// other than self that have enough samples to judge. With fewer than two
+// other names at all there is nothing to compare against and it is 0 (the
+// absolute threshold alone applies). With peers that have not gathered
+// enough samples yet it is 1 — no verdict until they have, or a name
+// recorded first in each probe round would be judged before its peers.
+// Caller holds t.mu.
+func (t *LatencyTracker) peerFailureRateLocked(self string) float64 {
+	now := t.now()
+	var rates []float64
+	others := 0
+	for n, s := range t.samples {
+		if n == self {
+			continue
+		}
+		r, cnt := failureRate(trimmedCopy(s.window, now))
+		if cnt == 0 {
+			continue // nothing recent: a name no longer probed or used
+		}
+		others++
+		if cnt >= breakerMinSamples {
+			rates = append(rates, r)
+		}
+	}
+	if others < 2 {
+		return 0
+	}
+	if len(rates) < 2 {
+		return 1
+	}
+	sort.Float64s(rates)
+	return rates[len(rates)/2]
+}
+
+// trimmedCopy is w without outcomes older than breakerWindowTTL, never
+// modifying w (it belongs to another name's stored sample).
+func trimmedCopy(w []outcome, now time.Time) []outcome {
+	cut := 0
+	for cut < len(w) && now.Sub(w[cut].at) > breakerWindowTTL {
+		cut++
+	}
+	return w[cut:]
 }
 
 // clearOutage removes an ended outage's failures from w: the trailing run
@@ -534,7 +643,7 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 		case has && s.suspect():
 			rs[i] = rankedName{n, i, tierSuspect, s.rtt, rate}
 		case fresh && s.ok:
-			rs[i] = rankedName{n, i, tierHealthy, s.rtt, 0}
+			rs[i] = rankedName{n, i, tierHealthy, s.cost(rate, now), 0}
 		default:
 			rs[i] = rankedName{n, i, tierUnknown, 0, 0}
 		}
@@ -591,8 +700,8 @@ type rankedName struct {
 	name string
 	idx  int // original position, for stable tie-breaks
 	tier int
-	rtt  time.Duration
-	rate float64 // window failure rate; orders the suspect and dead tiers
+	rtt  time.Duration // healthy: effective cost (see sample.cost); else last RTT
+	rate float64       // window failure rate; orders the suspect and dead tiers
 }
 
 // beatsByMargin reports whether challenger is enough better than incumbent

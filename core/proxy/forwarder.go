@@ -41,6 +41,31 @@ func Splice(a, b net.Conn) (atob, btoa int64, err error) {
 // flushInterval (or nil onFlush) disables periodic flushing — behaviour is
 // then identical to plain Splice, with the total still returned.
 func SpliceCounted(a, b net.Conn, flushInterval time.Duration, onFlush func(atob, btoa int64)) (atob, btoa int64, err error) {
+	r := SpliceObserved(a, b, flushInterval, onFlush)
+	return r.AtoB, r.BtoA, r.Err
+}
+
+// SpliceResult is what SpliceObserved reports about a finished splice.
+type SpliceResult struct {
+	AtoB, BtoA int64
+	Err        error
+	// AFirst is true when the a→b direction ended first: a stopped sending
+	// (closed or reset) before b did. With a as the client, that tells a
+	// client abandoning a connection apart from a path that went silent.
+	AFirst bool
+	// FirstEnd is how long after the splice began the first direction
+	// ended. The other side may linger well past it (a proxy holding the
+	// downlink open after the client's FIN), so the total splice time says
+	// nothing about when the client gave up.
+	FirstEnd time.Duration
+}
+
+// SpliceObserved is SpliceCounted that also reports which side ended first.
+func SpliceObserved(a, b net.Conn, flushInterval time.Duration, onFlush func(atob, btoa int64)) (res SpliceResult) {
+	var atob, btoa int64
+	var err error
+	start := time.Now()
+	defer func() { res.AtoB, res.BtoA, res.Err = atob, btoa, err }()
 	type result struct {
 		dir int // 0 = a->b, 1 = b->a
 		n   int64
@@ -90,6 +115,10 @@ func SpliceCounted(a, b net.Conn, flushInterval time.Duration, onFlush func(atob
 
 	for i := 0; i < 2; i++ {
 		r := <-done
+		if i == 0 {
+			res.AFirst = r.dir == 0
+			res.FirstEnd = time.Since(start)
+		}
 		if r.dir == 0 {
 			atob = r.n
 		} else {

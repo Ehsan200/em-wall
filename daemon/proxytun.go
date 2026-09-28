@@ -103,6 +103,12 @@ var (
 	proxyMTProtoFollowWait = 300 * time.Millisecond
 )
 
+// proxyAbandonWindow: a connection that got no reply and was closed by the
+// client within this long is the client abandoning it (a lost happy-eyeballs
+// race, a cancelled request), not evidence against the path. Client
+// timeouts on a silent path are 10s and up.
+const proxyAbandonWindow = 4 * time.Second
+
 // errClientGone is a connection whose client closed before sending its
 // opening bytes. It is not a failure of the destination or of any member.
 var errClientGone = errors.New("client closed before sending")
@@ -278,10 +284,26 @@ func (pf *proxyForwarder) resetHealth() {
 // that does. It is only a starting preference — RankFrom still demotes an
 // unhealthy incumbent and still lets a much faster member take over.
 func (pf *proxyForwarder) incumbent(entry proxy.Entry) string {
-	if n := pf.sticky.Get(stickyKey(entry)); n != "" {
-		return n
+	for _, k := range stickyKeys(entry) {
+		if n := pf.sticky.Get(k); n != "" {
+			return n
+		}
 	}
-	return pf.sticky.Get(siteKey(entry.Hostname))
+	return ""
+}
+
+// stickyKeys are the keys a binding decision is remembered under, most
+// specific first: host, then site. Empty keys are skipped by the sticky map.
+func stickyKeys(entry proxy.Entry) [2]string {
+	return [2]string{stickyKey(entry), siteKey(entry.Hostname)}
+}
+
+// rememberUpstream records name as the upstream carrying entry, for its
+// host and its site.
+func (pf *proxyForwarder) rememberUpstream(entry proxy.Entry, name string) {
+	for _, k := range stickyKeys(entry) {
+		pf.sticky.Set(k, name)
+	}
 }
 
 // siteKey groups a hostname with its siblings under the registrable
@@ -467,9 +489,10 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	// conn→upstream is bytes the client sent; upstream→conn is bytes it
 	// received. SpliceCounted reports deltas live so long-lived streams
 	// register on the usage dashboard before they close.
-	atob, btoa, _ := proxy.SpliceCounted(conn, upstream, proxyTrafficFlushInterval, func(a, b int64) {
+	res := proxy.SpliceObserved(conn, upstream, proxyTrafficFlushInterval, func(a, b int64) {
 		pf.recordTraffic(entry.Hostname, used, a, b)
 	})
+	atob, btoa := res.AtoB, res.BtoA
 
 	// A connection that sent bytes and heard nothing back is evidence the
 	// chosen upstream cannot carry this destination — the same signal
@@ -486,6 +509,14 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	case btoa > 0:
 		pf.breaker.success(healthKey)
 		pf.noteUpstreamSuccess(used)
+	case atob+sent > 0 && res.AFirst && res.FirstEnd < proxyAbandonWindow:
+		// The client hung up first, and quickly: it abandoned the
+		// connection, the path didn't fail it. Telegram opens its DC on
+		// 443, 80 and 5222 at once and closes the losers within a second
+		// or two of the winner answering; blaming the member for each of
+		// those demoted every member Telegram rode on (observed: ~500
+		// strikes in minutes, nearly all 149.154.x.x). A dead path makes
+		// the client wait out its own timeout, well past this window.
 	case atob+sent > 0:
 		pf.stats.noData(used)
 		// Blame the upstream only if the uplink demonstrably worked: some
@@ -505,8 +536,9 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 // strike against it so ranking demotes it once the failure repeats.
 func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
 	pf.stats.blamed(name)
-	pf.sticky.Drop(stickyKey(entry), name)
-	pf.sticky.Drop(siteKey(entry.Hostname), name) // don't hand a failing member to siblings
+	for _, k := range stickyKeys(entry) { // don't hand a failing member to siblings either
+		pf.sticky.Drop(k, name)
+	}
 	if pf.latency != nil {
 		pf.latency.Fail(name)
 	}
@@ -554,7 +586,6 @@ func (pf *proxyForwarder) noteUpstreamSuccess(name string) {
 // legitimate) is forwarded unverified, exactly as before.
 func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, local *net.TCPAddr, client net.Conn) (net.Conn, string, int64, error) {
 	names := pf.orderedNames(entry)
-	key := stickyKey(entry)
 
 	// Read the client's opening bytes once, up front: they are both what we
 	// replay onto each candidate and how we tell a verifiable connection
@@ -613,8 +644,7 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 			if verify {
 				pf.witness.saw(used) // it answered the hello: data came back
 			}
-			pf.sticky.Set(key, used)
-			pf.sticky.Set(siteKey(entry.Hostname), used)
+			pf.rememberUpstream(entry, used)
 			return up, used, int64(len(hello)), nil
 		}
 		if ctx.Err() != nil || errors.Is(lastErr, errDestinationRefused) {
@@ -1337,8 +1367,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 			// later) — so it must not drag this destination's TCP
 			// connections onto a different exit as well.
 			if len(tried) == 0 {
-				pf.sticky.Set(stickyKey(entry), name)
-				pf.sticky.Set(siteKey(entry.Hostname), name)
+				pf.rememberUpstream(entry, name)
 			}
 			return sess, name, nil
 		}
