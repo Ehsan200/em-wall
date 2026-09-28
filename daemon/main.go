@@ -118,6 +118,13 @@ func main() {
 		}
 		log.Printf("netprobe: upstream %q recovered — %.0f%% failures over last %d attempts", name, rate*100, samples)
 	})
+	proxyLatency.OnSuspectChange(func(name string, suspect bool) {
+		if suspect {
+			log.Printf("netprobe: upstream %q down — ranked behind healthy members until it answers again", name)
+			return
+		}
+		log.Printf("netprobe: upstream %q answering again — back in rotation", name)
+	})
 	trafficAgg := newTrafficAggregator(store, log.Default())
 
 	// Purge retired app-based routing rules (Interface "app:KEY"). The
@@ -292,6 +299,7 @@ func main() {
 	netReset := newNetResetter(func(reason string) {
 		proxyFwd.resetHealth()
 		proxyLatency.Reset()
+		go xraySup.ReturnParked(ctx)
 		select {
 		case probeNow <- struct{}{}:
 		default: // a round is already queued
@@ -307,23 +315,36 @@ func main() {
 	// Proxy latency prober: ranks multi-outbound route bindings by measured
 	// latency. Probes ONLY proxies bound alongside another (nothing to rank
 	// otherwise), so a single-outbound setup does no network work here.
+	// Every proxyProbeInterval it measures all of them; in between, every
+	// proxyProbeFastInterval it re-checks only the unsettled ones (down,
+	// demoted, never measured), so a member that starts working again is
+	// back in its set within seconds.
 	go func() {
 		defer wg.Done()
 		rankHost, rankPort := parseProxyTestTarget(proxyRankProbeTarget)
-		t := time.NewTicker(proxyProbeInterval)
+		t := time.NewTicker(proxyProbeFastInterval)
 		defer t.Stop()
+		var lastFull time.Time
 		for {
+			full := false
 			select {
 			case <-ctx.Done():
 				return
 			case <-probeNow: // network changed: re-measure now, not in 30s
+				full = true
 			case <-t.C:
+				full = time.Since(lastFull) >= proxyProbeInterval
 			}
 			rs, err := store.List(ctx)
 			if err != nil {
 				continue
 			}
 			names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
+			if full {
+				lastFull = time.Now()
+			} else {
+				names = proxyLatency.Unsettled(names)
+			}
 			if len(names) == 0 {
 				continue
 			}

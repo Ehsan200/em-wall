@@ -24,11 +24,13 @@ const (
 // sample — no slow 60s average like the classic observatory — so a bad
 // node is switched away from within ~one interval.
 //
-// The interval is deliberately gentle (10s, not a few seconds): each ping
-// is a full outbound dial through the node, so the CPU/heat cost scales
-// with pool_size / interval. 10s keeps that near-zero even for a large
-// pool, while still being ~6x faster than the old 60s cycle. The pool is
-// further bounded by each subscription's EffectiveCap, capping probe fan-out.
+// Each ping is a full outbound dial through the node, so the CPU/heat cost
+// scales with pool_size / interval. 5s is a trade for unstable uplinks: the
+// balancer's view of a node spans sampling × interval, so at 10s a node that
+// died kept winning connections for up to half a minute and one that came
+// back waited as long to be picked again. The cost stays small because the
+// pool is bounded by each subscription's EffectiveCap and dead nodes are
+// parked out of it (daemon/xray_nodepark.go), leaving only live ones pinged.
 //
 // Window and timeout are sized for a lossy uplink: with 2 samples and a 3s
 // timeout, one retransmitted handshake failed a node and a second flipped
@@ -37,7 +39,7 @@ const (
 // slow ping; a node that is actually dead still fails every one.
 const (
 	DefaultProbeURL      = "http://www.gstatic.com/generate_204"
-	DefaultProbeInterval = "10s" // per-node health-ping cadence (gentle on CPU)
+	DefaultProbeInterval = "5s" // per-node health-ping cadence
 	DefaultProbeSampling = 3     // rolling window of samples per node
 	DefaultProbeTimeout  = "5s"  // a ping past this counts as a failure
 	// ObservatorySelectorPrefix matches every slot member outbound so a

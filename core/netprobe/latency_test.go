@@ -200,11 +200,27 @@ func TestBreaker_NeedsMinimumEvidence(t *testing.T) {
 	}
 }
 
+// openFlaky drives name into an open breaker through the rate path: half
+// its probes fail, never two in a row.
+func openFlaky(t *testing.T, tr *LatencyTracker, advance func(time.Duration), name string) {
+	t.Helper()
+	isOpen := func() bool {
+		tr.mu.RLock()
+		defer tr.mu.RUnlock()
+		return tr.samples[name].open
+	}
+	for i := 0; i < 2*breakerWindow && !isOpen(); i++ {
+		tr.Record(name, 50*time.Millisecond, i%2 == 1)
+		advance(10 * time.Second)
+	}
+	if !healthOf(t, tr, name).Open {
+		t.Fatalf("%s: breaker did not open", name)
+	}
+}
+
 func TestBreaker_FreshSuccessDoesNotUndoDemotion(t *testing.T) {
 	tr, advance := clockedTracker(t)
-	tr.Record("bad", 0, false)
-	tr.Record("bad", 0, false) // streak → open
-	advance(30 * time.Second)  // still inside the cooldown
+	openFlaky(t, tr, advance, "bad") // still inside the cooldown
 	tr.Record("bad", 5*time.Millisecond, true)
 	tr.Record("good", 500*time.Millisecond, true)
 	if got := tr.Rank([]string{"bad", "good"}); got[0] != "good" {
@@ -214,15 +230,11 @@ func TestBreaker_FreshSuccessDoesNotUndoDemotion(t *testing.T) {
 
 func TestBreaker_RecoversAfterCooldownAndCleanWindow(t *testing.T) {
 	tr, advance := clockedTracker(t)
-	tr.Record("node", 0, false)
-	tr.Record("node", 0, false)
-	if !healthOf(t, tr, "node").Open {
-		t.Fatal("expected open breaker")
-	}
+	openFlaky(t, tr, advance, "node")
 	// Background probing continues while the name is demoted — that is
 	// what lets it come back without anyone editing the binding.
-	for i := 0; i < 9; i++ {
-		advance(30 * time.Second)
+	for i := 0; i < 10; i++ {
+		advance(10 * time.Second)
 		tr.Record("node", 20*time.Millisecond, true)
 	}
 	if h := healthOf(t, tr, "node"); h.Open {
@@ -270,10 +282,9 @@ func TestBreaker_HookFiresOnBothEdges(t *testing.T) {
 	tr, advance := clockedTracker(t)
 	var edges []bool
 	tr.OnBreakerChange(func(_ string, open bool, _ float64, _ int) { edges = append(edges, open) })
-	tr.Record("n", 0, false)
-	tr.Record("n", 0, false)
-	for i := 0; i < 9; i++ {
-		advance(30 * time.Second)
+	openFlaky(t, tr, advance, "n")
+	for i := 0; i < 10; i++ {
+		advance(10 * time.Second)
 		tr.Record("n", time.Millisecond, true)
 	}
 	if len(edges) != 2 || !edges[0] || edges[1] {
@@ -309,5 +320,187 @@ func TestLatencyTrackerReset(t *testing.T) {
 	}
 	if got := tr.Rank([]string{"dead", "fast"}); got[0] != "dead" {
 		t.Fatalf("after Reset both are unknown and keep binding order, got %v", got)
+	}
+}
+
+// --- outages (suspect) ---
+
+func TestOutage_DeadNodeReturnsOnFirstSuccess(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	tr.Record("good", 400*time.Millisecond, true)
+	// Down for a couple of minutes: many failures, all in a row.
+	for i := 0; i < 12; i++ {
+		tr.Record("node", 0, false)
+		advance(10 * time.Second)
+	}
+	h := healthOf(t, tr, "node")
+	if !h.Suspect || h.Open {
+		t.Fatalf("a node that is simply down is suspect, not breaker-open: %+v", h)
+	}
+	if got := tr.Rank([]string{"node", "good"}); got[0] != "good" {
+		t.Fatalf("rank = %v, want good first while node is down", got)
+	}
+	// It starts working: one probe brings it straight back.
+	tr.Record("node", 100*time.Millisecond, true)
+	tr.Record("good", 400*time.Millisecond, true)
+	h = healthOf(t, tr, "node")
+	if h.Suspect || h.Open || h.FailureRate != 0 {
+		t.Fatalf("recovered node still held down: %+v", h)
+	}
+	if got := tr.Rank([]string{"good", "node"}); got[0] != "node" {
+		t.Fatalf("rank = %v, want the recovered faster node first", got)
+	}
+	// Its outage no longer counts against it: one later hiccup is noise.
+	advance(10 * time.Second)
+	tr.Record("node", 0, false)
+	if h := healthOf(t, tr, "node"); h.Open {
+		t.Fatalf("one failure after an outage opened the breaker: %+v", h)
+	}
+}
+
+func TestOutage_TrafficSuccessEndsOutage(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	tr.Fail("n")
+	tr.Fail("n")
+	if !healthOf(t, tr, "n").Suspect {
+		t.Fatal("expected suspect after two failures")
+	}
+	advance(time.Second) // inside trafficSampleInterval: success skips the window
+	tr.Succeed("n")
+	h := healthOf(t, tr, "n")
+	if h.Suspect || h.Samples != 0 {
+		t.Fatalf("outage failures should be gone after a carried connection: %+v", h)
+	}
+}
+
+func TestOutage_FlappingOpensBreaker(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	for i := 0; i < flapOutages; i++ {
+		tr.Record("n", 0, false)
+		tr.Record("n", 0, false)
+		tr.Record("n", 30*time.Millisecond, true)
+		advance(time.Minute)
+	}
+	if h := healthOf(t, tr, "n"); !h.Open {
+		t.Fatalf("%d outages in %s should open the breaker: %+v", flapOutages, flapWindow, h)
+	}
+}
+
+func TestOutage_SpreadOutOutagesDoNotFlap(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	for i := 0; i < flapOutages; i++ {
+		tr.Record("n", 0, false)
+		tr.Record("n", 0, false)
+		tr.Record("n", 30*time.Millisecond, true)
+		advance(flapWindow/2 + time.Second)
+	}
+	if h := healthOf(t, tr, "n"); h.Open {
+		t.Fatalf("outages spread past the flap window opened the breaker: %+v", h)
+	}
+}
+
+func TestBreaker_CooldownEscalatesAndDecays(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	state := func() sample {
+		tr.mu.RLock()
+		defer tr.mu.RUnlock()
+		return tr.samples["n"]
+	}
+	closeIt := func() {
+		t.Helper()
+		for i := 0; i < 60 && state().open; i++ {
+			advance(10 * time.Second)
+			tr.Record("n", 20*time.Millisecond, true)
+		}
+		if state().open {
+			t.Fatal("breaker never closed")
+		}
+	}
+	want := breakerCooldown
+	for trip := 1; trip <= 3; trip++ {
+		openFlaky(t, tr, advance, "n")
+		if s := state(); s.trips != trip || s.cooldown() != want {
+			t.Fatalf("trip %d: trips=%d cooldown=%s, want %d / %s", trip, s.trips, s.cooldown(), trip, want)
+		}
+		// Still open just before the cooldown ends, however clean the record.
+		advance(want - 11*time.Second)
+		tr.Record("n", 20*time.Millisecond, true)
+		if !state().open {
+			t.Fatalf("trip %d: closed before its %s cooldown", trip, want)
+		}
+		closeIt()
+		want *= 2
+	}
+	// A long quiet spell forgets the history.
+	advance(breakerTripMemory + time.Minute)
+	openFlaky(t, tr, advance, "n")
+	if s := state(); s.trips != 1 || s.cooldown() != breakerCooldown {
+		t.Fatalf("after a quiet spell: trips=%d cooldown=%s, want 1 / %s", s.trips, s.cooldown(), breakerCooldown)
+	}
+}
+
+func TestBreaker_CooldownCapped(t *testing.T) {
+	if got := (sample{trips: 50}).cooldown(); got != breakerCooldownMax {
+		t.Fatalf("cooldown = %s, want cap %s", got, breakerCooldownMax)
+	}
+}
+
+func TestReset_GraceDropsFailures(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	tr.Reset()
+	tr.Record("n", 0, false)
+	tr.Record("n", 0, false)
+	tr.Record("ok", 10*time.Millisecond, true)
+	if got := len(tr.Snapshot()); got != 1 {
+		t.Fatalf("failures inside the reset grace were recorded: %+v", tr.Snapshot())
+	}
+	advance(resetGrace + time.Second)
+	tr.Record("n", 0, false)
+	tr.Record("n", 0, false)
+	if !healthOf(t, tr, "n").Suspect {
+		t.Fatal("failures after the grace must count")
+	}
+}
+
+func TestRank_SuspectBehindUnknownLeastBadFirst(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	// "mostly" had a good record before going down; "never" never answered.
+	for i := 0; i < 4; i++ {
+		tr.Record("mostly", 300*time.Millisecond, true)
+		advance(time.Second)
+	}
+	tr.Record("mostly", 0, false)
+	tr.Record("mostly", 0, false)
+	tr.Record("never", 0, false)
+	tr.Record("never", 0, false)
+	tr.Record("fast-suspect", 50*time.Millisecond, true)
+	advance(time.Second)
+	for i := 0; i < 4; i++ {
+		tr.Record("fast-suspect", 0, false)
+	}
+	got := tr.Rank([]string{"never", "fast-suspect", "unknown", "mostly"})
+	want := []string{"unknown", "mostly", "fast-suspect", "never"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rank = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestUnsettled(t *testing.T) {
+	tr, _ := clockedTracker(t)
+	tr.Record("ok", 10*time.Millisecond, true)
+	tr.Record("once", 0, false)
+	tr.Fail("down")
+	tr.Fail("down")
+	got := tr.Unsettled([]string{"ok", "once", "down", "new"})
+	want := []string{"once", "down", "new"}
+	if len(got) != len(want) {
+		t.Fatalf("unsettled = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unsettled = %v, want %v", got, want)
+		}
 	}
 }

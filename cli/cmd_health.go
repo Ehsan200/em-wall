@@ -64,8 +64,11 @@ func (a *app) cmdHealth(args []string) int {
 		var ur [][]string
 		for _, u := range h.Upstreams {
 			state := "ok"
-			if u.BreakerOpen {
+			switch {
+			case u.BreakerOpen:
 				state = "demoted"
+			case u.Suspect:
+				state = "down"
 			}
 			rtt := "-"
 			if u.RTTMs > 0 {

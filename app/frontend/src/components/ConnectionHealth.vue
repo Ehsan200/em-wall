@@ -49,7 +49,7 @@ const udpSilentPct = computed(() => {
 });
 
 const upstreams = computed(() => (stats.value?.upstreams ?? []).filter(u =>
-  u.connections > 0 || u.blamed > 0 || u.breakerOpen || u.rttMs > 0));
+  u.connections > 0 || u.blamed > 0 || u.breakerOpen || u.suspect || u.rttMs > 0));
 
 function ms(v: number): string {
   if (v < 0) return '—';
@@ -150,6 +150,10 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
             <span v-if="u.breakerOpen" class="pill bad"
                   :title="`${pct(u.failureRate * 100)} of recent attempts failed — ranked last until it recovers`">
               demoted
+            </span>
+            <span v-else-if="u.suspect" class="pill bad"
+                  title="Failing right now — ranked behind healthy members, back in rotation as soon as it answers">
+              down
             </span>
             <span v-else class="pill good">ok</span>
           </td>

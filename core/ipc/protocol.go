@@ -128,6 +128,7 @@ type UpstreamHealthDTO struct {
 	NoData      int     `json:"noData"`
 	SetupP50Ms  int64   `json:"setupP50Ms"`
 	BreakerOpen bool    `json:"breakerOpen"`
+	Suspect     bool    `json:"suspect"`     // down right now; back on its next success
 	FailureRate float64 `json:"failureRate"` // breaker window, 0..1
 	RTTMs       int64   `json:"rttMs"`       // last probe RTT; 0 = unknown
 }

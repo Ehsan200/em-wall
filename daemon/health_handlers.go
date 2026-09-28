@@ -51,7 +51,7 @@ func (d *handlerDeps) healthStats(ctx context.Context) ipc.HealthStatsDTO {
 	if d.latency != nil {
 		for _, h := range d.latency.Snapshot() {
 			r := row(h.Name)
-			r.BreakerOpen, r.FailureRate, r.RTTMs = h.Open, h.FailureRate, h.RTT.Milliseconds()
+			r.BreakerOpen, r.Suspect, r.FailureRate, r.RTTMs = h.Open, h.Suspect, h.FailureRate, h.RTT.Milliseconds()
 		}
 	}
 	for _, raw := range order {

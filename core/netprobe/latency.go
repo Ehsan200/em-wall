@@ -8,12 +8,20 @@ import (
 )
 
 // deadStrikeThreshold is how many CONSECUTIVE failures a name needs before
-// ranking treats it as dead rather than merely unproven. One failure is
+// ranking treats it as suspect rather than merely unproven. One failure is
 // noise — a probe can lose a race with a network hiccup, and a single
 // real connection can end with zero bytes for reasons that have nothing
 // to do with the upstream (client abort, immediate 4xx-then-close). Two in
 // a row is a path problem. Until then the name sits in the unknown tier:
-// behind everything healthy, ahead of everything dead.
+// behind everything healthy, ahead of everything suspect.
+//
+// Suspect is an outage in progress, not a verdict: the very next success
+// (a probe, or a connection that carried data) restores the name. That is
+// what brings back a node that was down and suddenly works — on an
+// unstable uplink nodes drop out and return all day, and holding each one
+// out for a breaker cooldown after it already works again left sets with
+// half their members benched. A node that keeps dropping out is caught by
+// the flap rule below instead.
 const deadStrikeThreshold = 2
 
 // Circuit breaker.
@@ -58,11 +66,31 @@ const (
 	breakerOpenRate  = 0.4
 	breakerCloseRate = 0.2
 
-	// breakerCooldown is the minimum time an open breaker stays open. It
-	// exists because a single success used to be enough to clear the
-	// record: without it, the first probe that happens to land resets the
-	// name to healthy and the next connection walks into the same node.
-	breakerCooldown = 60 * time.Second
+	// breakerCooldown is the minimum time an open breaker stays open the
+	// first time it trips. It exists because a single success used to be
+	// enough to clear the record: without it, the first probe that happens
+	// to land resets the name to healthy and the next connection walks into
+	// the same node. Each further trip within breakerTripMemory of the last
+	// close doubles it, up to breakerCooldownMax: a node that blipped once
+	// is back in half a minute, one that keeps failing stays out longer
+	// every time.
+	breakerCooldown    = 30 * time.Second
+	breakerCooldownMax = 10 * time.Minute
+	breakerTripMemory  = 15 * time.Minute
+
+	// flapOutages / flapWindow: a name that enters an outage (a
+	// deadStrikeThreshold streak) this many times within flapWindow is
+	// flapping — each outage ends quickly, so it never looks flaky by rate,
+	// yet every drop-out costs the connections riding it. It opens the
+	// breaker like a bad failure rate does.
+	flapOutages = 3
+	flapWindow  = 10 * time.Minute
+
+	// resetGrace follows a Reset (network change, wake from sleep): for
+	// this long failures are not recorded, only successes. The reset fires
+	// as the new network comes up — often before routes and DNS work — and
+	// the first probe round used to demote nearly every member at once.
+	resetGrace = 15 * time.Second
 
 	// breakerCloseStreak is how many consecutive successes must sit at the
 	// end of the window before closing. The rate alone can be satisfied by
@@ -113,6 +141,28 @@ type sample struct {
 
 	open     bool      // breaker state: open = ranked dead
 	openedAt time.Time // when it last opened, for breakerCooldown
+	closedAt time.Time // when it last closed, for breakerTripMemory
+	trips    int       // opens since the last quiet spell; scales the cooldown
+
+	// outages holds when recent deadStrikeThreshold streaks began, for the
+	// flap rule.
+	outages []time.Time
+}
+
+// suspect reports an outage in progress: deadStrikeThreshold consecutive
+// failures and no success since.
+func (s sample) suspect() bool { return s.fails >= deadStrikeThreshold }
+
+// cooldown is how long the current open spell lasts at minimum.
+func (s sample) cooldown() time.Duration {
+	d := breakerCooldown
+	for i := 1; i < s.trips && d < breakerCooldownMax; i++ {
+		d *= 2
+	}
+	if d > breakerCooldownMax {
+		d = breakerCooldownMax
+	}
+	return d
 }
 
 // LatencyTracker caches the last probe result per name so a hot path (e.g.
@@ -121,11 +171,13 @@ type sample struct {
 // (see the breaker constants) so an intermittently failing upstream is
 // demoted and then restored automatically. Thread-safe.
 type LatencyTracker struct {
-	mu      sync.RWMutex
-	samples map[string]sample
-	ttl     time.Duration // older than this → treated as unknown
-	now     func() time.Time
-	onTrip  func(name string, open bool, rate float64, samples int)
+	mu         sync.RWMutex
+	samples    map[string]sample
+	ttl        time.Duration // older than this → treated as unknown
+	now        func() time.Time
+	graceUntil time.Time // failures before this are dropped (see resetGrace)
+	onTrip     func(name string, open bool, rate float64, samples int)
+	onSuspect  func(name string, suspect bool)
 }
 
 // NewLatencyTracker returns a tracker whose samples go stale (treated as
@@ -144,6 +196,14 @@ func NewLatencyTracker(ttl time.Duration) *LatencyTracker {
 func (t *LatencyTracker) OnBreakerChange(fn func(name string, open bool, rate float64, samples int)) {
 	t.mu.Lock()
 	t.onTrip = fn
+	t.mu.Unlock()
+}
+
+// OnSuspectChange registers fn to be called when a name enters or leaves
+// an outage (see deadStrikeThreshold). Called outside the tracker's lock.
+func (t *LatencyTracker) OnSuspectChange(fn func(name string, suspect bool)) {
+	t.mu.Lock()
+	t.onSuspect = fn
 	t.mu.Unlock()
 }
 
@@ -171,7 +231,12 @@ func (t *LatencyTracker) Succeed(name string) { t.record(name, 0, true, true) }
 func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic bool) {
 	t.mu.Lock()
 	now := t.now()
+	if !ok && now.Before(t.graceUntil) {
+		t.mu.Unlock()
+		return
+	}
 	s := t.samples[name]
+	wasSuspect := s.suspect()
 
 	// Streak + last-sample bookkeeping. A traffic outcome carries no
 	// latency measurement, so it must not overwrite the probed rtt — it
@@ -202,18 +267,41 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 		s.window = trimOutcomes(s.window, now)
 	}
 
+	isSuspect := s.suspect()
+	switch {
+	case isSuspect && !wasSuspect:
+		s.outages = append(trimTimes(s.outages, now, flapWindow), now)
+	case wasSuspect && !isSuspect:
+		// The outage is over. Its failures were the streak's to judge, and
+		// the streak already did; left in the window they would make a node
+		// that just came back look flaky and open the breaker on its first
+		// hiccup. Earlier interleaved history stays.
+		s.window = clearOutage(s.window)
+	}
+
 	was := s.open
 	rate, n := failureRate(s.window)
 	s.open = evaluateBreaker(s, rate, n, now)
 	if s.open && !was {
+		if !s.closedAt.IsZero() && now.Sub(s.closedAt) > breakerTripMemory {
+			s.trips = 0
+		}
+		s.trips++
 		s.openedAt = now
+		s.outages = nil // spent: they opened this spell, not the next one
+	}
+	if was && !s.open {
+		s.closedAt = now
 	}
 	t.samples[name] = s
 
-	hook := t.onTrip
+	hook, shook := t.onTrip, t.onSuspect
 	changed := was != s.open
 	t.mu.Unlock()
 
+	if isSuspect != wasSuspect && shook != nil {
+		shook(name, isSuspect)
+	}
 	if changed && hook != nil {
 		hook(name, s.open, rate, n)
 	}
@@ -221,16 +309,24 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 
 // evaluateBreaker returns the breaker state for s given its current window.
 // Opening is immediate; closing is deliberately hard (see the constants).
+//
+// The rate is only weighed outside an outage: during one the window fills
+// with the streak's failures, and a node that is simply down would open
+// the breaker — and then need a near-clean window to close — when all it
+// needs is to answer once.
 func evaluateBreaker(s sample, rate float64, n int, now time.Time) bool {
 	if !s.open {
-		if s.fails >= deadStrikeThreshold {
+		if len(trimTimes(s.outages, now, flapWindow)) >= flapOutages {
 			return true
+		}
+		if s.suspect() {
+			return false
 		}
 		return n >= breakerMinSamples && rate >= breakerOpenRate
 	}
 	// Open. Stay that way until the cooldown has elapsed, the recent
 	// record is clean, and the tail of the window is consecutive success.
-	if now.Sub(s.openedAt) < breakerCooldown {
+	if now.Sub(s.openedAt) < s.cooldown() {
 		return true
 	}
 	if n < breakerMinSamples || rate > breakerCloseRate {
@@ -260,6 +356,33 @@ func trimOutcomes(w []outcome, now time.Time) []outcome {
 		return w
 	}
 	return append(w[:0], w[cut:]...)
+}
+
+// clearOutage removes an ended outage's failures from w: the trailing run
+// of failures, keeping the success that ended it when that success made it
+// into the window (a rate-limited traffic success may not have).
+func clearOutage(w []outcome) []outcome {
+	var tail []outcome
+	end := len(w)
+	if end > 0 && w[end-1].ok {
+		tail = []outcome{w[end-1]}
+		end--
+	}
+	for end > 0 && !w[end-1].ok {
+		end--
+	}
+	return append(w[:end], tail...)
+}
+
+// trimTimes drops timestamps older than span. ts is ordered oldest-first.
+// It reslices rather than compacting in place: evaluateBreaker trims a
+// copy of the sample, and an in-place shift would corrupt the stored one.
+func trimTimes(ts []time.Time, now time.Time, span time.Duration) []time.Time {
+	cut := 0
+	for cut < len(ts) && now.Sub(ts[cut]) > span {
+		cut++
+	}
+	return ts[cut:]
 }
 
 // failureRate reports the share of failures in w and how many outcomes it
@@ -303,16 +426,39 @@ func (t *LatencyTracker) Probe(ctx context.Context, c Connector, name string, ta
 // say nothing about this one, and a breaker opened by the old network's
 // outage would otherwise keep a working upstream ranked last until its
 // cooldown ran out. Names return as unknown until the next probe round.
+//
+// Failures are ignored for resetGrace afterwards (see there).
 func (t *LatencyTracker) Reset() {
 	t.mu.Lock()
 	t.samples = make(map[string]sample)
+	t.graceUntil = t.now().Add(resetGrace)
 	t.mu.Unlock()
+}
+
+// Unsettled returns the names that are not currently healthy — never
+// measured, stale, failing, suspect or breaker-open — in input order. The
+// prober re-checks these between full rounds so a node that starts
+// working again is back in its set within seconds, not a full round (plus
+// cooldown) later.
+func (t *LatencyTracker) Unsettled(names []string) []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	now := t.now()
+	var out []string
+	for _, n := range names {
+		s, has := t.samples[n]
+		if !has || s.open || !s.ok || now.Sub(s.at) > t.ttl {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Health is a name's current standing, for logging and status output.
 type Health struct {
 	Name        string
 	Open        bool // breaker open → ranked behind everything else
+	Suspect     bool // outage in progress → ranked behind healthy and unknown
 	FailureRate float64
 	Samples     int
 	RTT         time.Duration
@@ -327,7 +473,7 @@ func (t *LatencyTracker) Snapshot() []Health {
 	out := make([]Health, 0, len(t.samples))
 	for n, s := range t.samples {
 		rate, cnt := failureRate(s.window)
-		h := Health{Name: n, Open: s.Open(), FailureRate: rate, Samples: cnt, RTT: s.rtt, Fails: s.fails}
+		h := Health{Name: n, Open: s.Open(), Suspect: s.suspect(), FailureRate: rate, Samples: cnt, RTT: s.rtt, Fails: s.fails}
 		if s.open {
 			h.Since = s.openedAt
 		}
@@ -348,9 +494,13 @@ func (t *LatencyTracker) Rank(names []string) []string {
 
 // RankFrom orders names best-first: healthy (fresh + ok) ascending by
 // latency, then unknown/stale (never probed, sample expired, or failing
-// but not yet past deadStrikeThreshold), then names whose breaker is open
-// last. Stable within each tier, so equal-latency or unranked names keep
-// the caller's original order. The input slice is not mutated.
+// but not yet past deadStrikeThreshold), then suspect (an outage in
+// progress), then names whose breaker is open last. Healthy and unknown
+// are stable, so equal-latency or unranked names keep the caller's
+// original order. Suspect and open are ordered least-bad first — lower
+// failure rate, then lower last-known latency — because when every member
+// is down the best bet is the one that failed least, not the one listed
+// first. The input slice is not mutated.
 //
 // incumbent, when it is one of names and still healthy, is held at the
 // front unless the best challenger beats it by the hysteresis margin —
@@ -367,32 +517,51 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 	const (
 		tierHealthy = 0
 		tierUnknown = 1
-		tierDead    = 2
+		tierSuspect = 2
+		tierDead    = 3
 	)
 	rs := make([]rankedName, len(names))
 	for i, n := range names {
 		s, has := t.samples[n]
 		fresh := has && now.Sub(s.at) <= t.ttl
+		rate, _ := failureRate(s.window)
 		switch {
 		case has && s.open:
 			// An open breaker outranks every other signal, including a
 			// fresh successful probe: the point of the cooldown is that
 			// one good measurement does not undo the demotion.
-			rs[i] = rankedName{n, i, tierDead, 0}
+			rs[i] = rankedName{n, i, tierDead, s.rtt, rate}
+		case has && s.suspect():
+			rs[i] = rankedName{n, i, tierSuspect, s.rtt, rate}
 		case fresh && s.ok:
-			rs[i] = rankedName{n, i, tierHealthy, s.rtt}
+			rs[i] = rankedName{n, i, tierHealthy, s.rtt, 0}
 		default:
-			rs[i] = rankedName{n, i, tierUnknown, 0}
+			rs[i] = rankedName{n, i, tierUnknown, 0, 0}
 		}
 	}
 	sort.SliceStable(rs, func(a, b int) bool {
-		if rs[a].tier != rs[b].tier {
-			return rs[a].tier < rs[b].tier
+		ra, rb := rs[a], rs[b]
+		if ra.tier != rb.tier {
+			return ra.tier < rb.tier
 		}
-		if rs[a].tier == tierHealthy && rs[a].rtt != rs[b].rtt {
-			return rs[a].rtt < rs[b].rtt
+		switch ra.tier {
+		case tierHealthy:
+			if ra.rtt != rb.rtt {
+				return ra.rtt < rb.rtt
+			}
+		case tierSuspect, tierDead:
+			if ra.rate != rb.rate {
+				return ra.rate < rb.rate
+			}
+			// A name that has never answered (rtt 0) goes after any that has.
+			if (ra.rtt == 0) != (rb.rtt == 0) {
+				return rb.rtt == 0
+			}
+			if ra.rtt != rb.rtt {
+				return ra.rtt < rb.rtt
+			}
 		}
-		return rs[a].idx < rs[b].idx
+		return ra.idx < rb.idx
 	})
 
 	// Hysteresis: a healthy incumbent stays first unless the leader is
@@ -423,6 +592,7 @@ type rankedName struct {
 	idx  int // original position, for stable tie-breaks
 	tier int
 	rtt  time.Duration
+	rate float64 // window failure rate; orders the suspect and dead tiers
 }
 
 // beatsByMargin reports whether challenger is enough better than incumbent

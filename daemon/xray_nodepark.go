@@ -32,13 +32,19 @@ import (
 // every node looks dead, the likelier cause is the user's own uplink, and
 // parking would turn a local outage into a pool that stays empty after the
 // link returns.
+//
+// Park times are short on purpose. Nodes on a flaky provider die and come
+// back within the hour, and a parked node is invisible — it cannot win
+// traffic however well it would do — so a long park costs more than the
+// few pings a trial does. A real network change (or a wake from sleep)
+// returns every parked node at once: "dead" was judged on the old network.
 
 const (
 	nodeHealthPollInterval = 30 * time.Second
 	nodeDeadBeforePark     = 15 * time.Minute
 	nodeTrialWindow        = 3 * time.Minute
-	nodeParkInitial        = 30 * time.Minute
-	nodeParkMax            = 6 * time.Hour
+	nodeParkInitial        = 5 * time.Minute
+	nodeParkMax            = time.Hour
 )
 
 // nodeStatus is one outbound's entry in xray's /debug/vars "observatory".
@@ -226,6 +232,26 @@ func (p *nodeParker) release() []parkEvent {
 	return events
 }
 
+// releaseAll returns every parked node to its pool, on trial, whatever its
+// remaining park time. For a network change.
+func (p *nodeParker) releaseAll() []parkEvent {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var events []parkEvent
+	for k, st := range p.nodes {
+		if !st.parkedUntil.IsZero() {
+			st.parkedUntil = time.Time{}
+			st.onTrial = true
+			st.deadSince = time.Time{}
+			events = append(events, parkEvent{key: k})
+		}
+	}
+	return events
+}
+
 // withoutParked drops parked members from a resolved member list, unless
 // that would leave it empty.
 func withoutParked(members []xray.DialerMember, parked map[string]bool) []xray.DialerMember {
@@ -277,6 +303,21 @@ func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 	}
 	if err := s.Reconcile(ctx); err != nil {
 		s.logger.Printf("xray supervisor: apply node parking: %v", err)
+	}
+}
+
+// ReturnParked puts every parked pool node back on trial and applies it
+// live. Called on a real network change: a node judged dead on the old
+// network may well work on this one, and waiting out its park time would
+// keep it out of its pool for up to nodeParkMax.
+func (s *xraySupervisor) ReturnParked(ctx context.Context) {
+	events := s.parker.releaseAll()
+	if len(events) == 0 {
+		return
+	}
+	s.logger.Printf("xray supervisor: network changed — %d parked pool node(s) back on trial", len(events))
+	if err := s.Reconcile(ctx); err != nil {
+		s.logger.Printf("xray supervisor: return parked nodes: %v", err)
 	}
 }
 

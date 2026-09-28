@@ -19,8 +19,13 @@ import (
 // the ranking tolerates seconds of staleness.
 const (
 	proxyProbeInterval = 30 * time.Second
-	proxyProbeTimeout  = 8 * time.Second
-	proxyProbeParallel = 4
+	// proxyProbeFastInterval is the re-check cadence for unsettled names
+	// only (netprobe.LatencyTracker.Unsettled). Those are few, so this
+	// costs little, and it bounds how long a node that came back stays
+	// ranked behind the others.
+	proxyProbeFastInterval = 10 * time.Second
+	proxyProbeTimeout      = 8 * time.Second
+	proxyProbeParallel     = 4
 	// proxyLatencyTTL must exceed the interval so a sample stays valid
 	// between probe rounds (and survives one skipped round).
 	proxyLatencyTTL = 90 * time.Second

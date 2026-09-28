@@ -132,3 +132,33 @@ func TestParseObservatoryVars(t *testing.T) {
 		t.Fatalf("parsed = %+v", m)
 	}
 }
+
+func TestNodeParkerReleaseAll(t *testing.T) {
+	now := time.Unix(0, 0)
+	p := newNodeParker()
+	p.now = func() time.Time { return now }
+	slots := parkSlot("good", "dead")
+	h := health(map[string]bool{"good": true, "dead": false})
+	p.observe(slots, h)
+	now = now.Add(nodeDeadBeforePark)
+	if ev := p.observe(slots, h); len(ev) != 1 {
+		t.Fatalf("setup: expected dead parked, got %+v", ev)
+	}
+
+	ev := p.releaseAll()
+	if len(ev) != 1 || ev[0].key != "dead" || ev[0].parked {
+		t.Fatalf("releaseAll = %+v, want dead back on trial", ev)
+	}
+	if p.parked()["dead"] {
+		t.Fatal("still parked after releaseAll")
+	}
+	if ev := p.releaseAll(); len(ev) != 0 {
+		t.Fatalf("second releaseAll = %+v, want nothing", ev)
+	}
+	// On trial: failing through the trial window re-parks it for longer.
+	p.observe(slots, h)
+	now = now.Add(nodeTrialWindow)
+	if ev := p.observe(slots, h); len(ev) != 1 || ev[0].for_ != 2*nodeParkInitial {
+		t.Fatalf("re-park after trial = %+v, want %s", ev, 2*nodeParkInitial)
+	}
+}

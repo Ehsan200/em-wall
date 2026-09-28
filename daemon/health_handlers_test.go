@@ -8,8 +8,8 @@ import (
 	"github.com/ehsan/em-wall/core/netprobe"
 )
 
-// An upstream that carried nothing lately but is demoted by the breaker
-// must still show up — that is exactly the one worth seeing.
+// An upstream that carried nothing lately but is down or demoted must
+// still show up — that is exactly the one worth seeing.
 func TestHealthStatsJoinsBreakerView(t *testing.T) {
 	lat := netprobe.NewLatencyTracker(time.Minute)
 	lat.Record("_xray_nyc", 300*time.Millisecond, true)
@@ -30,7 +30,7 @@ func TestHealthStatsJoinsBreakerView(t *testing.T) {
 		t.Fatalf("nyc row = %+v", h.Upstreams)
 	}
 	dead, ok := byName["dead"]
-	if !ok || !h.Upstreams[dead].BreakerOpen || h.Upstreams[dead].Connections != 0 {
+	if !ok || !h.Upstreams[dead].Suspect || h.Upstreams[dead].Connections != 0 {
 		t.Fatalf("dead row = %+v", h.Upstreams)
 	}
 	if h.Connections != 1 || h.Succeeded != 1 || h.ParkedNodes == nil {
