@@ -97,7 +97,15 @@ const (
 var (
 	proxyClientHelloWait  = time.Second
 	proxyFirstByteTimeout = 8 * time.Second
+
+	// proxyMTProtoFollowWait is how long to wait for an MTProto client's
+	// first packet when its 64-byte header arrived alone (see mtproto.go).
+	proxyMTProtoFollowWait = 300 * time.Millisecond
 )
+
+// errClientGone is a connection whose client closed before sending its
+// opening bytes. It is not a failure of the destination or of any member.
+var errClientGone = errors.New("client closed before sending")
 
 // Hedged-race tuning for verified dials (see raceRound).
 //
@@ -409,6 +417,9 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	}
 	upstream, used, sent, lastErr := pf.dialBinding(ctx, entry, local, conn)
 	release()
+	if errors.Is(lastErr, errClientGone) {
+		return
+	}
 	if upstream == nil && errors.Is(lastErr, errDestinationRefused) {
 		// A verdict on the destination, not a flaky path: pause it now, so
 		// the client's retries fail in ~0s and it moves on (a video player
@@ -554,11 +565,27 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 	if clientSpeaksFirst(local.Port) {
 		var err error
 		hello, err = readOpening(client, proxyClientHelloWait)
-		if err != nil && len(hello) == 0 {
-			return nil, "", 0, fmt.Errorf("client sent nothing: %w", err)
+		if len(hello) == 0 {
+			var ne net.Error
+			if !errors.As(err, &ne) || !ne.Timeout() {
+				// Closed or reset before a byte: the client left. Nothing
+				// to say about the destination or any member.
+				return nil, "", 0, fmt.Errorf("%w: %v", errClientGone, err)
+			}
+			// Silent past the wait. Telegram and browsers open spare
+			// connections they only use later; killing them (and striking
+			// the destination for it) paused Telegram's DC addresses. Just
+			// forward it unverified, as for any non-TLS opening.
 		}
 	}
-	verify := looksLikeTLSClientHello(hello)
+	if looksLikeMTProto(hello) && len(hello) == mtprotoInitLen {
+		// Header without the first packet yet: the server owes nothing
+		// until req_pq arrives, so wait briefly for it before verifying.
+		if more, _ := readOpening(client, proxyMTProtoFollowWait); len(more) > 0 {
+			hello = append(hello, more...)
+		}
+	}
+	verify := looksLikeTLSClientHello(hello) || (looksLikeMTProto(hello) && len(hello) > mtprotoInitLen)
 
 	// Members that failed this connection. They are only blamed once
 	// another member has carried it: when EVERY member fails at once, the
@@ -880,12 +907,13 @@ func readOpening(client net.Conn, wait time.Duration) ([]byte, error) {
 }
 
 // clientSpeaksFirst reports whether port is one where the client opens the
-// conversation, making it safe to wait briefly for its first bytes. TLS
-// ports only: that is where the traffic worth verifying is, and it keeps
-// every server-speaks-first protocol on the untouched path.
+// conversation, making it safe to wait briefly for its first bytes: the
+// TLS ports, plus 80 and 5222 where HTTP and XMPP clients speak first too
+// and Telegram DCs also listen (see mtproto.go). Server-speaks-first
+// protocols (SSH, SMTP, …) stay on the untouched path.
 func clientSpeaksFirst(port int) bool {
 	switch port {
-	case 443, 853, 993, 995, 8443:
+	case 443, 853, 993, 995, 8443, 80, 5222:
 		return true
 	}
 	return false
