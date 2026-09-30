@@ -126,33 +126,35 @@ const enabledCount = computed(() => entries.value.filter((e) => e.enabled).lengt
 
 // Outbounds search: case-insensitive substring over the name, the
 // subscription it was promoted from, its dialer, and the raw outbound
-// JSON (so a server host, protocol or port finds it too). The toggle
-// filters narrow further and combine with AND. The entry being edited
-// always stays visible, so renaming it can't make it vanish.
-type EntryFilter = 'dialer' | 'mux' | 'disabled';
-const ENTRY_FILTERS: { key: EntryFilter; label: string; test: (e: XrayRow) => boolean }[] = [
-  { key: 'dialer', label: 'Uses dialer', test: (e) => !!e.dialer },
-  { key: 'mux', label: 'Mux on', test: (e) => e.mux },
-  { key: 'disabled', label: 'Disabled', test: (e) => !e.enabled },
+// JSON (so a server host, protocol or port finds it too). Each filter is a
+// three-way All / yes / no switch; they combine with AND. The entry being
+// edited always stays visible, so renaming it can't make it vanish.
+type FilterMode = 'all' | 'yes' | 'no';
+type EntryFilter = 'enabled' | 'dialer' | 'mux';
+const ENTRY_FILTERS: { key: EntryFilter; label: string; yes: string; no: string; test: (e: XrayRow) => boolean }[] = [
+  { key: 'enabled', label: 'Status', yes: 'Enabled', no: 'Disabled', test: (e) => e.enabled },
+  { key: 'dialer', label: 'Dialer', yes: 'With', no: 'Without', test: (e) => !!e.dialer },
+  { key: 'mux', label: 'Mux', yes: 'On', no: 'Off', test: (e) => e.mux },
 ];
 const search = ref<string>('');
-const activeFilters = ref<Set<EntryFilter>>(new Set());
-function toggleFilter(k: EntryFilter) {
-  const next = new Set(activeFilters.value);
-  if (next.has(k)) next.delete(k); else next.add(k);
-  activeFilters.value = next;
+const filterModes = ref<Record<EntryFilter, FilterMode>>({ enabled: 'all', dialer: 'all', mux: 'all' });
+const filtersActive = computed(() =>
+  !!search.value.trim() || Object.values(filterModes.value).some((m) => m !== 'all'));
+function clearFilters() {
+  search.value = '';
+  filterModes.value = { enabled: 'all', dialer: 'all', mux: 'all' };
 }
-function filterCount(k: EntryFilter): number {
-  const f = ENTRY_FILTERS.find((x) => x.key === k)!;
-  return entries.value.filter(f.test).length;
+function filterCount(test: (e: XrayRow) => boolean, mode: FilterMode): number {
+  if (mode === 'all') return entries.value.length;
+  return entries.value.filter((e) => test(e) === (mode === 'yes')).length;
 }
 const filteredEntries = computed<XrayRow[]>(() => {
   const q = search.value.trim().toLowerCase();
-  const tests = ENTRY_FILTERS.filter((f) => activeFilters.value.has(f.key)).map((f) => f.test);
-  if (!q && tests.length === 0) return entries.value;
+  const active = ENTRY_FILTERS.filter((f) => filterModes.value[f.key] !== 'all');
+  if (!q && active.length === 0) return entries.value;
   return entries.value.filter((e) => {
     if (editing.value?.id === e.id) return true;
-    if (!tests.every((t) => t(e))) return false;
+    if (!active.every((f) => f.test(e) === (filterModes.value[f.key] === 'yes'))) return false;
     return !q ||
       e.name.toLowerCase().includes(q) ||
       e.subName.toLowerCase().includes(q) ||
@@ -630,16 +632,20 @@ defineExpose({ refresh });
           {{ filteredEntries.length }} / {{ entries.length }}
         </span>
       </div>
-      <div v-if="entries.length > 0" class="row" style="gap: 6px; flex-wrap: wrap; align-items: center">
-        <span class="muted" style="font-size: 11px">Show only:</span>
-        <button v-for="f in ENTRY_FILTERS" :key="f.key"
-                class="filter-chip" :class="{ active: activeFilters.has(f.key) }"
-                :aria-pressed="activeFilters.has(f.key)"
-                @click="toggleFilter(f.key)">
-          {{ f.label }} <span class="filter-chip-count">{{ filterCount(f.key) }}</span>
-        </button>
-        <button v-if="activeFilters.size || search" class="filter-chip"
-                @click="activeFilters = new Set(); search = ''">Clear</button>
+      <div v-if="entries.length > 0" class="row" style="gap: 14px; flex-wrap: wrap; align-items: center">
+        <div v-for="f in ENTRY_FILTERS" :key="f.key" class="row" style="gap: 6px; align-items: center">
+          <span class="muted" style="font-size: 11px">{{ f.label }}</span>
+          <div class="seg" role="group" :aria-label="f.label">
+            <button v-for="m in (['all', 'yes', 'no'] as FilterMode[])" :key="m"
+                    class="seg-btn" :class="{ active: filterModes[f.key] === m }"
+                    :aria-pressed="filterModes[f.key] === m"
+                    @click="filterModes[f.key] = m">
+              {{ m === 'all' ? 'All' : m === 'yes' ? f.yes : f.no }}
+              <span class="seg-count">{{ filterCount(f.test, m) }}</span>
+            </button>
+          </div>
+        </div>
+        <button v-if="filtersActive" class="seg-btn seg-clear" @click="clearFilters">Clear</button>
       </div>
 
       <div v-if="entries.length === 0 && !draft.open" class="col"
@@ -1021,11 +1027,17 @@ defineExpose({ refresh });
   outline: none;
   border-color: var(--accent);
 }
-.filter-chip {
-  background: transparent;
+.seg {
+  display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 3px 10px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg-btn {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 3px 9px;
   font-size: 11px;
   color: var(--text-dim);
   cursor: pointer;
@@ -1033,15 +1045,22 @@ defineExpose({ refresh });
   align-items: center;
   gap: 5px;
 }
-.filter-chip:hover {
+.seg .seg-btn + .seg-btn {
+  border-left: 1px solid var(--border);
+}
+.seg-btn:hover {
   color: var(--text);
 }
-.filter-chip.active {
+.seg-btn.active {
   color: var(--text);
-  border-color: var(--accent);
-  background: rgba(141, 141, 160, 0.15);
+  background: rgba(141, 141, 160, 0.18);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
-.filter-chip-count {
+.seg-clear {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.seg-count {
   font-size: 10px;
   opacity: 0.7;
 }
