@@ -44,7 +44,8 @@ let pendingDeleteTimer: number | undefined;
 // (the fastest node each master dialer is routing through). Per-node RTT is
 // not exposed by xray's CLI, so we surface the ★ winner only; the latency
 // column shows any stored probe value.
-const obs = ref<{ winners: Set<string> }>({ winners: new Set() });
+type NodePing = { latencyMs: number; down: boolean; parked: boolean };
+const obs = ref<{ winners: Set<string>; nodes: Record<string, NodePing> }>({ winners: new Set(), nodes: {} });
 let obsTimer: number | undefined;
 
 function hoursToSec(h: string): number {
@@ -278,14 +279,35 @@ async function importNode(subId: number, n: Node) {
 async function pollObs() {
   try {
     const r = await XrayObservatory();
-    obs.value = { winners: new Set((r?.winners as string[]) || []) };
+    obs.value = {
+      winners: new Set((r?.winners as string[]) || []),
+      nodes: (r?.nodes as Record<string, NodePing>) || {},
+    };
   } catch {
-    obs.value = { winners: new Set() };
+    obs.value = { winners: new Set(), nodes: {} };
   }
 }
 
-function nodeLatency(n: Node): string {
-  return n.latencyMs >= 0 ? `${n.latencyMs} ms` : '—';
+// Live ping from xray's burst observatory, which health-pings every pool
+// member every few seconds. Only nodes in a pool are pinged.
+function nodePing(n: Node): { text: string; color: string; title: string } {
+  const p = obs.value.nodes[n.fingerprint];
+  if (!p) {
+    return n.disabled
+      ? { text: '', color: '', title: '' }
+      : { text: '—', color: 'var(--text-dim)', title: 'Not pinged — only active nodes in a pool are pinged' };
+  }
+  if (p.parked) {
+    return { text: 'parked', color: 'var(--danger)', title: 'Down for a while — left out of the pool and retried later' };
+  }
+  if (p.latencyMs >= 0) {
+    const color = p.latencyMs < 300 ? 'var(--success)' : p.latencyMs < 800 ? 'var(--warn)' : 'var(--danger)';
+    return { text: `${p.latencyMs} ms`, color, title: 'Last health ping through this node' };
+  }
+  if (p.down) {
+    return { text: 'down', color: 'var(--danger)', title: 'Every recent health ping failed' };
+  }
+  return { text: '…', color: 'var(--text-dim)', title: 'Waiting for the first health ping' };
 }
 function isWinner(n: Node): boolean {
   return obs.value.winners.has(n.fingerprint);
@@ -420,7 +442,8 @@ defineExpose({ refresh });
             </span>
           </div>
           <div class="row" style="gap: 8px; align-items: center">
-            <span class="muted" style="font-size: 11px; font-variant-numeric: tabular-nums">{{ nodeLatency(n) }}</span>
+            <span style="font-size: 11px; font-variant-numeric: tabular-nums"
+                  :style="{ color: nodePing(n).color }" :title="nodePing(n).title">{{ nodePing(n).text }}</span>
             <button v-if="n.importedAs" disabled title="An xray entry already exists for this node">✓ Added</button>
             <button v-else @click="importNode(s.id, n)" :disabled="busy || importing === n.fingerprint"
                     title="Create a standalone xray entry from this node so rules and sets can target it. Restarts xray.">

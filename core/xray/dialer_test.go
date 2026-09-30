@@ -365,3 +365,17 @@ func TestGenerate_SharedSlotAliases(t *testing.T) {
 		t.Errorf("balancers = %d, want 1", len(cfg.Routing.Balancers))
 	}
 }
+
+func TestSlotMemberKeyRoundTrip(t *testing.T) {
+	for _, key := range []string{"4c439b73952a939a", "xray-nyc", "proxy-home"} {
+		got, ok := SlotMemberKey(SlotMemberTag(3, key))
+		if !ok || got != key {
+			t.Errorf("SlotMemberKey(SlotMemberTag(3, %q)) = %q, %v", key, got, ok)
+		}
+	}
+	for _, tag := range []string{"out-nyc", "dialer-nyc", "slot0-in", "block"} {
+		if k, ok := SlotMemberKey(tag); ok {
+			t.Errorf("SlotMemberKey(%q) = %q, want not a member", tag, k)
+		}
+	}
+}

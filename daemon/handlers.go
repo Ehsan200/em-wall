@@ -1323,15 +1323,13 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 	})
 
 	s.Handle(ipc.MethodXrayObservatory, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		raw, err := d.xraySup.BalancerInfoRaw(ctx)
-		if err != nil {
-			// Soft-fail: no balancers running / api not ready → empty.
-			return ipc.XrayObservatoryResult{}, nil
+		out := ipc.XrayObservatoryResult{Nodes: d.xraySup.NodePings(ctx)}
+		// Soft-fail: no balancers running / api not ready → no winners.
+		if raw, err := d.xraySup.BalancerInfoRaw(ctx); err == nil {
+			out.Winners = xray.ParseBalancerWinners(string(raw))
+			out.Raw = string(raw)
 		}
-		return ipc.XrayObservatoryResult{
-			Winners: xray.ParseBalancerWinners(string(raw)),
-			Raw:     string(raw),
-		}, nil
+		return out, nil
 	})
 }
 

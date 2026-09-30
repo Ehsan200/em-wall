@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/xray"
 )
 
@@ -49,7 +50,8 @@ const (
 
 // nodeStatus is one outbound's entry in xray's /debug/vars "observatory".
 type nodeStatus struct {
-	Alive      bool `json:"alive"`
+	Alive      bool  `json:"alive"`
+	Delay      int64 `json:"delay"` // ms, last successful ping; set only while alive
 	HealthPing struct {
 		All  int `json:"all"`
 		Fail int `json:"fail"`
@@ -319,6 +321,49 @@ func (s *xraySupervisor) ReturnParked(ctx context.Context) {
 	if err := s.Reconcile(ctx); err != nil {
 		s.logger.Printf("xray supervisor: return parked nodes: %v", err)
 	}
+}
+
+// NodePings reports the live health-ping result of every pool member,
+// keyed by member key, plus the parked ones. Empty when xray isn't
+// running or its metrics aren't up yet.
+func (s *xraySupervisor) NodePings(ctx context.Context) map[string]ipc.XrayNodePing {
+	out := map[string]ipc.XrayNodePing{}
+	s.mu.Lock()
+	running := s.enabled && s.cmd != nil
+	s.mu.Unlock()
+	if running {
+		byTag, _ := s.fetchObservatory(ctx)
+		for tag, st := range byTag {
+			key, ok := xray.SlotMemberKey(tag)
+			if !ok {
+				continue
+			}
+			p := ipc.XrayNodePing{LatencyMs: -1, Down: st.dead()}
+			if st.Alive && st.Delay > 0 {
+				p.LatencyMs = int(st.Delay)
+			}
+			// A member shared by two slots is pinged in each; keep the
+			// better reading.
+			if prev, seen := out[key]; seen && !betterPing(p, prev) {
+				continue
+			}
+			out[key] = p
+		}
+	}
+	for _, pn := range s.parker.list() {
+		out[pn.Key] = ipc.XrayNodePing{LatencyMs: -1, Down: true, Parked: true}
+	}
+	return out
+}
+
+func betterPing(a, b ipc.XrayNodePing) bool {
+	switch {
+	case a.LatencyMs >= 0 && b.LatencyMs < 0:
+		return true
+	case a.LatencyMs < 0 || b.LatencyMs < 0:
+		return !a.Down && b.Down
+	}
+	return a.LatencyMs < b.LatencyMs
 }
 
 func (s *xraySupervisor) fetchObservatory(ctx context.Context) (map[string]nodeStatus, error) {

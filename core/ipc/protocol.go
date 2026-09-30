@@ -595,6 +595,23 @@ type XraySubImportNodeParams struct {
 type XrayObservatoryResult struct {
 	Winners []string `json:"winners"`
 	Raw     string   `json:"raw"`
+	// Nodes is the burst observatory's live view of every pool member,
+	// keyed like Winners (node fingerprint, or "xray-"/"proxy-" key).
+	// A member absent from the map isn't in any pool right now (idle,
+	// disabled, over the cap) and so isn't being pinged.
+	Nodes map[string]XrayNodePing `json:"nodes"`
+}
+
+// XrayNodePing is one pool member's health-ping result.
+type XrayNodePing struct {
+	// LatencyMs is the last successful ping's RTT, -1 when there is none
+	// yet (just loaded) or every recent ping failed.
+	LatencyMs int `json:"latencyMs"`
+	// Down: every recent ping failed.
+	Down bool `json:"down"`
+	// Parked: left out of its pool for staying down (daemon/xray_nodepark.go);
+	// not pinged until its trial.
+	Parked bool `json:"parked"`
 }
 
 type XrayDeleteParams struct {

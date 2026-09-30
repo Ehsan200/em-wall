@@ -150,6 +150,16 @@ func SlotMemberTag(i int, key string) string {
 	return SlotOutboundPrefix(i) + sanitizeTag(key)
 }
 
+// SlotMemberKey is SlotMemberTag's inverse: the member key a slot
+// outbound tag carries, and false for any other tag.
+func SlotMemberKey(tag string) (string, bool) {
+	m := slotOutRe.FindStringSubmatch(tag)
+	if m == nil || !strings.HasPrefix(tag, "slot") {
+		return "", false
+	}
+	return m[1], true
+}
+
 // DialerOutboundTag is the stable socks outbound a master's dialerProxy
 // points at; it forwards to the slot's inbound → balancer.
 func DialerOutboundTag(master string) string { return "dialer-" + normalizeName(master) }

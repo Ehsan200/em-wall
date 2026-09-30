@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/xray"
 )
 
@@ -130,6 +131,31 @@ func TestParseObservatoryVars(t *testing.T) {
 	}
 	if !m["slot0-out-dead"].dead() || m["slot0-out-good"].dead() || !m["slot0-out-good"].Alive {
 		t.Fatalf("parsed = %+v", m)
+	}
+	if m["slot0-out-good"].Delay != 517 {
+		t.Fatalf("delay = %d, want 517", m["slot0-out-good"].Delay)
+	}
+}
+
+// A member shared by two slots shows its better reading: a measured RTT
+// beats none, up beats down, lower beats higher.
+func TestBetterPing(t *testing.T) {
+	fast := ipc.XrayNodePing{LatencyMs: 100}
+	slow := ipc.XrayNodePing{LatencyMs: 400}
+	pending := ipc.XrayNodePing{LatencyMs: -1}
+	down := ipc.XrayNodePing{LatencyMs: -1, Down: true}
+	for _, c := range []struct {
+		a, b ipc.XrayNodePing
+		want bool
+	}{
+		{fast, slow, true}, {slow, fast, false},
+		{slow, down, true}, {down, slow, false},
+		{pending, down, true}, {down, pending, false},
+		{slow, pending, true},
+	} {
+		if got := betterPing(c.a, c.b); got != c.want {
+			t.Errorf("betterPing(%+v, %+v) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }
 
