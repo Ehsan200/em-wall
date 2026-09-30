@@ -124,6 +124,43 @@ const statusBadge = computed(() => {
 
 const enabledCount = computed(() => entries.value.filter((e) => e.enabled).length);
 
+// Outbounds search: case-insensitive substring over the name, the
+// subscription it was promoted from, its dialer, and the raw outbound
+// JSON (so a server host, protocol or port finds it too). The toggle
+// filters narrow further and combine with AND. The entry being edited
+// always stays visible, so renaming it can't make it vanish.
+type EntryFilter = 'dialer' | 'mux' | 'disabled';
+const ENTRY_FILTERS: { key: EntryFilter; label: string; test: (e: XrayRow) => boolean }[] = [
+  { key: 'dialer', label: 'Uses dialer', test: (e) => !!e.dialer },
+  { key: 'mux', label: 'Mux on', test: (e) => e.mux },
+  { key: 'disabled', label: 'Disabled', test: (e) => !e.enabled },
+];
+const search = ref<string>('');
+const activeFilters = ref<Set<EntryFilter>>(new Set());
+function toggleFilter(k: EntryFilter) {
+  const next = new Set(activeFilters.value);
+  if (next.has(k)) next.delete(k); else next.add(k);
+  activeFilters.value = next;
+}
+function filterCount(k: EntryFilter): number {
+  const f = ENTRY_FILTERS.find((x) => x.key === k)!;
+  return entries.value.filter(f.test).length;
+}
+const filteredEntries = computed<XrayRow[]>(() => {
+  const q = search.value.trim().toLowerCase();
+  const tests = ENTRY_FILTERS.filter((f) => activeFilters.value.has(f.key)).map((f) => f.test);
+  if (!q && tests.length === 0) return entries.value;
+  return entries.value.filter((e) => {
+    if (editing.value?.id === e.id) return true;
+    if (!tests.every((t) => t(e))) return false;
+    return !q ||
+      e.name.toLowerCase().includes(q) ||
+      e.subName.toLowerCase().includes(q) ||
+      e.dialer.toLowerCase().includes(q) ||
+      e.outbound.toLowerCase().includes(q);
+  });
+});
+
 const draftIsValid = computed(() => {
   const d = draft.value;
   if (!d.name.trim() || !/^[a-z0-9_-]+$/.test(d.name.trim())) return false;
@@ -585,13 +622,38 @@ defineExpose({ refresh });
         </button>
       </div>
 
+      <div v-if="entries.length > 0" class="row search-row" style="gap: 8px">
+        <input v-model="search" type="search"
+               placeholder="Search outbounds (name, server, protocol, subscription)"
+               style="flex: 1" />
+        <span class="muted" style="font-size: 11px; min-width: 90px; text-align: right">
+          {{ filteredEntries.length }} / {{ entries.length }}
+        </span>
+      </div>
+      <div v-if="entries.length > 0" class="row" style="gap: 6px; flex-wrap: wrap; align-items: center">
+        <span class="muted" style="font-size: 11px">Show only:</span>
+        <button v-for="f in ENTRY_FILTERS" :key="f.key"
+                class="filter-chip" :class="{ active: activeFilters.has(f.key) }"
+                :aria-pressed="activeFilters.has(f.key)"
+                @click="toggleFilter(f.key)">
+          {{ f.label }} <span class="filter-chip-count">{{ filterCount(f.key) }}</span>
+        </button>
+        <button v-if="activeFilters.size || search" class="filter-chip"
+                @click="activeFilters = new Set(); search = ''">Clear</button>
+      </div>
+
       <div v-if="entries.length === 0 && !draft.open" class="col"
            style="padding: 24px; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; align-items: center; gap: 6px">
         <span style="font-size: 13px">No outbounds configured yet.</span>
         <span class="muted" style="font-size: 12px">Add one with the button above, or paste a share link to import.</span>
       </div>
 
-      <div v-for="row in entries" :key="row.id"
+      <div v-if="entries.length > 0 && filteredEntries.length === 0" class="muted"
+           style="font-size: 12px; padding: 12px; text-align: center">
+        No outbounds match the current search and filters.
+      </div>
+
+      <div v-for="row in filteredEntries" :key="row.id"
            class="col" style="gap: 8px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <!-- View mode -->
         <template v-if="!editing || editing.id !== row.id">
@@ -947,6 +1009,42 @@ defineExpose({ refresh });
 </template>
 
 <style scoped>
+.search-row input[type="search"] {
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+.search-row input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.filter-chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.filter-chip:hover {
+  color: var(--text);
+}
+.filter-chip.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(141, 141, 160, 0.15);
+}
+.filter-chip-count {
+  font-size: 10px;
+  opacity: 0.7;
+}
 .subtab {
   background: transparent;
   border: none;
