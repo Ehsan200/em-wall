@@ -180,6 +180,8 @@ type proxyForwarder struct {
 	witness *uplinkWitness     // proves the uplink was up before blaming a silent upstream; nil = always blame
 	stats   *connStats         // connection health measurements; nil disables
 	routes  *routeKeys         // which upstreams share a way in; nil = all independent
+	exits   *exitKeys          // which upstreams share a way out; nil = unknown
+	avoid   *siteAvoid         // members that keep failing one site, tried last for it; nil disables
 	live    *liveConns         // open splices, for closing stalled ones after a path change; nil disables
 	logger  *log.Logger
 }
@@ -275,6 +277,7 @@ func (pf *proxyForwarder) resetHealth() {
 	}
 	pf.breaker.reset()
 	pf.health.reset()
+	pf.avoid.reset()
 }
 
 // incumbent is the upstream a connection should prefer: the one this exact
@@ -342,11 +345,37 @@ func siteKey(host string) string {
 // without that, every probe round reshuffles the list and the next
 // connection to the same site leaves from a different exit IP.
 // Single-name bindings pass through untouched.
+//
+// Members that keep failing this particular site (siteavoid.go) then move
+// behind the rest — still in the list, just tried last.
 func (pf *proxyForwarder) orderedNames(entry proxy.Entry) []string {
-	if pf.latency == nil {
-		return entry.ProxyNames
+	names := entry.ProxyNames
+	if pf.latency != nil {
+		names = pf.latency.RankFrom(names, pf.incumbent(entry))
 	}
-	return pf.latency.RankFrom(entry.ProxyNames, pf.incumbent(entry))
+	return pf.avoid.demote(avoidSite(entry), names, pf.avoidKeys)
+}
+
+// avoidKeys are the keys a member's per-site failures are recorded under:
+// the member itself, and its exit IP when known (a ban is on the address).
+func (pf *proxyForwarder) avoidKeys(name string) []string {
+	return []string{name, pf.exits.lookup(name)}
+}
+
+// diversityKeys are the ways two members can fail together: a shared way
+// in (route key) and a shared way out (exit IP, when known).
+func (pf *proxyForwarder) diversityKeys(name string) []string {
+	keys := []string{pf.routeOf(name)}
+	if e := pf.exits.lookup(name); e != "" {
+		keys = append(keys, e)
+	}
+	return keys
+}
+
+// noteSiteCarried clears name's per-site failure record for entry: it just
+// answered or carried data for this site.
+func (pf *proxyForwarder) noteSiteCarried(entry proxy.Entry, name string) {
+	pf.avoid.clear(avoidSite(entry), pf.avoidKeys(name)...)
 }
 
 // Route keepalive. An active flow doesn't re-query DNS, so its fake-IP host
@@ -512,6 +541,7 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	case btoa > 0:
 		pf.breaker.success(healthKey)
 		pf.noteUpstreamSuccess(used)
+		pf.noteSiteCarried(entry, used)
 	case atob+sent > 0 && res.AFirst && res.FirstEnd < proxyAbandonWindow:
 		// The client hung up first, and quickly: it abandoned the
 		// connection, the path didn't fail it. Telegram opens its DC on
@@ -541,6 +571,12 @@ func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
 	pf.stats.blamed(name)
 	for _, k := range stickyKeys(entry) { // don't hand a failing member to siblings either
 		pf.sticky.Drop(k, name)
+	}
+	if site := avoidSite(entry); pf.avoid.strike(site, pf.avoidKeys(name)...) {
+		if ok, n := pf.sampler.allow("avoid|" + site + "|" + name); ok {
+			pf.logger.Printf("proxytun: %q keeps failing %s — trying it last there for %s (+%d more suppressed)",
+				name, site, siteAvoidFor, n)
+		}
 	}
 	if pf.latency != nil {
 		pf.latency.Fail(name)
@@ -646,6 +682,7 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 			}
 			if verify {
 				pf.witness.saw(used) // it answered the hello: data came back
+				pf.noteSiteCarried(entry, used)
 			}
 			pf.rememberUpstream(entry, used)
 			return up, used, int64(len(hello)), nil
@@ -763,7 +800,8 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 	results := make(chan dialResult, len(names))
 	wait := proxyFirstByteTimeout // read once: attempts may outlive this call
 	next, inFlight := 0, 0        // next = how many members have been launched
-	order := diverseOrder(names, pf.routeOf)
+	order := diverseOrder(names, pf.diversityKeys)
+	launchedAt := make(map[string]time.Time, len(names)) // attempts still in flight
 	launch := func() {
 		if next > 0 {
 			pf.stats.hedged() // an extra attempt beyond the first
@@ -771,6 +809,7 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 		name := order[next]
 		next++
 		inFlight++
+		launchedAt[name] = time.Now()
 		go func() {
 			c, err := pf.attemptVerified(rctx, entry, local, name, hello, wait)
 			results <- dialResult{name: name, conn: c, err: err}
@@ -797,9 +836,12 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 		select {
 		case r := <-results:
 			inFlight--
+			started := launchedAt[r.name]
+			delete(launchedAt, r.name)
 			if r.err == nil {
 				cancel() // stop the losers' waits; drain closes what they return
 				drain(inFlight)
+				pf.observeHandshakes(entry, r.name, time.Since(started), launchedAt)
 				return r.conn, r.name, failed, nil
 			}
 			lastErr = r.err
@@ -838,33 +880,69 @@ func (pf *proxyForwarder) raceRound(ctx context.Context, entry proxy.Entry, loca
 	return nil, "", failed, lastErr
 }
 
+// observeHandshakes feeds a won race's timings to the latency tracker
+// (core/netprobe/handshake.go): the winner's time to answer, and for each
+// sibling still waiting that had been waiting longer, its time so far — a
+// lower bound, but the only evidence a slow path leaves when a faster one
+// wins. A sibling launched after the winner and not yet answered says
+// nothing (it might have been about to), so it is left out.
+func (pf *proxyForwarder) observeHandshakes(entry proxy.Entry, winner string, took time.Duration, waiting map[string]time.Time) {
+	if pf.latency == nil {
+		return
+	}
+	dest := avoidSite(entry)
+	pf.latency.ObserveHandshake(winner, dest, took)
+	now := time.Now()
+	for name, at := range waiting {
+		if waited := now.Sub(at); waited > took {
+			pf.latency.ObserveHandshake(name, dest, waited)
+		}
+	}
+}
+
 // diverseOrder reorders a ranked binding so that consecutive launches
-// cover different routes (see routekeys.go) before any route is tried
-// twice: the best member first, then the best member on a route not yet
-// tried, and so on, falling back to rank order once every route has been
-// used. Within a route, rank order is kept, so the sticky incumbent still
+// cover different routes before any route is tried twice: the best member
+// first, then the best member sharing none of its keys with those already
+// tried, and so on, starting a new pass once no such member is left. A
+// member's keys (keysOf) are its route key (routekeys.go) and, when known,
+// its exit IP (exitkeys.go) — two members fail together if they share
+// either. Within a pass rank order is kept, so the sticky incumbent still
 // goes first and every member is still reached.
-func diverseOrder(ranked []string, routeOf func(string) string) []string {
+func diverseOrder(ranked []string, keysOf func(string) []string) []string {
 	if len(ranked) < 3 {
 		return ranked // two members: nothing to reorder
+	}
+	keys := make([][]string, len(ranked))
+	for i, n := range ranked {
+		keys[i] = keysOf(n)
 	}
 	out := make([]string, 0, len(ranked))
 	used := make([]bool, len(ranked))
 	seen := map[string]bool{}
+	fresh := func(i int) bool {
+		for _, k := range keys[i] {
+			if seen[k] {
+				return false
+			}
+		}
+		return true
+	}
 	for len(out) < len(ranked) {
 		picked := -1
-		for i, n := range ranked {
-			if !used[i] && !seen[routeOf(n)] {
+		for i := range ranked {
+			if !used[i] && fresh(i) {
 				picked = i
 				break
 			}
 		}
-		if picked < 0 { // every route tried once: start the next pass
+		if picked < 0 { // no untouched route left: start the next pass
 			seen = map[string]bool{}
 			continue
 		}
 		used[picked] = true
-		seen[routeOf(ranked[picked])] = true
+		for _, k := range keys[picked] {
+			seen[k] = true
+		}
 		out = append(out, ranked[picked])
 	}
 	return out
@@ -1398,7 +1476,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 // daemon runs without proxy support — dnsproxy treats proxy: rules as
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
-func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, stats *connStats, routes *routeKeys, logger *log.Logger) (*proxytun.Tunnel, string, *proxyForwarder) {
+func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, stats *connStats, routes *routeKeys, exits *exitKeys, logger *log.Logger) (*proxytun.Tunnel, string, *proxyForwarder) {
 	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
@@ -1419,6 +1497,8 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		witness: newUplinkWitness(),
 		stats:   stats,
 		routes:  routes,
+		exits:   exits,
+		avoid:   newSiteAvoid(),
 		logger:  logger,
 	}
 	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)

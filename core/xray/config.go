@@ -3,6 +3,7 @@ package xray
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,31 @@ type GenerateOptions struct {
 // slotBalancerExpected is how many best-ranked members a dialer slot's
 // leastLoad balancer spreads connections over (see Generate).
 const slotBalancerExpected = 2
+
+// SlotShortlistSize is how many members the daemon's shortlist names per
+// slot: exactly the balancer's spread, so the shortlist decides which
+// members carry traffic and leastLoad only steps outside it on failure.
+const SlotShortlistSize = slotBalancerExpected
+
+// SlotBalancerTolerance is the failure fraction of a node's observatory
+// window above which leastLoad stops choosing it. Without it (xray's
+// default 0 disables the check) a node that lost two of its last three
+// pings stayed eligible as long as its one good ping was steady. With the
+// DefaultProbeSampling window of six this drops a node at four failures.
+// Not lower: on a lossy uplink every node loses two or three pings in six
+// (measured on the dev machine, direct pings), and a tolerance that
+// excludes all of them collapses the balancer onto its single fallback.
+const SlotBalancerTolerance = 0.5
+
+// slotDemotedCost is the leastLoad cost given to members outside the
+// daemon's shortlist. xray multiplies a node's RTT deviation by the square
+// root of its cost before sorting, so this is a ×10⁶ penalty: any
+// shortlisted member that is alive and within tolerance sorts ahead of every
+// demoted one, and a demoted member is still picked — best-deviation first —
+// the moment a shortlisted one drops out. It stays a ranking, never an
+// exclusion. (Deviations are at most the ping timeout, ~5e9ns; ×10⁶ keeps
+// xray's float→Duration conversion far from overflow.)
+const slotDemotedCost = 1e12
 
 // Generate produces a full xray-core JSON config from entries.
 //
@@ -262,16 +288,48 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		// every master connection failed for the first ~interval) and when
 		// every member's last pings failed. Either way a member that might
 		// work beats a guaranteed failure.
+		//
+		// leastLoad sorts by RTT deviation first and average RTT only second,
+		// so on its own "best two" means "the two steadiest", and a steady
+		// 700ms node beats a 120ms one with 20ms of jitter. When the daemon
+		// has a shortlist (Preferred, ranked on average + jitter + failures),
+		// costs push everything else behind it; see slotDemotedCost.
+		settings := map[string]any{
+			"expected":  slotBalancerExpected,
+			"tolerance": SlotBalancerTolerance,
+		}
+		fallback := ""
+		if len(slot.Members) > 0 {
+			fallback = slot.Members[0].Key
+		}
+		if pref := slot.presentPreferred(); len(pref) > 0 {
+			costs := make([]any, 0, len(pref)+1)
+			for _, k := range pref {
+				costs = append(costs, map[string]any{
+					"regexp": true,
+					"match":  "^" + regexp.QuoteMeta(SlotMemberTag(slot.Index, k)) + "$",
+					"value":  1,
+				})
+			}
+			// First match wins, so this catches every member not listed above.
+			costs = append(costs, map[string]any{
+				"regexp": false,
+				"match":  SlotOutboundPrefix(slot.Index),
+				"value":  slotDemotedCost,
+			})
+			settings["costs"] = costs
+			fallback = pref[0]
+		}
 		balancer := map[string]any{
 			"tag":      SlotBalancerTag(slot.Index),
 			"selector": []string{SlotOutboundPrefix(slot.Index)},
 			"strategy": map[string]any{
 				"type":     "leastLoad",
-				"settings": map[string]any{"expected": slotBalancerExpected},
+				"settings": settings,
 			},
 		}
-		if len(slot.Members) > 0 {
-			balancer["fallbackTag"] = SlotMemberTag(slot.Index, slot.Members[0].Key)
+		if fallback != "" {
+			balancer["fallbackTag"] = SlotMemberTag(slot.Index, fallback)
 		}
 		bal, _ := json.Marshal(balancer)
 		out.Routing.Balancers = append(out.Routing.Balancers, bal)

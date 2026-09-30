@@ -13,12 +13,25 @@ import (
 
 func TestDiverseOrder(t *testing.T) {
 	route := map[string]string{"a": "X", "b": "X", "c": "Y", "d": "Z", "e": "Y"}
-	got := diverseOrder([]string{"a", "b", "c", "d", "e"}, func(n string) string { return route[n] })
+	got := diverseOrder([]string{"a", "b", "c", "d", "e"}, func(n string) []string { return []string{route[n]} })
 	if want := []string{"a", "c", "d", "b", "e"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
+	// Different ways in, one shared way out: a and c leave from the same
+	// exit IP, so c is not a diverse hedge for a: d and e go first.
+	exit := map[string]string{"a": "exit:1", "c": "exit:1"}
+	keys := func(n string) []string {
+		k := []string{route[n]}
+		if e := exit[n]; e != "" {
+			k = append(k, e)
+		}
+		return k
+	}
+	if got, want := diverseOrder([]string{"a", "b", "c", "d", "e"}, keys), []string{"a", "d", "e", "b", "c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("order with exits = %v, want %v", got, want)
+	}
 	two := []string{"a", "b"}
-	if got := diverseOrder(two, func(string) string { return "same" }); !reflect.DeepEqual(got, two) {
+	if got := diverseOrder(two, func(string) []string { return []string{"same"} }); !reflect.DeepEqual(got, two) {
 		t.Fatalf("two-member binding reordered: %v", got)
 	}
 }

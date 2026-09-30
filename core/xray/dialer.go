@@ -35,13 +35,19 @@ const (
 // Window and timeout are sized for a lossy uplink: with 2 samples and a 3s
 // timeout, one retransmitted handshake failed a node and a second flipped
 // the balancer, so on a flaky link nodes churned constantly (and the
-// failures filled the error log). Three samples and 5s ride out a single
-// slow ping; a node that is actually dead still fails every one.
+// failures filled the error log). 5s rides out a single slow ping; a node
+// that is actually dead still fails every one.
+//
+// Six samples (a 30s window), not three: leastLoad ranks nodes by the
+// standard deviation of their window, and the daemon's shortlist
+// (daemon/xray_shortlist.go) reads the same window's average and failure
+// count. Over three pings a deviation is mostly noise, and one lost ping
+// is a 33% failure rate — enough to cross the balancer's tolerance.
 const (
 	DefaultProbeURL      = "http://www.gstatic.com/generate_204"
 	DefaultProbeInterval = "5s" // per-node health-ping cadence
-	DefaultProbeSampling = 3     // rolling window of samples per node
-	DefaultProbeTimeout  = "5s"  // a ping past this counts as a failure
+	DefaultProbeSampling = 6    // rolling window of samples per node
+	DefaultProbeTimeout  = "5s" // a ping past this counts as a failure
 	// ObservatorySelectorPrefix matches every slot member outbound so a
 	// single top-level burst observatory feeds all per-master balancers.
 	ObservatorySelectorPrefix = "slot"
@@ -128,11 +134,37 @@ type DialerMember struct {
 // health-pings on its own, so six masters on one subscription used to mean
 // six probes per node per interval — through the same link the user's
 // traffic is trying to use.
+//
+// Preferred, when non-empty, is the daemon's shortlist of member keys, best
+// first (daemon/xray_shortlist.go). The balancer spreads connections over
+// these and falls back to the rest only when they fail — see Generate.
 type DialerSlot struct {
-	Master  string
-	Aliases []string
-	Index   int
-	Members []DialerMember
+	Master    string
+	Aliases   []string
+	Index     int
+	Members   []DialerMember
+	Preferred []string
+}
+
+// presentPreferred returns the Preferred keys that are still members, in
+// order. A shortlist can name a member that has since been parked or left
+// its pool; costing a tag that isn't there would do nothing, and naming it
+// as the fallback would point the balancer at a missing outbound.
+func (s DialerSlot) presentPreferred() []string {
+	if len(s.Preferred) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(s.Members))
+	for _, m := range s.Members {
+		have[m.Key] = true
+	}
+	var out []string
+	for _, k := range s.Preferred {
+		if have[k] {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // SlotMasters returns every master wired to the slot, owner first.

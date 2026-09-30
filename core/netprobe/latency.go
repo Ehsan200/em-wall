@@ -174,6 +174,12 @@ type sample struct {
 	// outages holds when recent deadStrikeThreshold streaks began, for the
 	// flap rule.
 	outages []time.Time
+
+	// Real-traffic handshake timing relative to each destination's norm
+	// (handshake.go): smoothed log ratio, sample count, last update.
+	slow   float64
+	slowN  int
+	slowAt time.Time
 }
 
 // suspect reports an outage in progress: deadStrikeThreshold consecutive
@@ -182,7 +188,7 @@ func (s sample) suspect() bool { return s.fails >= deadStrikeThreshold }
 
 // cost is a healthy name's effective ranking cost (see failRateWeight).
 func (s sample) cost(rate float64, now time.Time) time.Duration {
-	c := time.Duration(float64(s.rtt) * (1 + failRateWeight*rate))
+	c := time.Duration(float64(s.rtt) * s.handshakeFactor(now) * (1 + failRateWeight*rate))
 	if !s.lastFail.IsZero() {
 		if age := now.Sub(s.lastFail); age < recentFailWindow {
 			c += time.Duration(float64(recentFailPenalty) * float64(recentFailWindow-age) / float64(recentFailWindow))
@@ -216,6 +222,9 @@ type LatencyTracker struct {
 	graceUntil time.Time // failures before this are dropped (see resetGrace)
 	onTrip     func(name string, open bool, rate float64, samples int)
 	onSuspect  func(name string, suspect bool)
+
+	dests     map[string]*destTiming // per-destination handshake baseline (handshake.go)
+	destSweep time.Time
 }
 
 // NewLatencyTracker returns a tracker whose samples go stale (treated as
@@ -540,6 +549,7 @@ func (t *LatencyTracker) Probe(ctx context.Context, c Connector, name string, ta
 func (t *LatencyTracker) Reset() {
 	t.mu.Lock()
 	t.samples = make(map[string]sample)
+	t.dests = nil
 	t.graceUntil = t.now().Add(resetGrace)
 	t.mu.Unlock()
 }

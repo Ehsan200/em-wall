@@ -589,8 +589,9 @@ type XraySubImportNodeParams struct {
 }
 
 // XrayObservatoryResult carries the current balancer winners (fingerprints
-// of the fastest node each master dialer is routing through), parsed daemon-
-// side from `xray api bi` text. Raw is kept for debugging. Empty when no
+// of the nodes each master dialer is spreading connections over — the
+// daemon's shortlist when it has one, see daemon/xray_shortlist.go), parsed
+// daemon-side from `xray api bi` text. Raw is kept for debugging. Empty when no
 // dialer slots are running.
 type XrayObservatoryResult struct {
 	Winners []string `json:"winners"`

@@ -55,6 +55,10 @@ type nodeStatus struct {
 	HealthPing struct {
 		All  int `json:"all"`
 		Fail int `json:"fail"`
+		// Over the window's successful pings only, in ns. xray reports a
+		// deviation of half the average when fewer than two succeeded.
+		Average   int64 `json:"average"`
+		Deviation int64 `json:"deviation"`
 	} `json:"health_ping"`
 }
 
@@ -273,8 +277,9 @@ func withoutParked(members []xray.DialerMember, parked map[string]bool) []xray.D
 }
 
 // PollNodeHealth reads per-node health from xray's metrics endpoint, parks
-// nodes that have stayed dead, returns parked nodes whose time is up, and
-// applies any change live. Called on nodeHealthPollInterval from main.go.
+// nodes that have stayed dead, returns parked nodes whose time is up,
+// re-ranks each slot's shortlist (xray_shortlist.go), and applies any
+// change live. Called on nodeHealthPollInterval from main.go.
 func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 	s.mu.Lock()
 	running := s.enabled && s.cmd != nil
@@ -285,16 +290,21 @@ func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 	}
 
 	var events []parkEvent
+	var moved []shortlistChange
 	if len(slots) > 0 {
 		byTag, err := s.fetchObservatory(ctx)
 		if err != nil {
 			return // metrics not up yet (first seconds after a start)
 		}
 		events = s.parker.observe(slots, byTag)
+		moved = s.shortlist.observe(slots, byTag)
 	}
 	events = append(events, s.parker.release()...)
-	if len(events) == 0 {
+	if len(events) == 0 && len(moved) == 0 {
 		return
+	}
+	for _, c := range moved {
+		s.logger.Printf("xray supervisor: master %s shortlist %v → %v", c.master, c.from, c.to)
 	}
 	for _, e := range events {
 		if e.parked {

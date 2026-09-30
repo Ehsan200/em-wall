@@ -379,3 +379,74 @@ func TestSlotMemberKeyRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// slotBalancer returns slot 0's balancer from a generated config.
+func slotBalancer(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var cfg struct {
+		Routing struct {
+			Balancers []map[string]any `json:"balancers"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, b := range cfg.Routing.Balancers {
+		if b["tag"] == SlotBalancerTag(0) {
+			return b
+		}
+	}
+	t.Fatalf("no balancer %q", SlotBalancerTag(0))
+	return nil
+}
+
+func TestGenerate_SlotPreferredBecomesCosts(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"freedom"}`)
+	members := []DialerMember{{Key: "a", Outbound: ob}, {Key: "b", Outbound: ob}, {Key: "c", Outbound: ob}}
+	master := Config{Name: "m", Enabled: true, Dialer: "xraysub:s", Outbound: `{"protocol":"freedom"}`}
+
+	// Without a shortlist: tolerance set, no costs, fallback = first member.
+	raw, err := Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{Master: "m", Index: 0, Members: members}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := slotBalancer(t, raw)
+	settings := b["strategy"].(map[string]any)["settings"].(map[string]any)
+	if settings["tolerance"] != SlotBalancerTolerance {
+		t.Errorf("tolerance = %v, want %v", settings["tolerance"], SlotBalancerTolerance)
+	}
+	if _, ok := settings["costs"]; ok {
+		t.Errorf("costs emitted without a shortlist: %v", settings["costs"])
+	}
+	if b["fallbackTag"] != SlotMemberTag(0, "a") {
+		t.Errorf("fallbackTag = %v, want first member", b["fallbackTag"])
+	}
+
+	// With one: each shortlisted tag costs 1 (exact regexp), then a prefix
+	// catch-all demotes the rest; fallback = head of the shortlist. A
+	// shortlisted key that is no longer a member is ignored.
+	raw, err = Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{
+		Master: "m", Index: 0, Members: members, Preferred: []string{"gone", "c", "b"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = slotBalancer(t, raw)
+	if b["fallbackTag"] != SlotMemberTag(0, "c") {
+		t.Errorf("fallbackTag = %v, want %q", b["fallbackTag"], SlotMemberTag(0, "c"))
+	}
+	costs := b["strategy"].(map[string]any)["settings"].(map[string]any)["costs"].([]any)
+	if len(costs) != 3 {
+		t.Fatalf("costs = %v, want 2 exact + 1 catch-all", costs)
+	}
+	for i, k := range []string{"c", "b"} {
+		c := costs[i].(map[string]any)
+		if c["regexp"] != true || c["match"] != "^"+SlotMemberTag(0, k)+"$" || c["value"] != float64(1) {
+			t.Errorf("costs[%d] = %v, want exact match on %q with value 1", i, c, SlotMemberTag(0, k))
+		}
+	}
+	last := costs[2].(map[string]any)
+	if last["regexp"] != false || last["match"] != SlotOutboundPrefix(0) || last["value"] != slotDemotedCost {
+		t.Errorf("catch-all cost = %v", last)
+	}
+}

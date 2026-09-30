@@ -431,7 +431,7 @@ defineExpose({ refresh });
         <div v-for="n in nodesBySub[s.id]" :key="n.fingerprint"
              class="row" style="justify-content: space-between; align-items: center; gap: 8px; padding: 5px 8px; background: var(--panel-2); border-radius: 6px">
           <div class="row" style="gap: 8px; align-items: center; min-width: 0; flex-wrap: wrap">
-            <span v-if="isWinner(n)" title="current fastest" style="color: var(--success)">★</span>
+            <span v-if="isWinner(n)" title="Carrying master traffic now — one of the nodes the balancer spreads connections over" style="color: var(--success)">★</span>
             <span style="font-size: 12px">{{ n.name }}</span>
             <span v-if="n.disabled" class="tag tag-off" style="font-size: 10px">disabled</span>
             <span v-else-if="n.active" class="tag tag-route" style="font-size: 10px">active</span>

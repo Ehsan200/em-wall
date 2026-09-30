@@ -51,14 +51,15 @@ const xrayRecentLineCap = 80
 
 type xraySupervisor struct {
 	binaryPath  string
-	dataDir     string      // contains geoip.dat + geosite.dat
-	runtimeDir  string      // generated config + scratch
-	apiAddr     string      // xray API address; "" = apiServerAddr() (tests override)
-	metricsAddr string      // xray metrics address; "" = xray.MetricsPort (tests override)
-	parker      *nodeParker // parks pool nodes that stay dead; nil parks nothing
-	routes      *routeKeys  // route keys published for the proxy tunnel; nil-safe
-	live        *liveConns  // open proxied connections, marked stale on a path change; nil-safe
-	logDir      string      // where xray writes its own access/error logs
+	dataDir     string         // contains geoip.dat + geosite.dat
+	runtimeDir  string         // generated config + scratch
+	apiAddr     string         // xray API address; "" = apiServerAddr() (tests override)
+	metricsAddr string         // xray metrics address; "" = xray.MetricsPort (tests override)
+	parker      *nodeParker    // parks pool nodes that stay dead; nil parks nothing
+	shortlist   *slotShortlist // best members per slot, from observatory data; nil = leastLoad alone
+	routes      *routeKeys     // route keys published for the proxy tunnel; nil-safe
+	live        *liveConns     // open proxied connections, marked stale on a path change; nil-safe
+	logDir      string         // where xray writes its own access/error logs
 	xrayStore   *xray.Store
 	proxyStore  *proxy.Store
 	logger      *log.Logger
@@ -97,6 +98,7 @@ func newXraySupervisor(binary, dataDir, runtimeDir, logDir string, xs *xray.Stor
 		logger:     logger,
 		tail:       newXrayLineRing(xrayRecentLineCap),
 		parker:     newNodeParker(),
+		shortlist:  newSlotShortlist(),
 	}
 	if fi, err := os.Stat(binary); err == nil && !fi.IsDir() {
 		sup.enabled = true
@@ -370,7 +372,12 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 			continue
 		}
 		slotByKey[key] = len(slots)
-		slots = append(slots, xray.DialerSlot{Master: m.Name, Index: idx, Members: members})
+		slots = append(slots, xray.DialerSlot{
+			Master:    m.Name,
+			Index:     idx,
+			Members:   members,
+			Preferred: s.shortlist.preferred(m.Name, members),
+		})
 		idx++
 	}
 	return slots, nil

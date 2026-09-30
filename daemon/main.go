@@ -153,7 +153,8 @@ func main() {
 	// for connections that arrive without a DNS-time mapping, so the
 	// engine must exist before the tunnel is built.
 	connHealth := newConnStats()
-	proxyTunnel, proxyTunName, proxyFwd := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, routes, log.Default())
+	exits := &exitKeys{} // measured in the background (see the exit-key prober below)
+	proxyTunnel, proxyTunName, proxyFwd := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, routes, exits, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
 	}
@@ -355,6 +356,32 @@ func main() {
 				continue
 			}
 			probeProxies(ctx, proxyStore, proxyLatency, names, rankHost, rankPort)
+		}
+	}()
+
+	// Exit-IP prober: measures where each member of a multi-member binding
+	// leaves the internet, so members sharing an exit are raced apart and
+	// avoided together for a site that bans it (see exitkeys.go).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(exitKeyFirstDelay):
+		}
+		t := time.NewTicker(exitKeyProbeInterval)
+		defer t.Stop()
+		for {
+			if rs, err := store.List(ctx); err == nil {
+				names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
+				probeExitKeys(ctx, proxyStore, exits, names, log.Default())
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
 		}
 	}()
 
