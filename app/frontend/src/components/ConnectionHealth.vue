@@ -108,6 +108,11 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
         <span class="sub">raced or retried dials</span>
       </div>
       <div class="tile">
+        <span class="label">Exit switches</span>
+        <span class="value">{{ stats?.rebinds ?? 0 }}</span>
+        <span class="sub">sites moved to another member</span>
+      </div>
+      <div class="tile">
         <span class="label">QUIC / UDP silent</span>
         <span class="value" :class="failClass(udpSilentPct)">{{ pct(udpSilentPct) }}</span>
         <span class="sub">{{ stats?.udpSilent ?? 0 }} of {{ stats?.udpFlows ?? 0 }} flows</span>

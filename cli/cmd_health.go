@@ -56,6 +56,7 @@ func (a *app) cmdHealth(args []string) int {
 	rows = append(rows,
 		[]string{"setup p50 / p95", setupMs(h.SetupP50Ms) + " / " + setupMs(h.SetupP95Ms)},
 		[]string{"extra attempts", strconv.Itoa(h.ExtraAttempts)},
+		[]string{"exit switches", strconv.Itoa(h.Rebinds)},
 		[]string{"udp flows silent", fmt.Sprintf("%d of %d (%s)", h.UDPSilent, h.UDPFlows, percent(h.UDPSilent, h.UDPFlows))},
 		[]string{"xray restarts / live", fmt.Sprintf("%d / %d", h.XrayRestarts, h.XrayLiveApplies)},
 		[]string{"parked nodes", strconv.Itoa(len(h.ParkedNodes))},

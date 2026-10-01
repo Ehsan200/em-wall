@@ -49,6 +49,7 @@ func (d *handlerDeps) healthStats(ctx context.Context) ipc.HealthStatsDTO {
 		SetupP50Ms:    snap.SetupP50,
 		SetupP95Ms:    snap.SetupP95,
 		ExtraAttempts: snap.Hedges,
+		Rebinds:       snap.Rebinds,
 		UDPFlows:      snap.UDPFlows,
 		UDPSilent:     snap.UDPSilent,
 		Upstreams:     []ipc.UpstreamHealthDTO{},

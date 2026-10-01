@@ -95,6 +95,7 @@ type statBucket struct {
 	ok        int
 	failed    map[string]int
 	hedges    int
+	rebinds   int
 	setup     setupHist
 	udpFlows  int
 	udpSilent int
@@ -192,6 +193,16 @@ func (c *connStats) hedged() {
 	c.cur().hedges++
 }
 
+// rebound counts a destination's sticky binding moving to another member.
+func (c *connStats) rebound() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cur().rebinds++
+}
+
 func (c *connStats) udpFlow(silent bool) {
 	if c == nil {
 		return
@@ -208,6 +219,7 @@ func (c *connStats) udpFlow(silent bool) {
 // connSnapshot is the window's totals.
 type connSnapshot struct {
 	Conns, OK, Hedges   int
+	Rebinds             int
 	Failed              map[string]int
 	SetupP50, SetupP95  int64
 	UDPFlows, UDPSilent int
@@ -239,6 +251,7 @@ func (c *connStats) snapshot() connSnapshot {
 		out.Conns += b.conns
 		out.OK += b.ok
 		out.Hedges += b.hedges
+		out.Rebinds += b.rebinds
 		out.UDPFlows += b.udpFlows
 		out.UDPSilent += b.udpSilent
 		for k, n := range b.failed {

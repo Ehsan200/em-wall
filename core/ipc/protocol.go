@@ -229,6 +229,7 @@ type HealthStatsDTO struct {
 	SetupP50Ms    int64          `json:"setupP50Ms"`
 	SetupP95Ms    int64          `json:"setupP95Ms"`
 	ExtraAttempts int            `json:"extraAttempts"` // raced/fallback dials beyond the first
+	Rebinds       int            `json:"rebinds"`       // destinations moved to another set member
 	UDPFlows      int            `json:"udpFlows"`
 	UDPSilent     int            `json:"udpSilent"`
 

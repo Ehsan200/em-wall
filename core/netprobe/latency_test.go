@@ -604,3 +604,58 @@ func TestOutage_LockstepOutagesDoNotFlap(t *testing.T) {
 		}
 	}
 }
+
+// One failure (probe below the outage streak) keeps the incumbent first:
+// the race hedges past it if it really is silent, and moving on one blip
+// sent sites to a new exit on every hiccup.
+func TestLatencyTracker_UnknownIncumbentKeepsSeat(t *testing.T) {
+	tr := NewLatencyTracker(time.Minute)
+	tr.Record("inc", 100*time.Millisecond, true)
+	tr.Record("other", 100*time.Millisecond, true)
+	tr.Record("inc", 0, false)
+	if got := tr.RankFrom([]string{"other", "inc"}, "inc"); got[0] != "inc" {
+		t.Fatalf("rank = %v, want inc held first after one failure", got)
+	}
+}
+
+// A failed connection extends the streak but doesn't knock the name out of
+// the healthy tier — only a failed probe (a measurement) does.
+func TestLatencyTracker_TrafficFailureKeepsHealthy(t *testing.T) {
+	tr := NewLatencyTracker(time.Minute)
+	tr.Record("a", 100*time.Millisecond, true)
+	tr.Record("b", time.Second, true)
+	tr.Fail("a")
+	if got := tr.Rank([]string{"b", "a"}); got[0] != "a" {
+		t.Fatalf("rank = %v, want a still healthy and first", got)
+	}
+	tr.Fail("a") // second in a row: an outage
+	if got := tr.Rank([]string{"a", "b"}); got[0] != "b" {
+		t.Fatalf("rank = %v, want suspect a behind b", got)
+	}
+}
+
+func TestLatencyTracker_SeatGrace(t *testing.T) {
+	tr := NewLatencyTracker(time.Hour)
+	now := time.Now()
+	tr.now = func() time.Time { return now }
+	if got := tr.Seat("never-seen"); got != SeatHeld {
+		t.Fatalf("unknown name seat = %v, want held", got)
+	}
+	tr.Record("a", 100*time.Millisecond, true)
+	tr.Record("a", 0, false)
+	if got := tr.Seat("a"); got != SeatHeld {
+		t.Fatalf("one failure seat = %v, want held", got)
+	}
+	tr.Record("a", 0, false)
+	if got := tr.Seat("a"); got != SeatOutage {
+		t.Fatalf("fresh outage seat = %v, want outage", got)
+	}
+	now = now.Add(SeatGrace)
+	if got := tr.Seat("a"); got != SeatLost {
+		t.Fatalf("outage past grace seat = %v, want lost", got)
+	}
+	tr.Record("a", 100*time.Millisecond, true)
+	if got := tr.Seat("a"); got != SeatHeld {
+		t.Fatalf("recovered seat = %v, want held", got)
+	}
+}

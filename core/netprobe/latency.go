@@ -134,6 +134,28 @@ const (
 	rankHysteresisFloor    = 40 * time.Millisecond
 )
 
+// SeatGrace is how long an outage may last before the name loses the
+// destinations bound to it (see Seat). On an unstable uplink members drop
+// out for a few seconds and come straight back, dozens of times an hour;
+// moving every site off a member on each of those blips sent the sites to
+// a new exit IP every few minutes, which origins read as a hijacked
+// session. A connection during the outage is still carried by a sibling —
+// the race hedges past a silent member — only the binding stays put.
+const SeatGrace = 15 * time.Second
+
+// Seat is a name's claim on the destinations already bound to it.
+type Seat int
+
+const (
+	// SeatHeld: healthy or merely unproven — keep the binding.
+	SeatHeld Seat = iota
+	// SeatOutage: down, but for less than SeatGrace — keep the binding;
+	// siblings carry connections meanwhile.
+	SeatOutage
+	// SeatLost: breaker open, or down past SeatGrace — move the binding.
+	SeatLost
+)
+
 // Stability. Healthy names are ranked by an effective cost, not raw RTT: a
 // member that answers 40ms faster but dropped a connection a minute ago
 // costs more in practice than a slightly slower one that has not failed —
@@ -163,6 +185,8 @@ type sample struct {
 	fails int // consecutive failures; reset by any success
 
 	lastFail time.Time // most recent failure, probe or traffic; for stability
+
+	suspectSince time.Time // when the current outage began; for SeatGrace
 
 	// window holds the last breakerWindow outcomes, oldest first.
 	window []outcome
@@ -299,7 +323,14 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 			s.rtt = rtt
 		}
 	} else {
-		s.ok = false
+		// A failed connection extends the streak but leaves the last
+		// measurement standing: one bad destination says little about the
+		// path, and flipping ok here dropped the name out of the healthy
+		// tier — taking every site's sticky seat with it — on one failure.
+		// A probe failure is a measurement, so it does flip it.
+		if !fromTraffic {
+			s.ok = false
+		}
 		s.fails++
 		s.lastFail = now
 	}
@@ -322,6 +353,7 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 	isSuspect := s.suspect()
 	switch {
 	case isSuspect && !wasSuspect:
+		s.suspectSince = now
 		if !t.mostOthersDownLocked(name) {
 			s.outages = append(trimTimes(s.outages, now, flapWindow), now)
 		}
@@ -558,6 +590,26 @@ func (t *LatencyTracker) Reset() {
 	t.mu.Unlock()
 }
 
+// Seat reports name's claim on the destinations bound to it (see
+// SeatGrace). An unknown name holds its seat.
+func (t *LatencyTracker) Seat(name string) Seat {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	s, has := t.samples[name]
+	switch {
+	case !has:
+		return SeatHeld
+	case s.open:
+		return SeatLost
+	case s.suspect():
+		if t.now().Sub(s.suspectSince) >= SeatGrace {
+			return SeatLost
+		}
+		return SeatOutage
+	}
+	return SeatHeld
+}
+
 // Unsettled returns the names that are not currently healthy — never
 // measured, stale, failing, suspect or breaker-open — in input order. The
 // prober re-checks these between full rounds so a node that starts
@@ -628,7 +680,9 @@ func (t *LatencyTracker) Rank(names []string) []string {
 // incumbent, when it is one of names and still healthy, is held at the
 // front unless the best challenger beats it by the hysteresis margin —
 // that is what stops a site's connections from scattering across exits.
-// An incumbent that has gone unknown or dead loses its seat immediately.
+// An unknown incumbent (stale, or failing but short of an outage) is held
+// at the front outright: one failure is noise, and the race hedges past it
+// if it really is silent. A suspect or breaker-open incumbent is not.
 func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 	if len(names) < 2 {
 		return names
@@ -691,10 +745,10 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 	// better by both margins.
 	if incumbent != "" && rs[0].name != incumbent {
 		for i, r := range rs {
-			if r.name != incumbent || r.tier != tierHealthy {
+			if r.name != incumbent || r.tier > tierUnknown {
 				continue
 			}
-			if !beatsByMargin(rs[0], r) {
+			if r.tier == tierUnknown || !beatsByMargin(rs[0], r) {
 				copy(rs[1:i+1], rs[:i])
 				rs[0] = r
 			}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -302,12 +303,59 @@ func stickyKeys(entry proxy.Entry) [2]string {
 	return [2]string{stickyKey(entry), siteKey(entry.Hostname)}
 }
 
-// rememberUpstream records name as the upstream carrying entry, for its
-// host and its site.
-func (pf *proxyForwarder) rememberUpstream(entry proxy.Entry, name string) {
+// settleBinding records that used carried a connection for entry, and
+// decides — per sticky key — whether the destination's binding moves to it.
+// names is the order the connection tried members in; failed, the members
+// that failed it (their misses are already counted by noteUpstreamFailure).
+//
+// Carrying one connection is not enough to take a destination over. On a
+// lossy uplink the race hands connections to a sibling whenever the
+// incumbent is a second slow, and every member drops out for a few seconds
+// many times an hour; rebinding on each of those moved sites to a new exit
+// IP every few minutes, and the exit change is what origins notice. So the
+// binding moves only when the incumbent has really lost it:
+//   - it is no longer in the rule's binding;
+//   - netprobe says it lost its seat (breaker open, or down past SeatGrace);
+//   - ranking put a working member ahead of it on purpose (better by the
+//     hysteresis margin, or siteAvoid ranked it last for this site);
+//   - it has missed this destination for stickyMoveAfter straight.
+//
+// A brief outage, or a lost race, leaves the binding where it is.
+func (pf *proxyForwarder) settleBinding(entry proxy.Entry, used string, names, failed []string) {
 	for _, k := range stickyKeys(entry) {
-		pf.sticky.Set(k, name)
+		cur := pf.sticky.Get(k)
+		if cur != "" && cur != used && !pf.bindingMoves(k, cur, entry, names, failed) {
+			continue
+		}
+		if cur != "" && cur != used {
+			pf.stats.rebound()
+			if ok, n := pf.sampler.allow("rebind|" + k); ok {
+				pf.logger.Printf("proxytun: %s moved %q → %q (+%d more suppressed)", k, cur, used, n)
+			}
+		}
+		pf.sticky.Set(k, used)
 	}
+}
+
+// bindingMoves reports whether key's binding to cur should give way to the
+// member that just carried a connection (see settleBinding).
+func (pf *proxyForwarder) bindingMoves(key, cur string, entry proxy.Entry, names, failed []string) bool {
+	if !slices.Contains(entry.ProxyNames, cur) {
+		return true
+	}
+	seat := netprobe.SeatHeld
+	if pf.latency != nil {
+		seat = pf.latency.Seat(cur)
+	}
+	switch {
+	case seat == netprobe.SeatLost:
+		return true
+	case slices.Contains(failed, cur):
+		return false // miss already counted; it moved the binding if it was time
+	case seat == netprobe.SeatHeld && len(names) > 0 && names[0] != cur:
+		return true // ranked behind a member that is better by the margin, or avoided for this site
+	}
+	return pf.sticky.Miss(key, cur)
 }
 
 // siteKey groups a hostname with its siblings under the registrable
@@ -569,8 +617,12 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 // strike against it so ranking demotes it once the failure repeats.
 func (pf *proxyForwarder) noteUpstreamFailure(entry proxy.Entry, name string) {
 	pf.stats.blamed(name)
-	for _, k := range stickyKeys(entry) { // don't hand a failing member to siblings either
-		pf.sticky.Drop(k, name)
+	for _, k := range stickyKeys(entry) {
+		// One failure doesn't move the destination (see settleBinding); a
+		// run of them past stickyMoveAfter does, for host and site alike.
+		if pf.sticky.Miss(k, name) {
+			pf.sticky.Drop(k, name)
+		}
 	}
 	if site := avoidSite(entry); pf.avoid.strike(site, pf.avoidKeys(name)...) {
 		if ok, n := pf.sampler.allow("avoid|" + site + "|" + name); ok {
@@ -684,7 +736,7 @@ func (pf *proxyForwarder) dialBinding(ctx context.Context, entry proxy.Entry, lo
 				pf.witness.saw(used) // it answered the hello: data came back
 				pf.noteSiteCarried(entry, used)
 			}
-			pf.rememberUpstream(entry, used)
+			pf.settleBinding(entry, used, names, failed)
 			return up, used, int64(len(hello)), nil
 		}
 		if ctx.Err() != nil || errors.Is(lastErr, errDestinationRefused) {
@@ -1409,6 +1461,7 @@ func humanBytes(n int64) string {
 // all when the binding has a single name.
 func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, tried map[string]struct{}) (*proxy.UDPSession, string, error) {
 	var lastErr error
+	var failed []string
 	names := pf.orderedNames(entry)
 	if len(tried) > 0 {
 		fresh := make([]string, 0, len(names))
@@ -1439,6 +1492,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 			if err != nil {
 				lastErr = err
 				pf.noteUpstreamFailure(entry, name)
+				failed = appendFailed(failed, name)
 				continue
 			}
 			// Only the FIRST association of a flow records the destination's
@@ -1448,7 +1502,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 			// later) — so it must not drag this destination's TCP
 			// connections onto a different exit as well.
 			if len(tried) == 0 {
-				pf.rememberUpstream(entry, name)
+				pf.settleBinding(entry, name, names, failed)
 			}
 			return sess, name, nil
 		}

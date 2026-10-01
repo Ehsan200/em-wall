@@ -113,8 +113,18 @@ func TestIncumbentFallsBackToSite(t *testing.T) {
 	if got := pf.incumbent(proxy.Entry{Hostname: "rr5---sn-b.googlevideo.com"}); got != "own" {
 		t.Fatalf("incumbent = %q, want the host's own binding first", got)
 	}
-	// A member that fails for a host is also taken off the site.
-	pf.noteUpstreamFailure(proxy.Entry{Hostname: "rr5---sn-b.googlevideo.com"}, "good")
+	// One failure is noise: the site keeps its member.
+	now := time.Now()
+	pf.sticky.now = func() time.Time { return now }
+	failing := proxy.Entry{Hostname: "rr5---sn-b.googlevideo.com"}
+	pf.noteUpstreamFailure(failing, "good")
+	if got := pf.sticky.Get(siteKey("x.googlevideo.com")); got != "good" {
+		t.Fatalf("site dropped its member on one failure: %q", got)
+	}
+	// A member that keeps failing a host past stickyMoveAfter is also
+	// taken off the site.
+	now = now.Add(stickyMoveAfter)
+	pf.noteUpstreamFailure(failing, "good")
 	if got := pf.sticky.Get(siteKey("x.googlevideo.com")); got != "" {
 		t.Fatalf("failing member still offered to siblings: %q", got)
 	}
