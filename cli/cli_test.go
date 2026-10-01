@@ -182,6 +182,36 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestHealthPools(t *testing.T) {
+	s := newStub(t, map[string]stubHandler{
+		ipc.MethodHealthPools: func(json.RawMessage) (any, error) {
+			return []ipc.PoolTimelineDTO{{
+				Master: "nyc", Masters: []string{"nyc", "nyc-2"}, IntervalSec: 10,
+				Times: []int64{100, 110, 120}, UplinkDown: []bool{false, true, false},
+				PickLosses: 1, Flappers: 1,
+				Nodes: []ipc.PoolNodeTimelineDTO{{
+					Key: "k1", Name: "nap/usa-1", Role: "f", States: "ADA", Roles: "ffi",
+					RTTMs: []int{90, 0, 95}, UpBytes: []int64{0, 0, 0}, DownBytes: []int64{0, 0, 0},
+					UptimePct: 100, Flips: 2, AvgRTTMs: 92, TotalDown: 3 << 20,
+				}},
+			}}, nil
+		},
+	})
+	code, out, _ := runCLI(s.sock, "health", "pools", "nyc", "--window", "5m")
+	if code != exitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	var p ipc.HealthPoolsParams
+	if err := json.Unmarshal(s.params(t, ipc.MethodHealthPools), &p); err != nil || p.Master != "nyc" || p.WindowSec != 300 {
+		t.Errorf("params = %+v (%v)", p, err)
+	}
+	for _, want := range []string{"pool nyc (shared by nyc, nyc-2)", "pick losses 1", ".!.", "█X▄", "nap/usa-1", "92ms", "3.0M", "fallback"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("health pools output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRulesAdd(t *testing.T) {
 	s := newStub(t, map[string]stubHandler{
 		ipc.MethodRulesAdd: func(json.RawMessage) (any, error) {

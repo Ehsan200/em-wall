@@ -13,6 +13,19 @@ func registerHealthHandlers(s *ipc.Server, d *handlerDeps) {
 	s.Handle(ipc.MethodHealthStats, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return d.healthStats(ctx), nil
 	})
+	s.Handle(ipc.MethodHealthPools, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.HealthPoolsParams
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err
+			}
+		}
+		if d.xraySup == nil {
+			return []ipc.PoolTimelineDTO{}, nil
+		}
+		window := time.Duration(p.WindowSec) * time.Second
+		return d.xraySup.timeline.snapshot(p.Master, window, d.poolNodeNames(ctx)), nil
+	})
 }
 
 func (d *handlerDeps) healthStats(ctx context.Context) ipc.HealthStatsDTO {

@@ -140,7 +140,10 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	// Metrics endpoint (loopback only) for per-node observatory health.
 	out.Metrics = json.RawMessage(`{"tag":"` + MetricsTag + `","listen":"127.0.0.1:` + strconv.Itoa(MetricsPort) + `"}`)
 
-	out.Policy = json.RawMessage(`{"levels":{"0":{"handshake":8,"connIdle":1800,"uplinkOnly":2,"downlinkOnly":5}}}`)
+	// Per-outbound byte counters (read from the metrics endpoint's stats)
+	// tell the daemon which pool node actually moved traffic and whether
+	// anything came back — what a passing health ping can't.
+	out.Policy = json.RawMessage(`{"levels":{"0":{"handshake":8,"connIdle":1800,"uplinkOnly":2,"downlinkOnly":5}},"system":{"statsOutboundUplink":true,"statsOutboundDownlink":true}}`)
 
 	// Blackhole FIRST. xray sends anything no routing rule matches to its
 	// first outbound; every inbound here has an explicit rule, so nothing

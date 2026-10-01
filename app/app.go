@@ -566,6 +566,15 @@ func (a *App) HealthStats() (ipc.HealthStatsDTO, error) {
 	return out, err
 }
 
+// HealthPools returns each master dialer pool's per-node health timeline
+// over the last windowSec seconds (≤ 0 = all the daemon keeps). master
+// narrows it to the pool that master rides on; "" = every pool.
+func (a *App) HealthPools(master string, windowSec int) ([]ipc.PoolTimelineDTO, error) {
+	var out []ipc.PoolTimelineDTO
+	err := a.call(ipc.MethodHealthPools, ipc.HealthPoolsParams{Master: master, WindowSec: windowSec}, &out)
+	return out, err
+}
+
 // ---- Xray subscriptions ----
 
 func (a *App) ListXraySubs() ([]ipc.XraySubDTO, error) {

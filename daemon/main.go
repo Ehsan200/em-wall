@@ -385,12 +385,13 @@ func main() {
 		}
 	}()
 
-	// Pool node health: park subscription nodes that stay dead so the
-	// observatory stops probing them (see xray_nodepark.go).
+	// Pool node health: record the pool timeline every tick, and park
+	// subscription nodes that stay dead so the observatory stops probing
+	// them (see xray_nodepark.go, xray_timeline.go).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		t := time.NewTicker(nodeHealthPollInterval)
+		t := time.NewTicker(nodeTimelineInterval)
 		defer t.Stop()
 		for {
 			select {

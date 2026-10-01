@@ -36,6 +36,7 @@ Usage:
 Commands:
   status                    daemon health, version, upstream, rule count
   health                    connection health: failures, setup time, upstreams
+  health pools [master]     per-node timeline of each master's subscription pool
   rules list                list stored rules
   rules add <pattern>       add a rule
   rules rm <id>...          delete rules

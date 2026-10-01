@@ -57,6 +57,8 @@ type xraySupervisor struct {
 	metricsAddr string         // xray metrics address; "" = xray.MetricsPort (tests override)
 	parker      *nodeParker    // parks pool nodes that stay dead; nil parks nothing
 	shortlist   *slotShortlist // best members per slot, from observatory data; nil = leastLoad alone
+	timeline    *poolTimeline  // recent per-node pool health, for the health view; nil records nothing
+	lastDecide  time.Time      // last park/shortlist round; touched only by PollNodeHealth
 	routes      *routeKeys     // route keys published for the proxy tunnel; nil-safe
 	live        *liveConns     // open proxied connections, marked stale on a path change; nil-safe
 	logDir      string         // where xray writes its own access/error logs
@@ -99,6 +101,7 @@ func newXraySupervisor(binary, dataDir, runtimeDir, logDir string, xs *xray.Stor
 		tail:       newXrayLineRing(xrayRecentLineCap),
 		parker:     newNodeParker(),
 		shortlist:  newSlotShortlist(),
+		timeline:   newPoolTimeline(),
 	}
 	if fi, err := os.Stat(binary); err == nil && !fi.IsDir() {
 		sup.enabled = true

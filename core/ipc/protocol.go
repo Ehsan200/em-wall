@@ -98,7 +98,81 @@ const (
 	// window: setup latency, failures by cause, per-upstream outcomes,
 	// xray restarts vs live applies, parked pool nodes.
 	MethodHealthStats = "health.stats"
+	// MethodHealthPools reports each master dialer pool's health timeline:
+	// per-node probe state, role and traffic over the last ~30 minutes.
+	// Observation only — it exists to show how a pool actually behaves
+	// (stable, or nodes dying and returning in waves) before any switching
+	// strategy is tuned against it.
+	MethodHealthPools = "health.pools"
 )
+
+// HealthPoolsParams narrows health.pools. Master matches a pool's owner or
+// any alias; empty = every pool. WindowSec ≤ 0 = the whole history.
+type HealthPoolsParams struct {
+	Master    string `json:"master,omitempty"`
+	WindowSec int    `json:"windowSec,omitempty"`
+}
+
+// Pool timeline cell codes: one byte per sample in PoolNodeTimelineDTO.States.
+const (
+	PoolCellAlive   = 'A' // every ping in xray's window answered
+	PoolCellFlaky   = 'F' // some pings in the window failed, at least one answered
+	PoolCellDead    = 'D' // every ping in the window failed
+	PoolCellUnknown = '?' // no pings yet (just loaded)
+	PoolCellParked  = 'P' // parked by the daemon (left out of the pool)
+	PoolCellAbsent  = ' ' // not a member of this pool at that moment
+)
+
+// Pool timeline role codes: one byte per sample in PoolNodeTimelineDTO.Roles.
+const (
+	PoolRoleFallback = 'f' // shortlist head / balancer fallbackTag; also carries traffic
+	PoolRoleActive   = 'a' // shortlisted (or the slot is small enough that all carry)
+	PoolRoleIdle     = 'i' // ranked out: only used if every active member fails
+	PoolRoleUnranked = 'u' // no shortlist yet; leastLoad picks among all
+	PoolRoleNone     = ' ' // not a member at that moment
+)
+
+// PoolTimelineDTO is one dialer pool's recent health history. Every
+// per-sample series (Times, UplinkDown, and each node's States, Roles,
+// RTTMs, UpBytes, DownBytes) has the same length, oldest first.
+type PoolTimelineDTO struct {
+	Master      string   `json:"master"`  // owning master
+	Masters     []string `json:"masters"` // every master sharing the pool, owner first
+	IntervalSec int      `json:"intervalSec"`
+	Times       []int64  `json:"times"` // unix seconds
+	// UplinkDown marks samples where no member answered at all — the
+	// user's own link, not the nodes. They are left out of every stat.
+	UplinkDown []bool `json:"uplinkDown"`
+
+	// PickLosses counts the times every carrying member (fallback +
+	// active) was dead at once while some other member answered: a real
+	// outage the current selection walked into.
+	PickLosses int `json:"pickLosses"`
+	// Flappers is how many members flipped between up and down at least
+	// twice in the window; ChurnPct the share that flipped at all.
+	Flappers int     `json:"flappers"`
+	ChurnPct float64 `json:"churnPct"`
+
+	Nodes []PoolNodeTimelineDTO `json:"nodes"`
+}
+
+// PoolNodeTimelineDTO is one pool member's history.
+type PoolNodeTimelineDTO struct {
+	Key       string  `json:"key"`
+	Name      string  `json:"name"`
+	Role      string  `json:"role"`   // role at the latest sample (PoolRole*)
+	States    string  `json:"states"` // PoolCell* per sample
+	Roles     string  `json:"roles"`  // PoolRole* per sample
+	RTTMs     []int   `json:"rttMs"`  // average ping RTT in xray's window; 0 = none
+	UpBytes   []int64 `json:"upBytes"`
+	DownBytes []int64 `json:"downBytes"`
+
+	UptimePct float64 `json:"uptimePct"` // of observed samples, answering (A or F)
+	Flips     int     `json:"flips"`     // up↔down transitions
+	AvgRTTMs  int     `json:"avgRttMs"`
+	TotalUp   int64   `json:"totalUp"`
+	TotalDown int64   `json:"totalDown"`
+}
 
 // HealthStatsDTO is the connection-health snapshot the dashboard polls.
 // Latencies are histogram bin bounds in ms; -1 means no samples.

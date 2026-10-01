@@ -9,9 +9,12 @@ import (
 )
 
 func (a *app) cmdHealth(args []string) int {
+	if len(args) > 0 && (args[0] == "pools" || args[0] == "pool") {
+		return a.cmdHealthPools(args[1:])
+	}
 	fs := a.newFlagSet("health")
 	fs.Usage = func() {
-		fmt.Fprint(a.errOut, "Usage: em-wall health [--json]\n\nProxied-connection health over the daemon's rolling window:\nfailures by cause, setup time, per-upstream standing, xray restarts,\nparked pool nodes.\n")
+		fmt.Fprint(a.errOut, "Usage: em-wall health [--json]\n       em-wall health pools [MASTER] [--window DUR] [--json]\n\nProxied-connection health over the daemon's rolling window:\nfailures by cause, setup time, per-upstream standing, xray restarts,\nparked pool nodes. \"pools\" draws each master pool's per-node timeline.\n")
 	}
 	pos, code, done := parseFlags(fs, args)
 	if done {

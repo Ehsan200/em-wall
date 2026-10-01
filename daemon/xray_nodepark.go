@@ -70,13 +70,37 @@ func (n nodeStatus) dead() bool {
 
 // parseObservatoryVars extracts tag → status from a /debug/vars body.
 func parseObservatoryVars(b []byte) (map[string]nodeStatus, error) {
+	m, err := parseMetricsVars(b)
+	return m.observatory, err
+}
+
+// metricsVars is what the daemon reads from one /debug/vars body.
+type metricsVars struct {
+	observatory map[string]nodeStatus
+	outbound    map[string]byteCount // per-outbound cumulative bytes, by tag
+}
+
+// parseMetricsVars extracts the observatory and the per-outbound byte
+// counters (present when policy.system.statsOutbound* is on) from a
+// /debug/vars body.
+func parseMetricsVars(b []byte) (metricsVars, error) {
 	var vars struct {
 		Observatory map[string]nodeStatus `json:"observatory"`
+		Stats       struct {
+			Outbound map[string]struct {
+				Uplink   int64 `json:"uplink"`
+				Downlink int64 `json:"downlink"`
+			} `json:"outbound"`
+		} `json:"stats"`
 	}
 	if err := json.Unmarshal(b, &vars); err != nil {
-		return nil, err
+		return metricsVars{}, err
 	}
-	return vars.Observatory, nil
+	out := metricsVars{observatory: vars.Observatory, outbound: make(map[string]byteCount, len(vars.Stats.Outbound))}
+	for tag, c := range vars.Stats.Outbound {
+		out.outbound[tag] = byteCount{up: c.Uplink, down: c.Downlink}
+	}
+	return out, nil
 }
 
 type parkState struct {
@@ -276,10 +300,13 @@ func withoutParked(members []xray.DialerMember, parked map[string]bool) []xray.D
 	return out
 }
 
-// PollNodeHealth reads per-node health from xray's metrics endpoint, parks
-// nodes that have stayed dead, returns parked nodes whose time is up,
-// re-ranks each slot's shortlist (xray_shortlist.go), and applies any
-// change live. Called on nodeHealthPollInterval from main.go.
+// PollNodeHealth reads per-node health from xray's metrics endpoint and
+// records it in the pool timeline (xray_timeline.go). Every
+// nodeHealthPollInterval it also parks nodes that have stayed dead, returns
+// parked nodes whose time is up, re-ranks each slot's shortlist
+// (xray_shortlist.go), and applies any change live. Called on
+// nodeTimelineInterval from main.go; the slower decisions keep their own
+// cadence so a finer timeline doesn't make the shortlist twitchier.
 func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 	s.mu.Lock()
 	running := s.enabled && s.cmd != nil
@@ -289,13 +316,25 @@ func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 		return
 	}
 
-	var events []parkEvent
-	var moved []shortlistChange
+	var byTag map[string]nodeStatus
 	if len(slots) > 0 {
-		byTag, err := s.fetchObservatory(ctx)
+		m, err := s.fetchMetrics(ctx)
 		if err != nil {
 			return // metrics not up yet (first seconds after a start)
 		}
+		byTag = m.observatory
+		s.timeline.record(slots, byTag, m.outbound, s.parker.parked())
+	}
+	// Half a tick of slack, so ticker jitter doesn't skip a whole round.
+	now := time.Now()
+	if !s.lastDecide.IsZero() && now.Sub(s.lastDecide) < nodeHealthPollInterval-nodeTimelineInterval/2 {
+		return
+	}
+	s.lastDecide = now
+
+	var events []parkEvent
+	var moved []shortlistChange
+	if len(slots) > 0 {
 		events = s.parker.observe(slots, byTag)
 		moved = s.shortlist.observe(slots, byTag)
 	}
@@ -377,6 +416,11 @@ func betterPing(a, b ipc.XrayNodePing) bool {
 }
 
 func (s *xraySupervisor) fetchObservatory(ctx context.Context) (map[string]nodeStatus, error) {
+	m, err := s.fetchMetrics(ctx)
+	return m.observatory, err
+}
+
+func (s *xraySupervisor) fetchMetrics(ctx context.Context) (metricsVars, error) {
 	addr := s.metricsAddr
 	if addr == "" {
 		addr = "127.0.0.1:" + strconv.Itoa(xray.MetricsPort)
@@ -385,19 +429,19 @@ func (s *xraySupervisor) fetchObservatory(ctx context.Context) (map[string]nodeS
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/debug/vars", nil)
 	if err != nil {
-		return nil, err
+		return metricsVars{}, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return metricsVars{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metrics: %s", resp.Status)
+		return metricsVars{}, fmt.Errorf("metrics: %s", resp.Status)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, err
+		return metricsVars{}, err
 	}
-	return parseObservatoryVars(b)
+	return parseMetricsVars(b)
 }
