@@ -2,6 +2,7 @@ package netprobe
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -143,6 +144,22 @@ const (
 // the race hedges past a silent member — only the binding stays put.
 const SeatGrace = 15 * time.Second
 
+// probationWindow: a name that went down, or whose breaker opened or
+// closed, within this long ranks behind every healthy name that didn't —
+// it is healthy, but on probation. Without it a member that had just come
+// back from an outage was ranked purely on its first probe RTT; when that
+// one probe came in lower it was put first, took the sites over, dropped
+// out again seconds later and handed them back — observed: a site moving
+// every 30–60s between three flapping members. Steady members keep the
+// sites; flapping ones still carry connections when nothing steady is left.
+const probationWindow = 5 * time.Minute
+
+// rttSamples is how many recent probe RTTs a healthy name is ranked on
+// (their median). On a lossy uplink one probe can read 10× the next
+// (observed: 250ms then 2.5s on the same node), and ranking on the last one
+// alone let that noise beat the hysteresis margins every few rounds.
+const rttSamples = 5
+
 // Seat is a name's claim on the destinations already bound to it.
 type Seat int
 
@@ -186,7 +203,9 @@ type sample struct {
 
 	lastFail time.Time // most recent failure, probe or traffic; for stability
 
-	suspectSince time.Time // when the current outage began; for SeatGrace
+	suspectSince time.Time // when the current (or last) outage began; for SeatGrace and probation
+
+	rtts []time.Duration // last rttSamples successful probe RTTs, oldest first
 
 	// window holds the last breakerWindow outcomes, oldest first.
 	window []outcome
@@ -214,9 +233,30 @@ type sample struct {
 // failures and no success since.
 func (s sample) suspect() bool { return s.fails >= deadStrikeThreshold }
 
+// medianRTT is the median of the recent probe RTTs (see rttSamples), or
+// the last RTT when there are none.
+func (s sample) medianRTT() time.Duration {
+	if len(s.rtts) == 0 {
+		return s.rtt
+	}
+	sorted := slices.Clone(s.rtts)
+	slices.Sort(sorted)
+	return sorted[len(sorted)/2]
+}
+
+// onProbation reports a recent outage or breaker edge (see probationWindow).
+func (s sample) onProbation(now time.Time) bool {
+	for _, at := range []time.Time{s.suspectSince, s.openedAt, s.closedAt} {
+		if !at.IsZero() && now.Sub(at) < probationWindow {
+			return true
+		}
+	}
+	return false
+}
+
 // cost is a healthy name's effective ranking cost (see failRateWeight).
 func (s sample) cost(rate float64, now time.Time) time.Duration {
-	c := time.Duration(float64(s.rtt) * s.handshakeFactor(now) * (1 + failRateWeight*rate))
+	c := time.Duration(float64(s.medianRTT()) * s.handshakeFactor(now) * (1 + failRateWeight*rate))
 	if !s.lastFail.IsZero() {
 		if age := now.Sub(s.lastFail); age < recentFailWindow {
 			c += time.Duration(float64(recentFailPenalty) * float64(recentFailWindow-age) / float64(recentFailWindow))
@@ -321,6 +361,10 @@ func (t *LatencyTracker) record(name string, rtt time.Duration, ok, fromTraffic 
 		s.fails = 0
 		if !fromTraffic {
 			s.rtt = rtt
+			s.rtts = append(s.rtts, rtt)
+			if len(s.rtts) > rttSamples {
+				s.rtts = append(s.rtts[:0], s.rtts[len(s.rtts)-rttSamples:]...)
+			}
 		}
 	} else {
 		// A failed connection extends the streak but leaves the last
@@ -668,7 +712,8 @@ func (t *LatencyTracker) Rank(names []string) []string {
 }
 
 // RankFrom orders names best-first: healthy (fresh + ok) ascending by
-// latency, then unknown/stale (never probed, sample expired, or failing
+// effective cost on the median of recent probe RTTs, then healthy names on
+// probation (see probationWindow) the same way, then unknown/stale (never probed, sample expired, or failing
 // but not yet past deadStrikeThreshold), then suspect (an outage in
 // progress), then names whose breaker is open last. Healthy and unknown
 // are stable, so equal-latency or unranked names keep the caller's
@@ -682,7 +727,8 @@ func (t *LatencyTracker) Rank(names []string) []string {
 // that is what stops a site's connections from scattering across exits.
 // An unknown incumbent (stale, or failing but short of an outage) is held
 // at the front outright: one failure is noise, and the race hedges past it
-// if it really is silent. A suspect or breaker-open incumbent is not.
+// if it really is silent — unless it is on probation as well. A suspect or
+// breaker-open incumbent is not held.
 func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 	if len(names) < 2 {
 		return names
@@ -692,10 +738,11 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 	now := t.now()
 
 	const (
-		tierHealthy = 0
-		tierUnknown = 1
-		tierSuspect = 2
-		tierDead    = 3
+		tierHealthy   = 0
+		tierProbation = 1 // healthy, but went down recently (see probationWindow)
+		tierUnknown   = 2
+		tierSuspect   = 3
+		tierDead      = 4
 	)
 	rs := make([]rankedName, len(names))
 	for i, n := range names {
@@ -707,14 +754,17 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 			// An open breaker outranks every other signal, including a
 			// fresh successful probe: the point of the cooldown is that
 			// one good measurement does not undo the demotion.
-			rs[i] = rankedName{n, i, tierDead, s.rtt, rate}
+			rs[i] = rankedName{name: n, idx: i, tier: tierDead, rtt: s.rtt, rate: rate}
 		case has && s.suspect():
-			rs[i] = rankedName{n, i, tierSuspect, s.rtt, rate}
+			rs[i] = rankedName{name: n, idx: i, tier: tierSuspect, rtt: s.rtt, rate: rate}
+		case fresh && s.ok && s.onProbation(now):
+			rs[i] = rankedName{name: n, idx: i, tier: tierProbation, rtt: s.cost(rate, now)}
 		case fresh && s.ok:
-			rs[i] = rankedName{n, i, tierHealthy, s.cost(rate, now), 0}
+			rs[i] = rankedName{name: n, idx: i, tier: tierHealthy, rtt: s.cost(rate, now)}
 		default:
-			rs[i] = rankedName{n, i, tierUnknown, 0, 0}
+			rs[i] = rankedName{name: n, idx: i, tier: tierUnknown}
 		}
+		rs[i].probation = has && s.onProbation(now)
 	}
 	sort.SliceStable(rs, func(a, b int) bool {
 		ra, rb := rs[a], rs[b]
@@ -722,7 +772,7 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 			return ra.tier < rb.tier
 		}
 		switch ra.tier {
-		case tierHealthy:
+		case tierHealthy, tierProbation:
 			if ra.rtt != rb.rtt {
 				return ra.rtt < rb.rtt
 			}
@@ -748,7 +798,9 @@ func (t *LatencyTracker) RankFrom(names []string, incumbent string) []string {
 			if r.name != incumbent || r.tier > tierUnknown {
 				continue
 			}
-			if r.tier == tierUnknown || !beatsByMargin(rs[0], r) {
+			// An unknown incumbent is held outright — one failure is noise
+			// — unless it has been dropping out lately too.
+			if (r.tier == tierUnknown && !r.probation) || !beatsByMargin(rs[0], r) {
 				copy(rs[1:i+1], rs[:i])
 				rs[0] = r
 			}
@@ -770,6 +822,8 @@ type rankedName struct {
 	tier int
 	rtt  time.Duration // healthy: effective cost (see sample.cost); else last RTT
 	rate float64       // window failure rate; orders the suspect and dead tiers
+
+	probation bool // went down recently (see probationWindow)
 }
 
 // beatsByMargin reports whether challenger is enough better than incumbent

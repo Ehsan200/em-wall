@@ -345,7 +345,6 @@ func main() {
 	// back in its set within seconds.
 	go func() {
 		defer wg.Done()
-		rankHost, rankPort := parseProxyTestTarget(proxyRankProbeTarget)
 		t := time.NewTicker(proxyProbeFastInterval)
 		defer t.Stop()
 		var lastFull time.Time
@@ -372,7 +371,7 @@ func main() {
 			if len(names) == 0 {
 				continue
 			}
-			probeProxies(ctx, proxyStore, proxyLatency, names, rankHost, rankPort)
+			probeProxies(ctx, proxyStore, proxyLatency, names, netprobe.URLTestHost, netprobe.URLTestPort)
 		}
 	}()
 

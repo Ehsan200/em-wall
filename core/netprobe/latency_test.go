@@ -347,8 +347,18 @@ func TestOutage_DeadNodeReturnsOnFirstSuccess(t *testing.T) {
 	if h.Suspect || h.Open || h.FailureRate != 0 {
 		t.Fatalf("recovered node still held down: %+v", h)
 	}
+	// Back in rotation at once — ahead of a member that is down — but
+	// behind a steady one until its probation is over.
+	tr.Record("other", 0, false)
+	tr.Record("other", 0, false)
+	if got := tr.Rank([]string{"other", "good", "node"}); got[0] != "good" || got[1] != "node" {
+		t.Fatalf("rank = %v, want [good node other] while node is on probation", got)
+	}
+	advance(probationWindow)
+	tr.Record("node", 100*time.Millisecond, true)
+	tr.Record("good", 400*time.Millisecond, true)
 	if got := tr.Rank([]string{"good", "node"}); got[0] != "node" {
-		t.Fatalf("rank = %v, want the recovered faster node first", got)
+		t.Fatalf("rank = %v, want the recovered faster node first after probation", got)
 	}
 	// Its outage no longer counts against it: one later hiccup is noise.
 	advance(10 * time.Second)
@@ -657,5 +667,37 @@ func TestLatencyTracker_SeatGrace(t *testing.T) {
 	tr.Record("a", 100*time.Millisecond, true)
 	if got := tr.Seat("a"); got != SeatHeld {
 		t.Fatalf("recovered seat = %v, want held", got)
+	}
+}
+
+// A member that just came back from an outage must not take a site off a
+// steady incumbent on one low probe — that is what moved sites every
+// 30-60s between flapping members.
+func TestProbation_RecoveredMemberDoesNotDisplaceSteadyIncumbent(t *testing.T) {
+	tr, advance := clockedTracker(t)
+	tr.Record("steady", 800*time.Millisecond, true)
+	tr.Record("flappy", 0, false)
+	tr.Record("flappy", 0, false)
+	advance(5 * time.Second)
+	tr.Record("flappy", 100*time.Millisecond, true)
+	if got := tr.RankFrom([]string{"flappy", "steady"}, "steady"); got[0] != "steady" {
+		t.Fatalf("rank = %v, want steady incumbent kept over a member on probation", got)
+	}
+	// And a steady member takes a site off one on probation.
+	if got := tr.RankFrom([]string{"flappy", "steady"}, "flappy"); got[0] != "steady" {
+		t.Fatalf("rank = %v, want steady ahead of an incumbent on probation", got)
+	}
+}
+
+// One noisy probe doesn't swing the ranking: it is on the median.
+func TestMedianRTT_OneSpikeDoesNotReorder(t *testing.T) {
+	tr, _ := clockedTracker(t)
+	for i := 0; i < 4; i++ {
+		tr.Record("a", 300*time.Millisecond, true)
+		tr.Record("b", 500*time.Millisecond, true)
+	}
+	tr.Record("a", 3*time.Second, true) // one spike
+	if got := tr.Rank([]string{"b", "a"}); got[0] != "a" {
+		t.Fatalf("rank = %v, want a first despite one slow probe", got)
 	}
 }

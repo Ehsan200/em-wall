@@ -24,21 +24,29 @@ const (
 	// costs little, and it bounds how long a node that came back stays
 	// ranked behind the others.
 	proxyProbeFastInterval = 10 * time.Second
-	proxyProbeTimeout      = 8 * time.Second
+	proxyProbeTimeout      = 5 * time.Second
 	proxyProbeParallel     = 4
+	// proxyProbeAttempts is how many URL tests each name gets per round,
+	// one after another. One attempt per round could not tell a node that
+	// answers every time from one that answers one time in three — it
+	// looked fine whenever its single attempt landed (observed: a member
+	// shown "372ms ok" that failed 2 of 3 tests by hand). Every attempt
+	// enters the failure window, and the RTT is their median.
+	proxyProbeAttempts = 3
 	// proxyLatencyTTL must exceed the interval so a sample stays valid
 	// between probe rounds (and survives one skipped round).
 	proxyLatencyTTL = 90 * time.Second
 )
 
-// proxyRankProbeTarget is what the ranking prober dials, deliberately
-// separate from the proxies.test target the UI uses. The UI's default is an
-// IP literal so a manual "does this proxy answer at all" check doesn't
-// depend on proxy-side DNS; ranking wants the opposite — a hostname
-// exercises the whole path an actual request takes (upstream DNS, SNI, a
-// real CDN edge rather than a router next door), which is what the ranking
-// is supposed to predict.
-const proxyRankProbeTarget = "www.gstatic.com:443"
+// The ranking prober runs a URL test (netprobe.MeasureURL) — the same
+// "real delay" V2Box and Hiddify show — deliberately separate from the
+// proxies.test target the UI uses. The UI's default is an IP literal so a
+// manual "does this proxy answer at all" check doesn't depend on proxy-side
+// DNS; ranking wants the opposite — a hostname exercises the whole path an
+// actual request takes (exit-side DNS, a real CDN edge, a full request and
+// response), which is what the ranking is supposed to predict. It used to
+// time a bare TLS handshake to www.gstatic.com, which a server can complete
+// while stalling the request itself.
 
 // multiBindingProxyNames returns the de-duplicated proxy.Store names that
 // are bound in a route rule alongside at least one other proxy — the only
@@ -75,8 +83,9 @@ func multiBindingProxyNames(rs []rules.Rule) []string {
 	return out
 }
 
-// probeProxies probes each name (concurrency-capped) against the daemon's
-// configured test endpoint and records the outcome in the tracker.
+// probeProxies URL-tests each name proxyProbeAttempts times (names
+// concurrency-capped, attempts sequential) against host:port and records
+// every outcome in the tracker, in order.
 //
 // Outcomes are recorded only once the whole round is in. When EVERY probe
 // in a multi-name round fails, the common cause is the local uplink, not
@@ -86,10 +95,9 @@ func multiBindingProxyNames(rs []rules.Rule) []string {
 // lockstep through a local outage). Such a round is dropped; ranking keeps
 // its last good picture until the link returns.
 func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.LatencyTracker, names []string, host string, port int) {
-	target := netprobe.Target{Host: host, Port: port}
 	sem := make(chan struct{}, proxyProbeParallel)
 	var wg sync.WaitGroup
-	results := make([]netprobe.Result, len(names))
+	results := make([][]netprobe.Result, len(names))
 	probed := make([]bool, len(names))
 	for i, name := range names {
 		p, err := store.GetByName(ctx, name)
@@ -108,9 +116,11 @@ func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.Lat
 		go func(i int, d proxy.Dialer) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			pctx, cancel := context.WithTimeout(ctx, proxyProbeTimeout)
-			results[i] = netprobe.Measure(pctx, d, target)
-			cancel()
+			for a := 0; a < proxyProbeAttempts && ctx.Err() == nil; a++ {
+				pctx, cancel := context.WithTimeout(ctx, proxyProbeTimeout)
+				results[i] = append(results[i], netprobe.MeasureURL(pctx, d, host, port, netprobe.URLTestPath))
+				cancel()
+			}
 		}(i, dialer)
 	}
 	wg.Wait()
@@ -119,8 +129,10 @@ func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.Lat
 	for i := range names {
 		if probed[i] {
 			n++
-			if results[i].OK {
-				ok++
+			for _, r := range results[i] {
+				if r.OK {
+					ok++
+				}
 			}
 		}
 	}
@@ -129,7 +141,9 @@ func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.Lat
 	}
 	for i, name := range names {
 		if probed[i] {
-			tracker.Record(name, results[i].Latency, results[i].OK)
+			for _, r := range results[i] {
+				tracker.Record(name, r.Latency, r.OK)
+			}
 		}
 	}
 }

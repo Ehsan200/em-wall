@@ -324,24 +324,26 @@ func stickyKeys(entry proxy.Entry) [2]string {
 func (pf *proxyForwarder) settleBinding(entry proxy.Entry, used string, names, failed []string) {
 	for _, k := range stickyKeys(entry) {
 		cur := pf.sticky.Get(k)
-		if cur != "" && cur != used && !pf.bindingMoves(k, cur, entry, names, failed) {
-			continue
-		}
 		if cur != "" && cur != used {
+			why := pf.bindingMoves(k, cur, entry, names, failed)
+			if why == "" {
+				continue
+			}
 			pf.stats.rebound()
 			if ok, n := pf.sampler.allow("rebind|" + k); ok {
-				pf.logger.Printf("proxytun: %s moved %q → %q (+%d more suppressed)", k, cur, used, n)
+				pf.logger.Printf("proxytun: %s moved %q → %q: %s (+%d more suppressed)", k, cur, used, why, n)
 			}
 		}
 		pf.sticky.Set(k, used)
 	}
 }
 
-// bindingMoves reports whether key's binding to cur should give way to the
-// member that just carried a connection (see settleBinding).
-func (pf *proxyForwarder) bindingMoves(key, cur string, entry proxy.Entry, names, failed []string) bool {
+// bindingMoves reports why key's binding to cur should give way to the
+// member that just carried a connection, or "" to keep it (see
+// settleBinding).
+func (pf *proxyForwarder) bindingMoves(key, cur string, entry proxy.Entry, names, failed []string) string {
 	if !slices.Contains(entry.ProxyNames, cur) {
-		return true
+		return "left the binding"
 	}
 	seat := netprobe.SeatHeld
 	if pf.latency != nil {
@@ -349,13 +351,16 @@ func (pf *proxyForwarder) bindingMoves(key, cur string, entry proxy.Entry, names
 	}
 	switch {
 	case seat == netprobe.SeatLost:
-		return true
+		return "lost its seat (demoted, or down past grace)"
 	case slices.Contains(failed, cur):
-		return false // miss already counted; it moved the binding if it was time
+		return "" // miss already counted; it moved the binding if it was time
 	case seat == netprobe.SeatHeld && len(names) > 0 && names[0] != cur:
-		return true // ranked behind a member that is better by the margin, or avoided for this site
+		return "ranked behind " + names[0] // better by the margin, steadier, or avoided for this site
 	}
-	return pf.sticky.Miss(key, cur)
+	if pf.sticky.Miss(key, cur) {
+		return "kept missing"
+	}
+	return ""
 }
 
 // siteKey groups a hostname with its siblings under the registrable
