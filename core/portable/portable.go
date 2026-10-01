@@ -80,6 +80,10 @@ type BundleSubscription struct {
 	IntervalSec int    `json:"intervalSec"`
 	NodeCap     int    `json:"nodeCap"`
 	Enabled     bool   `json:"enabled"`
+	// Strategy is the pool switch strategy; empty (older bundles) = auto.
+	// Pins don't travel: they name node fingerprints of a pool the
+	// importing side fetches afresh.
+	Strategy string `json:"strategy,omitempty"`
 }
 
 // BundleXray is a master xray entry: its outbound JSON plus the Dialer

@@ -51,20 +51,27 @@ const xrayRecentLineCap = 80
 
 type xraySupervisor struct {
 	binaryPath  string
-	dataDir     string         // contains geoip.dat + geosite.dat
-	runtimeDir  string         // generated config + scratch
-	apiAddr     string         // xray API address; "" = apiServerAddr() (tests override)
-	metricsAddr string         // xray metrics address; "" = xray.MetricsPort (tests override)
-	parker      *nodeParker    // parks pool nodes that stay dead; nil parks nothing
-	shortlist   *slotShortlist // best members per slot, from observatory data; nil = leastLoad alone
-	timeline    *poolTimeline  // recent per-node pool health, for the health view; nil records nothing
-	lastDecide  time.Time      // last park/shortlist round; touched only by PollNodeHealth
-	routes      *routeKeys     // route keys published for the proxy tunnel; nil-safe
-	live        *liveConns     // open proxied connections, marked stale on a path change; nil-safe
-	logDir      string         // where xray writes its own access/error logs
-	xrayStore   *xray.Store
-	proxyStore  *proxy.Store
-	logger      *log.Logger
+	dataDir     string          // contains geoip.dat + geosite.dat
+	runtimeDir  string          // generated config + scratch
+	apiAddr     string          // xray API address; "" = apiServerAddr() (tests override)
+	metricsAddr string          // xray metrics address; "" = xray.MetricsPort (tests override)
+	parker      *nodeParker     // parks pool nodes that stay dead; nil parks nothing
+	shortlist   *slotShortlist  // best members per slot, from observatory data; nil = leastLoad alone
+	timeline    *poolTimeline   // recent per-node pool health, for the health view; nil records nothing
+	agile       *agilePicker    // agile pools' current picks (xray_strategy.go); nil = none
+	auto        *autoClassifier // auto pools' stable/agile verdicts; nil = always stable
+	noPins      map[string]bool // manual pools already warned for having no pinned node; under mu
+	lastDecide  time.Time       // last park/shortlist round; touched only by PollNodeHealth
+	// masterStanding reports each master's set-ranking verdict by
+	// lower-case name, for the timeline; nil = not measured. Set once in
+	// main before the health poll starts.
+	masterStanding func() map[string]masterStanding
+	routes         *routeKeys // route keys published for the proxy tunnel; nil-safe
+	live           *liveConns // open proxied connections, marked stale on a path change; nil-safe
+	logDir         string     // where xray writes its own access/error logs
+	xrayStore      *xray.Store
+	proxyStore     *proxy.Store
+	logger         *log.Logger
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd     // current child process, nil if none running
@@ -102,6 +109,8 @@ func newXraySupervisor(binary, dataDir, runtimeDir, logDir string, xs *xray.Stor
 		parker:     newNodeParker(),
 		shortlist:  newSlotShortlist(),
 		timeline:   newPoolTimeline(),
+		agile:      newAgilePicker(),
+		auto:       newAutoClassifier(),
 	}
 	if fi, err := os.Stat(binary); err == nil && !fi.IsDir() {
 		sup.enabled = true
@@ -348,6 +357,8 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 	var slots []xray.DialerSlot
 	slotByKey := make(map[string]int) // dialer key → index into slots
 	parked := s.parker.parked()
+	known := map[string]bool{}  // every resolved member, parked or not
+	noPins := map[string]bool{} // manual pools with no pin in them this round
 	idx := 0
 	for _, m := range masters {
 		refs, err := xray.ParseDialer(m.Dialer)
@@ -369,20 +380,66 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 		if err != nil {
 			return nil, err
 		}
-		members = withoutParked(members, parked)
+		for _, mb := range members {
+			known[mb.Key] = true
+		}
+		strategy, auto := s.poolStrategy(ctx, key, refs)
+		var pinned []string
+		if strategy == xray.StrategyManual {
+			if pinned = s.poolPins(ctx, refs, members); len(pinned) == 0 {
+				if !s.noPins[key] {
+					s.logger.Printf("xray supervisor: master %q: manual pool has no pinned node in it — running it stable until one is pinned", m.Name)
+				}
+				noPins[key] = true
+				strategy = xray.StrategyStable
+			}
+		}
+		switch strategy {
+		case xray.StrategyManual:
+			members = onlyKeys(members, pinned)
+		case xray.StrategyAgile:
+			// Agile follows nodes that come back: nothing stays parked.
+			var back []string
+			for _, mb := range members {
+				if parked[mb.Key] {
+					back = append(back, mb.Key)
+				}
+			}
+			if len(back) > 0 {
+				s.parker.forget(back)
+				s.logger.Printf("xray supervisor: master %q: agile pool — %d parked node(s) back in the pool", m.Name, len(back))
+			}
+		default:
+			members = withoutParked(members, parked)
+		}
 		if len(members) == 0 {
 			s.logger.Printf("xray supervisor: master %q dialer has no reachable members yet — routing direct", m.Name)
 			continue
 		}
 		slotByKey[key] = len(slots)
-		slots = append(slots, xray.DialerSlot{
-			Master:    m.Name,
-			Index:     idx,
-			Members:   members,
-			Preferred: s.shortlist.preferred(m.Name, members),
-		})
+		slot := xray.DialerSlot{
+			Master:   m.Name,
+			Index:    idx,
+			Members:  members,
+			PoolKey:  key,
+			Strategy: strategy,
+			Auto:     auto,
+			Pinned:   pinned,
+		}
+		switch strategy {
+		case xray.StrategyAgile:
+			if pk, ok := s.agile.get(key); ok {
+				slot.Preferred, slot.Expected, slot.Fallback = pk.active, len(pk.active), pk.spare
+			}
+		case xray.StrategyStable:
+			slot.Preferred = s.shortlist.preferred(m.Name, members)
+		}
+		slots = append(slots, slot)
 		idx++
 	}
+	s.parker.retain(known)
+	s.noPins = noPins
+	s.logStrategyChanges(s.loadedSlots, slots)
 	return slots, nil
 }
 

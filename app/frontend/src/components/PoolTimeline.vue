@@ -80,6 +80,37 @@ function cellTitle(p: ipc.PoolTimelineDTO, n: ipc.PoolNodeTimelineDTO, i: number
   return parts.join(' · ');
 }
 
+const MASTER_LABEL: Record<string, string> = {
+  O: 'ok',
+  X: 'demoted — ranked last in its sets',
+  D: 'down — in an outage',
+  '?': 'not measured',
+};
+
+function masterClass(c: string): string[] {
+  return ['cell', 'carry', `m-${{ O: 'ok', X: 'demoted', D: 'down' }[c] ?? 'unknown'}`];
+}
+
+const STRATEGY_HELP: Record<string, string> = {
+  stable: 'Stable — ranks nodes over time, keeps a sticky pair, parks nodes that stay dead',
+  agile: 'Agile — follows the nodes answering right now, no parking; stalled connections on a node that died are closed so apps reconnect',
+  manual: 'Manual — routes only through the pinned nodes',
+};
+
+function strategyText(p: ipc.PoolTimelineDTO): string {
+  if (!p.strategy) return '';
+  if (!p.strategyAuto) return p.strategy;
+  let out = `auto → ${p.strategy}`;
+  if (p.strategySince) out += ` since ${new Date(p.strategySince).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  return out;
+}
+
+function strategyTitle(p: ipc.PoolTimelineDTO): string {
+  const parts = [STRATEGY_HELP[p.strategy] ?? p.strategy];
+  if (p.strategyAuto) parts.push(`Chosen by auto: ${p.strategyReason || 'no flapping seen'}`);
+  return parts.join('\n');
+}
+
 function roleText(r: string): string {
   return { f: 'fallback', a: 'active', i: 'idle', u: 'unranked' }[r] ?? 'gone';
 }
@@ -109,6 +140,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
       <div class="pool-head">
         <code>{{ p.master }}</code>
         <span v-if="p.masters.length > 1" class="muted">shared by {{ p.masters.join(', ') }}</span>
+        <span v-if="p.strategy" class="pill strategy" :class="p.strategy" :title="strategyTitle(p)">{{ strategyText(p) }}</span>
         <span class="stat" :class="{ bad: p.pickLosses > 0 }"
               title="Times every node carrying traffic was down at once while another node answered">
           {{ p.pickLosses }} pick {{ p.pickLosses === 1 ? 'loss' : 'losses' }}
@@ -126,6 +158,13 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           <span v-for="(down, i) in p.uplinkDown" :key="i" class="cell uplink" :class="{ lost: down }"
                 :title="down ? `${clock(p.times[i])} · no node answered — local uplink` : clock(p.times[i])" />
         </div>
+        <span class="name muted">swap</span>
+        <div class="strip">
+          <span v-for="(sw, i) in p.swaps" :key="i" class="cell swap" :class="{ on: sw }"
+                :title="sw ? `${clock(p.times[i])} · shortlist changed` : clock(p.times[i])" />
+        </div>
+        <span /><span /><span /><span /><span />
+
         <span class="num muted">up</span>
         <span class="num muted">flips</span>
         <span class="num muted">rtt</span>
@@ -143,6 +182,28 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           <span class="num muted" :title="`sent ${bytes(n.totalUp)}`">{{ bytes(n.totalDown) }}</span>
           <span class="muted role">{{ roleText(n.role) }}</span>
         </template>
+
+        <template v-if="p.masterRows?.length">
+          <span class="name muted section">master</span>
+          <span class="muted section strip-note">as the set ranking saw it</span>
+          <span class="num muted section" title="Outage starts in the window">outages</span>
+          <span class="num muted section" title="Outages that began while a node carrying the pool was answering — the master or the path past the node, not the pool">node up</span>
+          <span class="num muted section" title="Outages that began within a minute of a shortlist swap">near swap</span>
+          <span class="num muted section">demoted</span>
+          <span />
+          <template v-for="m in p.masterRows" :key="m.name">
+            <code class="name" :title="m.name">{{ m.name }}</code>
+            <div class="strip">
+              <span v-for="(c, i) in m.states" :key="i" :class="masterClass(c)"
+                    :title="`${clock(p.times[i])} · ${MASTER_LABEL[c] ?? c}`" />
+            </div>
+            <span class="num" :class="{ bad: m.outages > 0 }">{{ m.outages }}</span>
+            <span class="num" :class="{ warn: m.outagesCarrierUp > 0 }">{{ m.outagesCarrierUp }}</span>
+            <span class="num" :class="{ warn: m.outagesNearSwap > 0 }">{{ m.outagesNearSwap }}</span>
+            <span class="num">{{ m.demotions }}</span>
+            <span />
+          </template>
+        </template>
       </div>
     </div>
 
@@ -152,6 +213,8 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
       <span><i class="cell s-down carry" /> down</span>
       <span><i class="cell s-parked carry" /> parked</span>
       <span><i class="cell s-up idle" /> ranked out</span>
+      <span><i class="cell carry m-demoted" /> master demoted</span>
+      <span><i class="cell carry m-down" /> master down</span>
     </div>
   </section>
 </template>
@@ -197,6 +260,16 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
   font-size: 12px;
 }
 .stat { font-variant-numeric: tabular-nums; }
+.pill.strategy {
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-dim);
+}
+.pill.strategy.agile { color: var(--warn); border-color: var(--warn); }
+.pill.strategy.manual { color: var(--accent); border-color: var(--accent); }
 .warn { color: var(--warn); }
 .bad { color: var(--danger); }
 .grid {
@@ -226,6 +299,14 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
 .s-parked { background: var(--text-dim); opacity: 0.5; }
 .s-unknown { background: var(--border); }
 .cell.uplink { height: 4px; background: var(--border); }
+.cell.swap { height: 2px; background: transparent; }
+.cell.swap.on { height: 10px; background: var(--accent); }
+.m-ok { background: var(--success); opacity: 0.35; }
+.m-demoted { background: var(--warn); }
+.m-down { background: var(--danger); }
+.m-unknown { background: var(--border); }
+.section { padding-top: 6px; }
+.strip-note { font-size: 10px; }
 .cell.uplink.lost { height: 14px; background: var(--danger); opacity: 0.6; }
 .legend {
   display: flex;

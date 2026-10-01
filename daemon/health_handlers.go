@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ehsan/em-wall/core/ipc"
+	"github.com/ehsan/em-wall/core/xray"
 )
 
 func registerHealthHandlers(s *ipc.Server, d *handlerDeps) {
@@ -24,7 +25,17 @@ func registerHealthHandlers(s *ipc.Server, d *handlerDeps) {
 			return []ipc.PoolTimelineDTO{}, nil
 		}
 		window := time.Duration(p.WindowSec) * time.Second
-		return d.xraySup.timeline.snapshot(p.Master, window, d.poolNodeNames(ctx)), nil
+		pools := d.xraySup.timeline.snapshot(p.Master, window, d.poolNodeNames(ctx))
+		views := d.xraySup.poolStrategyViews()
+		for i := range pools {
+			if v, ok := views[pools[i].Master]; ok {
+				pools[i].Strategy, pools[i].StrategyAuto, pools[i].StrategyReason = v.strategy, v.auto, v.reason
+				if !v.since.IsZero() {
+					pools[i].StrategySince = v.since.Format(time.RFC3339)
+				}
+			}
+		}
+		return pools, nil
 	})
 }
 
@@ -90,16 +101,20 @@ func (d *handlerDeps) healthStats(ctx context.Context) ipc.HealthStatsDTO {
 // keys) to "sub/node" display names. Best-effort: store errors just leave
 // keys unnamed.
 func (d *handlerDeps) poolNodeNames(ctx context.Context) map[string]string {
+	return poolNodeNamesFrom(ctx, d.xrayStore)
+}
+
+func poolNodeNamesFrom(ctx context.Context, xs *xray.Store) map[string]string {
 	out := map[string]string{}
-	if d.xrayStore == nil {
+	if xs == nil {
 		return out
 	}
-	subs, err := d.xrayStore.ListSubs(ctx)
+	subs, err := xs.ListSubs(ctx)
 	if err != nil {
 		return out
 	}
 	for _, sub := range subs {
-		nodes, err := d.xrayStore.ListNodes(ctx, sub.ID)
+		nodes, err := xs.ListNodes(ctx, sub.ID)
 		if err != nil {
 			continue
 		}

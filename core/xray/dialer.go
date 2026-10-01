@@ -144,7 +144,34 @@ type DialerSlot struct {
 	Index     int
 	Members   []DialerMember
 	Preferred []string
+
+	// PoolKey identifies the pool (the sorted dialer refs), stable across
+	// master renames; the daemon keys per-pool strategy state by it.
+	PoolKey string
+	// Strategy is the pool's effective switch strategy: StrategyStable,
+	// StrategyAgile or StrategyManual ("" = stable). Auto: chosen by the
+	// daemon's classifier rather than set. Pinned are a manual pool's
+	// pinned member keys (its Members are exactly these).
+	Strategy string
+	Auto     bool
+	Pinned   []string
+	// Expected overrides how many members the balancer spreads over (0 =
+	// slotBalancerExpected); an agile pool spreads over every live member
+	// it picked. Fallback, when a present member, overrides the fallback
+	// (an agile pool's spare: answering, but carrying nothing).
+	Expected int
+	Fallback string
 }
+
+// Agile reports whether the pool runs the agile strategy.
+func (s DialerSlot) Agile() bool { return s.Strategy == StrategyAgile }
+
+// Manual reports whether the pool routes only through pinned members.
+func (s DialerSlot) Manual() bool { return s.Strategy == StrategyManual }
+
+// NeverParks reports whether the pool keeps every member loaded: agile
+// pools follow nodes that come back, manual ones route only where told.
+func (s DialerSlot) NeverParks() bool { return s.Agile() || s.Manual() }
 
 // presentPreferred returns the Preferred keys that are still members, in
 // order. A shortlist can name a member that has since been parked or left

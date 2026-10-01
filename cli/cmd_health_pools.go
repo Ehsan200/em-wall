@@ -27,7 +27,14 @@ every 10s. One strip per node, oldest left:
   (lighter glyphs ▄ ▒ _ = the node was ranked out, not carrying traffic)
 
 The "uplink" row marks rounds where no node answered at all — the local
-link, not the pool; those are left out of every number.
+link, not the pool; those are left out of every number. The "swap" row
+marks shortlist changes (^).
+
+Below the nodes, one row per master riding the pool, as the set ranking
+saw it:  - ok   x demoted   D down (outage)   ? not measured
+OUTAGES counts outage starts; CARRIER-UP how many began while a carrying
+node was answering (→ the master or the path past the node, not the
+pool); NEAR-SWAP how many began within a minute of a shortlist swap.
 `)
 	}
 	pos, code, done := parseFlags(fs, args)
@@ -80,6 +87,9 @@ func (a *app) drawPool(p ipc.PoolTimelineDTO, color bool) {
 	if len(p.Masters) > 1 {
 		fmt.Fprintf(a.out, " (shared by %s)", strings.Join(p.Masters, ", "))
 	}
+	if p.Strategy != "" {
+		fmt.Fprintf(a.out, " · %s", strategyLabel(p))
+	}
 	fmt.Fprintf(a.out, " · %s · pick losses %d · flapping %d/%d · churn %.0f%%\n",
 		span, p.PickLosses, p.Flappers, len(p.Nodes), p.ChurnPct)
 	if n == 0 {
@@ -107,10 +117,25 @@ func (a *app) drawPool(p ipc.PoolTimelineDTO, color bool) {
 	for _, nd := range p.Nodes {
 		nameW = max(nameW, len([]rune(nd.Name)))
 	}
+	for _, m := range p.MasterRows {
+		nameW = max(nameW, len([]rune(m.Name)))
+	}
 	nameW = min(nameW, 32)
 	pad := strings.Repeat(" ", max(len("STRIP")-buckets, 0)) // keeps a short strip under its header
 
 	fmt.Fprintf(a.out, "  %-*s  %s%s  %s\n", nameW, "uplink", string(uplink), pad, dimIf(color, fmt.Sprintf("%d of %d rounds dead", lost, n)))
+	swaps, swapN := make([]byte, 0, buckets), 0
+	for b := 0; b < buckets; b++ {
+		c := byte(' ')
+		for i := b * per; i < min((b+1)*per, n) && i < len(p.Swaps); i++ {
+			if p.Swaps[i] {
+				c = '^'
+				swapN++
+			}
+		}
+		swaps = append(swaps, c)
+	}
+	fmt.Fprintf(a.out, "  %-*s  %s%s  %s\n", nameW, "swap", string(swaps), pad, dimIf(color, fmt.Sprintf("%d shortlist changes", swapN)))
 	fmt.Fprintf(a.out, "  %-*s  %-*s  %5s %5s %6s %8s %8s\n", nameW, "NODE", buckets, "STRIP", "UP%", "FLIPS", "RTT", "SENT", "RECV")
 	for _, nd := range p.Nodes {
 		var strip strings.Builder
@@ -129,6 +154,53 @@ func (a *app) drawPool(p ipc.PoolTimelineDTO, color bool) {
 		fmt.Fprintf(a.out, "  %-*s  %s%s  %5.0f %5d %6s %8s %8s  %s\n", nameW, string(name), strip.String(), pad,
 			nd.UptimePct, nd.Flips, rtt, humanBytes(nd.TotalUp), humanBytes(nd.TotalDown), roleLabel(nd.Role))
 	}
+
+	if len(p.MasterRows) == 0 {
+		return
+	}
+	fmt.Fprintf(a.out, "  %-*s  %-*s  %7s %10s %9s %8s\n", nameW, "MASTER", buckets, "STRIP", "OUTAGES", "CARRIER-UP", "NEAR-SWAP", "DEMOTED")
+	for _, m := range p.MasterRows {
+		var strip strings.Builder
+		for b := 0; b < buckets; b++ {
+			strip.WriteString(masterGlyph(worstMaster(m.States, b*per, min((b+1)*per, n)), color))
+		}
+		name := []rune(m.Name)
+		if len(name) > nameW {
+			name = append(name[:nameW-1], '…')
+		}
+		fmt.Fprintf(a.out, "  %-*s  %s%s  %7d %10d %9d %8d\n", nameW, string(name), strip.String(), pad,
+			m.Outages, m.OutagesCarrierUp, m.OutagesNearSwap, m.Demotions)
+	}
+}
+
+// worstMaster folds master cells [from,to) into one column.
+func worstMaster(states string, from, to int) byte {
+	rank := map[byte]int{ipc.MasterCellUnknown: 0, ipc.MasterCellOK: 1, ipc.MasterCellDemoted: 2, ipc.MasterCellDown: 3}
+	worst := byte(ipc.MasterCellUnknown)
+	for i := from; i < to && i < len(states); i++ {
+		if rank[states[i]] > rank[worst] {
+			worst = states[i]
+		}
+	}
+	return worst
+}
+
+func masterGlyph(c byte, color bool) string {
+	var g, code string
+	switch c {
+	case ipc.MasterCellOK:
+		g, code = "-", "32"
+	case ipc.MasterCellDemoted:
+		g, code = "x", "33"
+	case ipc.MasterCellDown:
+		g, code = "D", "31"
+	default:
+		g, code = "?", "90"
+	}
+	if !color {
+		return g
+	}
+	return "\x1b[" + code + "m" + g + "\x1b[0m"
 }
 
 // bucketCell folds samples [from,to) of one node into a column: the worst
@@ -225,4 +297,20 @@ func (a *app) colorOK() bool {
 	}
 	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// strategyLabel renders a pool's switch strategy: "agile", or for one the
+// auto classifier chose, "auto → agile since 12:03 (reason)".
+func strategyLabel(p ipc.PoolTimelineDTO) string {
+	if !p.StrategyAuto {
+		return p.Strategy
+	}
+	out := "auto → " + p.Strategy
+	if t, err := time.Parse(time.RFC3339, p.StrategySince); err == nil {
+		out += " since " + t.Local().Format("15:04")
+	}
+	if p.StrategyReason != "" {
+		out += " (" + p.StrategyReason + ")"
+	}
+	return out
 }

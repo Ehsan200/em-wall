@@ -577,6 +577,18 @@ func (a *App) HealthPools(master string, windowSec int) ([]ipc.PoolTimelineDTO, 
 
 // ---- Xray subscriptions ----
 
+// SetXraySubStrategy sets how pools drawing on a subscription switch
+// between its nodes: "auto", "stable", "agile" or "manual".
+func (a *App) SetXraySubStrategy(id int64, strategy string) error {
+	return a.call(ipc.MethodXraySubSetStrategy, ipc.XraySubSetStrategyParams{ID: id, Strategy: strategy}, nil)
+}
+
+// SetXraySubNodePinned pins or unpins one node for a manual pool; an empty
+// fingerprint with pinned=false clears every pin.
+func (a *App) SetXraySubNodePinned(subID int64, fingerprint string, pinned bool) error {
+	return a.call(ipc.MethodXraySubSetNodePinned, ipc.XraySubSetNodePinnedParams{SubID: subID, Fingerprint: fingerprint, Pinned: pinned}, nil)
+}
+
 func (a *App) ListXraySubs() ([]ipc.XraySubDTO, error) {
 	var out []ipc.XraySubDTO
 	err := a.call(ipc.MethodXraySubList, nil, &out)

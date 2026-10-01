@@ -189,10 +189,15 @@ func TestHealthPools(t *testing.T) {
 				Master: "nyc", Masters: []string{"nyc", "nyc-2"}, IntervalSec: 10,
 				Times: []int64{100, 110, 120}, UplinkDown: []bool{false, true, false},
 				PickLosses: 1, Flappers: 1,
+				Strategy: "agile", StrategyAuto: true, StrategyReason: "whole pick died 2× in 10m",
 				Nodes: []ipc.PoolNodeTimelineDTO{{
 					Key: "k1", Name: "nap/usa-1", Role: "f", States: "ADA", Roles: "ffi",
 					RTTMs: []int{90, 0, 95}, UpBytes: []int64{0, 0, 0}, DownBytes: []int64{0, 0, 0},
 					UptimePct: 100, Flips: 2, AvgRTTMs: 92, TotalDown: 3 << 20,
+				}},
+				Swaps: []bool{false, true, false},
+				MasterRows: []ipc.PoolMasterTimelineDTO{{
+					Name: "nj-warp-nap", States: "OXD", Outages: 3, OutagesCarrierUp: 2, OutagesNearSwap: 1, Demotions: 1,
 				}},
 			}}, nil
 		},
@@ -205,7 +210,7 @@ func TestHealthPools(t *testing.T) {
 	if err := json.Unmarshal(s.params(t, ipc.MethodHealthPools), &p); err != nil || p.Master != "nyc" || p.WindowSec != 300 {
 		t.Errorf("params = %+v (%v)", p, err)
 	}
-	for _, want := range []string{"pool nyc (shared by nyc, nyc-2)", "pick losses 1", ".!.", "█X▄", "nap/usa-1", "92ms", "3.0M", "fallback"} {
+	for _, want := range []string{"pool nyc (shared by nyc, nyc-2)", "pick losses 1", "auto → agile (whole pick died 2× in 10m)", ".!.", "█X▄", "nap/usa-1", "92ms", "3.0M", "fallback", " ^ ", "1 shortlist changes", "-xD", "nj-warp-nap"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("health pools output missing %q:\n%s", want, out)
 		}

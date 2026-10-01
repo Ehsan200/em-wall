@@ -117,6 +117,10 @@ const (
 	trafficSampleInterval = 2 * time.Second
 )
 
+// BreakerOpenRate is the failure rate that opens the breaker on its own;
+// a demotion reported below it was the flap rule.
+const BreakerOpenRate = breakerOpenRate
+
 // Hysteresis. Ranking is consulted per connection, so ordering by raw
 // latency makes two near-equal upstreams trade places on every probe
 // round — and each swap moves the NEXT connection for the same site to a

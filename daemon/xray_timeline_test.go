@@ -11,10 +11,11 @@ import (
 // timelineRig drives a poolTimeline over one slot of members a..e with
 // a and b shortlisted (a = fallback).
 type timelineRig struct {
-	t    *testing.T
-	tl   *poolTimeline
-	at   time.Time
-	slot xray.DialerSlot
+	t        *testing.T
+	tl       *poolTimeline
+	at       time.Time
+	slot     xray.DialerSlot
+	standing map[string]masterStanding
 }
 
 func newTimelineRig(t *testing.T) *timelineRig {
@@ -45,7 +46,7 @@ func (r *timelineRig) round(up string, traffic map[string]byteCount, parked map[
 	for k, c := range traffic {
 		tagged[xray.SlotMemberTag(r.slot.Index, k)] = c
 	}
-	r.tl.record([]xray.DialerSlot{r.slot}, byTag, tagged, parked)
+	r.tl.record([]xray.DialerSlot{r.slot}, byTag, tagged, parked, r.standing)
 	r.at = r.at.Add(nodeTimelineInterval)
 }
 
@@ -163,7 +164,7 @@ func TestTimelineRingAndWindow(t *testing.T) {
 		t.Errorf("unknown master matched %d pools", len(got))
 	}
 	// The slot is unloaded: its history goes with it.
-	r.tl.record(nil, nil, nil, nil)
+	r.tl.record(nil, nil, nil, nil, nil)
 	if got := r.tl.snapshot("", 0, nil); len(got) != 0 {
 		t.Errorf("unloaded pool kept: %d", len(got))
 	}
@@ -203,5 +204,46 @@ func TestParseMetricsVarsStats(t *testing.T) {
 	}
 	if st := m.observatory["slot0-out-a"]; cellState(st) != ipc.PoolCellFlaky {
 		t.Errorf("state = %c", cellState(st))
+	}
+}
+
+func TestTimelineMasterRows(t *testing.T) {
+	r := newTimelineRig(t)
+	r.standing = map[string]masterStanding{"m": {}}
+	r.round("ab", nil, nil)
+	// A short outage of m2 between two samples, while a (a carrier) answers,
+	// right after a shortlist swap.
+	r.tl.markSwap("m")
+	carriers, since, ok := r.tl.noteMaster("M2", false)
+	if !ok || since != 0 || len(carriers) != 2 || carriers[0].key != "a" || carriers[0].state != ipc.PoolCellAlive {
+		t.Fatalf("noteMaster = %+v %v %v", carriers, since, ok)
+	}
+	r.round("ab", nil, nil)
+	r.standing = map[string]masterStanding{"m": {demoted: true}, "m2": {}}
+	r.round("ab", nil, nil)
+	// Outage of m while every carrier is dead, long after the swap.
+	r.at = r.at.Add(2 * time.Minute)
+	r.round("cd", nil, nil)
+	r.tl.noteMaster("m", false)
+	r.tl.noteMaster("m", true)
+	if _, _, ok := r.tl.noteMaster("not-a-master", false); ok {
+		t.Error("noteMaster matched a name that rides no pool")
+	}
+
+	p := r.pool()
+	if len(p.Swaps) != 4 || !p.Swaps[0] || p.Swaps[1] {
+		t.Errorf("swaps = %v", p.Swaps)
+	}
+	rows := map[string]ipc.PoolMasterTimelineDTO{}
+	for _, row := range p.MasterRows {
+		rows[row.Name] = row
+	}
+	// m2: unknown, then the between-samples outage shows on the next
+	// sample, then healthy.
+	if got := rows["m2"]; got.States != "?DOO" || got.Outages != 1 || got.OutagesCarrierUp != 1 || got.OutagesNearSwap != 1 {
+		t.Errorf("m2 = %+v", got)
+	}
+	if got := rows["m"]; got.States != "OOXX" || got.Outages != 1 || got.Demotions != 1 || got.OutagesCarrierUp != 0 || got.OutagesNearSwap != 0 {
+		t.Errorf("m = %+v", got)
 	}
 }

@@ -8,12 +8,12 @@ func TestGroupForDomain(t *testing.T) {
 		wantKey string
 		wantOK  bool
 	}{
-		{"anthropic.com", "anthropic", true},        // apex matches *.anthropic.com
-		{"api.anthropic.com", "anthropic", true},    // subdomain
-		{"deep.sub.claude.ai", "anthropic", true},   // multi-label subdomain
-		{"chatgpt.com", "openai", true},             // different group
-		{"nobody.example.org", "", false},           // unowned
-		{"", "", false},                             // empty
+		{"anthropic.com", "anthropic", true},      // apex matches *.anthropic.com
+		{"api.anthropic.com", "anthropic", true},  // subdomain
+		{"deep.sub.claude.ai", "anthropic", true}, // multi-label subdomain
+		{"chatgpt.com", "openai", true},           // different group
+		{"nobody.example.org", "", false},         // unowned
+		{"", "", false},                           // empty
 	}
 	for _, c := range cases {
 		key, _, ok := GroupForDomain(c.host)

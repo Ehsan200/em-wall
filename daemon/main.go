@@ -114,8 +114,15 @@ func main() {
 	// bad, and this is the only place that says so out loud.
 	proxyLatency.OnBreakerChange(func(name string, open bool, rate float64, samples int) {
 		if open {
-			log.Printf("netprobe: upstream %q demoted — %.0f%% of last %d attempts failed; ranked last until it recovers",
-				name, rate*100, samples)
+			if rate < netprobe.BreakerOpenRate {
+				// The rate didn't trip it, so the flap rule did.
+				log.Printf("netprobe: upstream %q demoted — kept dropping out (%.0f%% of last %d attempts failed); ranked last until it recovers",
+					name, rate*100, samples)
+			} else {
+				log.Printf("netprobe: upstream %q demoted — %.0f%% of last %d attempts failed; ranked last until it recovers",
+					name, rate*100, samples)
+			}
+			xraySup.noteMasterEdge(displayUpstream(name), true)
 			return
 		}
 		log.Printf("netprobe: upstream %q recovered — %.0f%% failures over last %d attempts", name, rate*100, samples)
@@ -123,10 +130,20 @@ func main() {
 	proxyLatency.OnSuspectChange(func(name string, suspect bool) {
 		if suspect {
 			log.Printf("netprobe: upstream %q down — ranked behind healthy members until it answers again", name)
+			xraySup.noteMasterEdge(displayUpstream(name), false)
 			return
 		}
 		log.Printf("netprobe: upstream %q answering again — back in rotation", name)
 	})
+	// The pool timeline shows each master's verdict next to the nodes it
+	// rides on (xray_timeline.go).
+	xraySup.masterStanding = func() map[string]masterStanding {
+		out := map[string]masterStanding{}
+		for _, h := range proxyLatency.Snapshot() {
+			out[strings.ToLower(displayUpstream(h.Name))] = masterStanding{down: h.Suspect, demoted: h.Open}
+		}
+		return out
+	}
 	trafficAgg := newTrafficAggregator(store, log.Default())
 
 	// Purge retired app-based routing rules (Interface "app:KEY"). The

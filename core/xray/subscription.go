@@ -35,13 +35,17 @@ const (
 // into SubNode rows. A subscription is never a rule target itself — its
 // nodes are consumed only through a master entry's Dialer field.
 type Subscription struct {
-	ID          int64     `gorm:"primaryKey;column:id"`
-	Name        string    `gorm:"not null;uniqueIndex;column:name"`
-	URL         string    `gorm:"not null;column:url;type:text"`
-	UserAgent   string    `gorm:"column:user_agent;type:text;not null;default:''"`
-	IntervalSec int       `gorm:"not null;default:0;column:interval_sec"`
-	NodeCap     int       `gorm:"not null;default:0;column:node_cap"`
-	Enabled     bool      `gorm:"not null;default:true;column:enabled"`
+	ID          int64  `gorm:"primaryKey;column:id"`
+	Name        string `gorm:"not null;uniqueIndex;column:name"`
+	URL         string `gorm:"not null;column:url;type:text"`
+	UserAgent   string `gorm:"column:user_agent;type:text;not null;default:''"`
+	IntervalSec int    `gorm:"not null;default:0;column:interval_sec"`
+	NodeCap     int    `gorm:"not null;default:0;column:node_cap"`
+	Enabled     bool   `gorm:"not null;default:true;column:enabled"`
+	// Strategy is how pools drawing on this subscription switch between
+	// its nodes: StrategyStable, StrategyAgile, StrategyManual, or "" /
+	// StrategyAuto (strategy.go). Written only by SetSubStrategy.
+	Strategy    string    `gorm:"column:strategy;not null;default:''"`
 	LastFetched time.Time `gorm:"column:last_fetched"`
 	LastError   string    `gorm:"column:last_error;type:text;not null;default:''"`
 	// Data-quota accounting reported by the provider via the
@@ -78,7 +82,7 @@ type SubNode struct {
 
 func (SubNode) TableName() string { return "xray_sub_nodes" }
 
-// SubNodeOverride durably records a per-node manual disable. It outlives
+// SubNodeOverride durably records a per-node manual disable or pin. It outlives
 // the volatile SubNode rows so toggling a node off survives a refresh,
 // daemon restart, or the node changing position in the list. Keyed by
 // (SubID, Fingerprint).
@@ -87,6 +91,10 @@ type SubNodeOverride struct {
 	SubID       int64  `gorm:"not null;uniqueIndex:idx_sub_fp;column:sub_id"`
 	Fingerprint string `gorm:"not null;uniqueIndex:idx_sub_fp;column:fingerprint"`
 	Disabled    bool   `gorm:"not null;default:false;column:disabled"`
+	// Pinned: a manual-strategy pool routes only through its pinned nodes.
+	// A pinned node is always active (outside the node cap); pinning
+	// enables a node, disabling unpins it.
+	Pinned bool `gorm:"not null;default:false;column:pinned"`
 }
 
 func (SubNodeOverride) TableName() string { return "xray_sub_node_overrides" }
@@ -397,9 +405,14 @@ func (s *Store) SetNodeDisabled(ctx context.Context, subID int64, fingerprint st
 			return err
 		default:
 			if !disabled {
+				if ov.Pinned {
+					return tx.Model(&SubNodeOverride{}).Where("id = ?", ov.ID).Update("disabled", false).Error
+				}
 				return tx.Delete(&SubNodeOverride{}, ov.ID).Error
 			}
-			return tx.Model(&SubNodeOverride{}).Where("id = ?", ov.ID).Update("disabled", true).Error
+			// Disabling a node also unpins it.
+			return tx.Model(&SubNodeOverride{}).Where("id = ?", ov.ID).
+				Updates(map[string]any{"disabled": true, "pinned": false}).Error
 		}
 	})
 	if err != nil {
@@ -616,13 +629,14 @@ func (s *Store) recomputeActive(ctx context.Context, subID int64) error {
 		return err
 	}
 	var overrides []SubNodeOverride
-	if err := s.db.WithContext(ctx).
-		Where("sub_id = ? AND disabled = ?", subID, true).Find(&overrides).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("sub_id = ?", subID).Find(&overrides).Error; err != nil {
 		return err
 	}
 	disabled := make(map[string]bool, len(overrides))
+	pinned := make(map[string]bool, len(overrides))
 	for _, o := range overrides {
-		disabled[o.Fingerprint] = true
+		disabled[o.Fingerprint] = o.Disabled
+		pinned[o.Fingerprint] = o.Pinned && !o.Disabled
 	}
 	var nodes []SubNode
 	if err := s.db.WithContext(ctx).Where("sub_id = ?", subID).Order("id ASC").Find(&nodes).Error; err != nil {
@@ -632,7 +646,11 @@ func (s *Store) recomputeActive(ctx context.Context, subID int64) error {
 	count := 0
 	for i := range nodes {
 		active := false
-		if sub.Enabled && !disabled[nodes[i].Fingerprint] && count < cap {
+		switch {
+		case !sub.Enabled || disabled[nodes[i].Fingerprint]:
+		case pinned[nodes[i].Fingerprint]:
+			active = true // a pin is always loaded, outside the cap
+		case count < cap:
 			active = true
 			count++
 		}

@@ -183,6 +183,9 @@ func (p *nodeParker) observe(slots []xray.DialerSlot, byTag map[string]nodeStatu
 	var events []parkEvent
 
 	for _, sl := range slots {
+		if sl.NeverParks() {
+			continue // agile: nodes come back in waves; manual: the user's choice
+		}
 		status := make(map[string]nodeStatus, len(sl.Members))
 		aliveCount := 0
 		for _, m := range sl.Members {
@@ -282,6 +285,36 @@ func (p *nodeParker) releaseAll() []parkEvent {
 	return events
 }
 
+// retain forgets every node not in keys — the members of every pool as
+// just resolved. A subscription refresh can give a node a new key (its
+// fingerprint changed) or drop it; its old park record would otherwise be
+// released on trial and parked again forever with nothing to apply to.
+func (p *nodeParker) retain(keys map[string]bool) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k := range p.nodes {
+		if !keys[k] {
+			delete(p.nodes, k)
+		}
+	}
+}
+
+// forget drops every record of keys: an agile or manual pool keeps all its
+// members, so their park history no longer applies.
+func (p *nodeParker) forget(keys []string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range keys {
+		delete(p.nodes, k)
+	}
+}
+
 // withoutParked drops parked members from a resolved member list, unless
 // that would leave it empty.
 func withoutParked(members []xray.DialerMember, parked map[string]bool) []xray.DialerMember {
@@ -323,27 +356,42 @@ func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 			return // metrics not up yet (first seconds after a start)
 		}
 		byTag = m.observatory
-		s.timeline.record(slots, byTag, m.outbound, s.parker.parked())
+		var standing map[string]masterStanding
+		if s.masterStanding != nil {
+			standing = s.masterStanding()
+		}
+		s.timeline.record(slots, byTag, m.outbound, s.parker.parked(), standing)
 	}
+	// Agile pools follow every round; everything else keeps its own pace.
+	agileMoved := len(slots) > 0 && s.agileStep(slots, byTag)
+
 	// Half a tick of slack, so ticker jitter doesn't skip a whole round.
 	now := time.Now()
 	if !s.lastDecide.IsZero() && now.Sub(s.lastDecide) < nodeHealthPollInterval-nodeTimelineInterval/2 {
+		if agileMoved {
+			if err := s.Reconcile(ctx); err != nil {
+				s.logger.Printf("xray supervisor: apply agile pick: %v", err)
+			}
+		}
 		return
 	}
 	s.lastDecide = now
 
 	var events []parkEvent
 	var moved []shortlistChange
+	switched := false
 	if len(slots) > 0 {
 		events = s.parker.observe(slots, byTag)
 		moved = s.shortlist.observe(slots, byTag)
+		switched = s.autoSwitched(slots)
 	}
 	events = append(events, s.parker.release()...)
-	if len(events) == 0 && len(moved) == 0 {
+	if len(events) == 0 && len(moved) == 0 && !switched && !agileMoved {
 		return
 	}
 	for _, c := range moved {
 		s.logger.Printf("xray supervisor: master %s shortlist %v → %v", c.master, c.from, c.to)
+		s.timeline.markSwap(c.master)
 	}
 	for _, e := range events {
 		if e.parked {

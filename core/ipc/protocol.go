@@ -81,7 +81,9 @@ const (
 	MethodXraySubRefresh         = "xraysub.refresh" // fetch now (ID, or 0 = all due)
 	MethodXraySubNodes           = "xraysub.nodes"
 	MethodXraySubSetNodeDisabled = "xraysub.setNodeDisabled"
-	MethodXraySubImportNode      = "xraysub.importNode" // promote one pool node to a standalone entry
+	MethodXraySubImportNode      = "xraysub.importNode"    // promote one pool node to a standalone entry
+	MethodXraySubSetStrategy     = "xraysub.setStrategy"   // pool switch strategy: auto/stable/agile/manual
+	MethodXraySubSetNodePinned   = "xraysub.setNodePinned" // pin/unpin a node for a manual pool
 	// Outbound sets — a named, ordered bundle of xray entries / proxies a
 	// rule can bind to as one unit ("xrayset:NAME"). Constants read
 	// "XraySets*" (plural) to keep them clearly apart from
@@ -154,6 +156,49 @@ type PoolTimelineDTO struct {
 	ChurnPct float64 `json:"churnPct"`
 
 	Nodes []PoolNodeTimelineDTO `json:"nodes"`
+
+	// Strategy is the pool's effective switch strategy (stable / agile /
+	// manual). StrategyAuto: chosen by the auto classifier, which says why
+	// in StrategyReason, in effect since StrategySince (RFC3339).
+	Strategy       string `json:"strategy"`
+	StrategyAuto   bool   `json:"strategyAuto"`
+	StrategyReason string `json:"strategyReason"`
+	StrategySince  string `json:"strategySince"`
+
+	// Swaps marks samples after which the daemon changed the pool's
+	// shortlist (a live routing swap).
+	Swaps []bool `json:"swaps"`
+	// MasterRows is each master riding the pool, as the set ranking sees
+	// it (probe + traffic verdicts), on the same time axis as the nodes —
+	// so a master outage can be read against the node that carried it.
+	MasterRows []PoolMasterTimelineDTO `json:"masterRows"`
+}
+
+// Master row cell codes: one byte per sample in PoolMasterTimelineDTO.States.
+// A cell shows the worst state the master was in at any point during the
+// interval, so a few-second outage between two samples still shows.
+const (
+	MasterCellOK      = 'O' // healthy
+	MasterCellDemoted = 'X' // circuit breaker open: ranked last in its sets
+	MasterCellDown    = 'D' // in an outage (failure streak): ranked behind healthy members
+	MasterCellUnknown = '?' // not measured yet (no set uses it, or just started)
+)
+
+// PoolMasterTimelineDTO is one master's history over the pool window.
+type PoolMasterTimelineDTO struct {
+	Name   string `json:"name"`
+	States string `json:"states"` // MasterCell* per sample
+
+	// Outage starts and demotions in the window, from the tracker's own
+	// edges (not the 10s samples, which can miss a short outage).
+	Outages   int `json:"outages"`
+	Demotions int `json:"demotions"`
+	// Of those outages: how many began while a node carrying the pool
+	// was answering its health checks (→ the master server or the path
+	// past the node, not the pool), and how many began within a minute
+	// of a shortlist swap (→ suspect our own routing change).
+	OutagesCarrierUp int `json:"outagesCarrierUp"`
+	OutagesNearSwap  int `json:"outagesNearSwap"`
 }
 
 // PoolNodeTimelineDTO is one pool member's history.
@@ -577,6 +622,10 @@ type XraySubDTO struct {
 	LastError   string `json:"lastError"`
 	NodeCount   int    `json:"nodeCount"`
 	ActiveCount int    `json:"activeCount"`
+	// Strategy is how pools drawing on this subscription switch between
+	// its nodes: "auto" (default), "stable", "agile" or "manual".
+	Strategy    string `json:"strategy"`
+	PinnedCount int    `json:"pinnedCount"`
 	// Data-quota accounting from the provider's Subscription-Userinfo
 	// header, byte counters. Expire is a Unix timestamp (0 = never). All
 	// zero means the provider never reported quota — frontend hides the bar.
@@ -639,11 +688,25 @@ type XraySubNodeDTO struct {
 	Name        string `json:"name"`
 	Active      bool   `json:"active"`
 	Disabled    bool   `json:"disabled"`
+	Pinned      bool   `json:"pinned"`    // a manual pool routes only through pinned nodes
 	LatencyMs   int    `json:"latencyMs"` // -1 = unknown
 	// ImportedAs names the standalone xray entry already promoted out of
 	// this node, empty if there is none. Drives the node row's Add /
 	// Added state.
 	ImportedAs string `json:"importedAs"`
+}
+
+type XraySubSetStrategyParams struct {
+	ID       int64  `json:"id"`
+	Strategy string `json:"strategy"`
+}
+
+// XraySubSetNodePinnedParams pins or unpins one node. An empty Fingerprint
+// with Pinned false clears every pin of the subscription.
+type XraySubSetNodePinnedParams struct {
+	SubID       int64  `json:"subId"`
+	Fingerprint string `json:"fingerprint"`
+	Pinned      bool   `json:"pinned"`
 }
 
 type XraySubSetNodeDisabledParams struct {

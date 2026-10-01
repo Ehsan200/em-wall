@@ -1122,6 +1122,9 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		for i, sub := range subs {
 			c := counts[sub.ID]
 			out[i] = subDTOFrom(sub, c[0], c[1])
+			if pins, err := d.xrayStore.PinnedFingerprints(ctx, sub.ID); err == nil {
+				out[i].PinnedCount = len(pins)
+			}
 		}
 		return out, nil
 	})
@@ -1250,11 +1253,15 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		if err != nil {
 			return nil, err
 		}
+		pinned, err := d.xrayStore.PinnedFingerprints(ctx, p.SubID)
+		if err != nil {
+			return nil, err
+		}
 		out := make([]ipc.XraySubNodeDTO, len(nodes))
 		for i, n := range nodes {
 			out[i] = ipc.XraySubNodeDTO{
 				Fingerprint: n.Fingerprint, Name: n.Name, Active: n.Active,
-				Disabled: disabled[n.Fingerprint], LatencyMs: n.LastLatencyMs,
+				Disabled: disabled[n.Fingerprint], Pinned: pinned[n.Fingerprint], LatencyMs: n.LastLatencyMs,
 				ImportedAs: imported[n.Fingerprint],
 			}
 		}
@@ -1308,6 +1315,42 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		return d.xrayDTO(ctx, added), nil
 	})
 
+	// Strategy and pins change which members a pool loads and how its
+	// balancer is wired; both apply live.
+	s.Handle(ipc.MethodXraySubSetStrategy, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubSetStrategyParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if err := d.xrayStore.SetSubStrategy(ctx, p.ID, p.Strategy); err != nil {
+			return nil, err
+		}
+		if err := d.xraySup.Reconcile(ctx); err != nil {
+			return nil, fmt.Errorf("strategy stored, but xray reconcile failed: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodXraySubSetNodePinned, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubSetNodePinnedParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		var err error
+		if strings.TrimSpace(p.Fingerprint) == "" && !p.Pinned {
+			err = d.xrayStore.ClearPins(ctx, p.SubID)
+		} else {
+			err = d.xrayStore.SetNodePinned(ctx, p.SubID, p.Fingerprint, p.Pinned)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := d.xraySup.Reconcile(ctx); err != nil {
+			return nil, fmt.Errorf("pin stored, but xray reconcile failed: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
 	s.Handle(ipc.MethodXraySubSetNodeDisabled, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p ipc.XraySubSetNodeDisabledParams
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -1353,6 +1396,7 @@ func subDTOFrom(sub xray.Subscription, total, active int) ipc.XraySubDTO {
 		IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
 		LastFetched: last, LastError: sub.LastError,
 		NodeCount: total, ActiveCount: active,
+		Strategy:      sub.EffectiveStrategy(),
 		UsageUpload:   sub.Upload,
 		UsageDownload: sub.Download,
 		UsageTotal:    sub.Total,

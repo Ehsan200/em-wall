@@ -189,6 +189,7 @@ func (d *handlerDeps) buildBundle(ctx context.Context, sel ipc.ExportSelection) 
 			bundle.Subscriptions = append(bundle.Subscriptions, portable.BundleSubscription{
 				Name: sub.Name, URL: sub.URL, UserAgent: sub.UserAgent,
 				IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
+				Strategy: sub.EffectiveStrategy(),
 			})
 		}
 		xs, err := d.xrayStore.List(ctx)
@@ -308,9 +309,15 @@ func (d *handlerDeps) applyBundle(ctx context.Context, b portable.Bundle) (ipc.I
 	// Subscriptions (before masters so an xraysub: dialer ref resolves).
 	importedSub := false
 	for _, sub := range b.Subscriptions {
+		strategy, serr := xray.ParseStrategy(sub.Strategy)
+		if serr != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("subscription %q: %v — using auto", sub.Name, serr))
+			strategy = xray.StrategyAuto
+		}
 		_, err := d.xrayStore.AddSub(ctx, xray.Subscription{
 			Name: sub.Name, URL: sub.URL, UserAgent: sub.UserAgent,
 			IntervalSec: sub.IntervalSec, NodeCap: sub.NodeCap, Enabled: sub.Enabled,
+			Strategy: strategy,
 		})
 		switch {
 		case err == nil:

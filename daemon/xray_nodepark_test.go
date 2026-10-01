@@ -188,3 +188,14 @@ func TestNodeParkerReleaseAll(t *testing.T) {
 		t.Fatalf("re-park after trial = %+v, want %s", ev, 2*nodeParkInitial)
 	}
 }
+
+func TestParkerRetain(t *testing.T) {
+	p := newNodeParker()
+	until := time.Now().Add(time.Hour)
+	p.nodes["old"] = &parkState{parkedUntil: until}
+	p.nodes["kept"] = &parkState{parkedUntil: until}
+	p.retain(map[string]bool{"kept": true, "other": true})
+	if got := p.parked(); len(got) != 1 || !got["kept"] {
+		t.Errorf("parked after retain = %v", got)
+	}
+}

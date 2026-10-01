@@ -450,3 +450,32 @@ func TestGenerate_SlotPreferredBecomesCosts(t *testing.T) {
 		t.Errorf("catch-all cost = %v", last)
 	}
 }
+
+// An agile slot spreads over every member it picked, and its fallback is
+// the spare, not the head of the pick.
+func TestGenerate_SlotExpectedAndFallback(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"freedom"}`)
+	members := []DialerMember{{Key: "a", Outbound: ob}, {Key: "b", Outbound: ob}, {Key: "c", Outbound: ob}, {Key: "d", Outbound: ob}}
+	master := Config{Name: "m", Enabled: true, Dialer: "xraysub:s", Outbound: `{"protocol":"freedom"}`}
+	raw, err := Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{
+		Master: "m", Index: 0, Members: members, Strategy: StrategyAgile,
+		Preferred: []string{"a", "b", "c"}, Expected: 3, Fallback: "d",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := slotBalancer(t, raw)
+	if got := b["strategy"].(map[string]any)["settings"].(map[string]any)["expected"]; got != float64(3) {
+		t.Errorf("expected = %v, want 3", got)
+	}
+	if b["fallbackTag"] != SlotMemberTag(0, "d") {
+		t.Errorf("fallbackTag = %v, want the spare", b["fallbackTag"])
+	}
+	// A fallback that isn't a member is ignored.
+	raw, _ = Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{
+		Master: "m", Index: 0, Members: members, Preferred: []string{"b"}, Fallback: "gone",
+	}}})
+	if b := slotBalancer(t, raw); b["fallbackTag"] != SlotMemberTag(0, "b") {
+		t.Errorf("fallbackTag = %v, want the shortlist head", b["fallbackTag"])
+	}
+}

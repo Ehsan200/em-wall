@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import {
   ListXraySubs, AddXraySub, UpdateXraySub, DeleteXraySub,
   SetXraySubEnabled, RefreshXraySub, XraySubNodes, SetXraySubNodeDisabled,
-  ImportXraySubNode, XrayObservatory,
+  ImportXraySubNode, XrayObservatory, SetXraySubStrategy, SetXraySubNodePinned,
 } from '../../wailsjs/go/main/App';
 
 // Subscriptions are URL-fetched pools of nodes. They are consumed only
@@ -15,9 +15,10 @@ type Sub = {
   intervalSec: number; nodeCap: number; enabled: boolean;
   lastFetched: string; lastError: string; nodeCount: number; activeCount: number;
   usageUpload: number; usageDownload: number; usageTotal: number; usageExpire: number;
+  strategy: string; pinnedCount: number;
 };
 type Node = {
-  fingerprint: string; name: string; active: boolean; disabled: boolean; latencyMs: number;
+  fingerprint: string; name: string; active: boolean; disabled: boolean; pinned: boolean; latencyMs: number;
   // Name of the standalone xray entry already promoted out of this node,
   // '' if there is none.
   importedAs: string;
@@ -234,6 +235,56 @@ async function refreshAll() {
   }
 }
 
+// Switch strategy: how pools drawing on this subscription move between its
+// nodes. Applied live by the daemon (no xray restart).
+const STRATEGIES: { value: string; label: string; help: string }[] = [
+  { value: 'auto', label: 'Auto', help: 'Runs stable, and switches a pool to agile by itself while its nodes come and go in waves (back to stable after 30 min calm).' },
+  { value: 'stable', label: 'Stable', help: 'For nodes that stay up or down for long stretches: ranks nodes over time, keeps a sticky pair, parks nodes that stay dead.' },
+  { value: 'agile', label: 'Agile', help: 'For nodes that work for a minute and then drop: spreads over every node answering right now (up to 4), never parks, and closes stalled connections on a node that died so apps reconnect.' },
+  { value: 'manual', label: 'Manual', help: 'Routes only through the nodes you pin below — never switches away from them, even if they all fail.' },
+];
+
+function strategyHelp(v: string): string {
+  return STRATEGIES.find(x => x.value === v)?.help ?? '';
+}
+
+async function setStrategy(s: Sub, v: string) {
+  if (v === s.strategy) return;
+  busy.value = true;
+  try {
+    await SetXraySubStrategy(s.id, v);
+    await refresh();
+    if (v === 'manual' && !expanded.value.has(s.id)) toggleExpand(s.id);
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function togglePin(subId: number, n: Node) {
+  try {
+    await SetXraySubNodePinned(subId, n.fingerprint, !n.pinned);
+    await loadNodes(subId);
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  }
+}
+
+async function clearPins(s: Sub) {
+  try {
+    await SetXraySubNodePinned(s.id, '', false);
+    await loadNodes(s.id);
+    await refresh();
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  }
+}
+
 async function toggleNode(subId: number, n: Node) {
   try {
     await SetXraySubNodeDisabled(subId, n.fingerprint, !n.disabled);
@@ -405,6 +456,23 @@ defineExpose({ refresh });
       </div>
       <div v-if="s.lastError" class="muted" style="font-size: 11px; color: var(--danger)">✗ {{ s.lastError }}</div>
 
+      <!-- Switch strategy -->
+      <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px">
+        <span class="muted">Switch strategy</span>
+        <div class="row strategy-seg" style="gap: 0">
+          <button v-for="o in STRATEGIES" :key="o.value" class="seg" :class="{ active: s.strategy === o.value }"
+                  :title="o.help" :disabled="busy" @click="setStrategy(s, o.value)">{{ o.label }}</button>
+        </div>
+        <span class="muted" style="font-size: 11px; flex: 1 1 260px">{{ strategyHelp(s.strategy) }}</span>
+      </div>
+      <div v-if="s.strategy === 'manual'" class="row" style="gap: 8px; align-items: center; font-size: 11px">
+        <span v-if="s.pinnedCount === 0" style="color: var(--warn)">
+          No node pinned yet — open Nodes and pin one or more. Until then the pool runs stable.
+        </span>
+        <span v-else class="muted">{{ s.pinnedCount }} node{{ s.pinnedCount === 1 ? '' : 's' }} pinned</span>
+        <button v-if="s.pinnedCount > 0" @click="clearPins(s)" :disabled="busy">Unpin all</button>
+      </div>
+
       <!-- Data quota (only when the provider reports Subscription-Userinfo) -->
       <div v-if="hasUsage(s)" class="col" style="gap: 4px; margin-top: 2px">
         <div class="row" style="justify-content: space-between; font-size: 11px; color: var(--text-dim); gap: 8px; flex-wrap: wrap">
@@ -433,6 +501,8 @@ defineExpose({ refresh });
           <div class="row" style="gap: 8px; align-items: center; min-width: 0; flex-wrap: wrap">
             <span v-if="isWinner(n)" title="Carrying master traffic now — one of the nodes the balancer spreads connections over" style="color: var(--success)">★</span>
             <span style="font-size: 12px">{{ n.name }}</span>
+            <span v-if="n.pinned" class="tag tag-route" style="font-size: 10px"
+                  :title="s.strategy === 'manual' ? 'Pinned: this pool routes only through pinned nodes' : 'Pinned — takes effect when the strategy is Manual'">pinned</span>
             <span v-if="n.disabled" class="tag tag-off" style="font-size: 10px">disabled</span>
             <span v-else-if="n.active" class="tag tag-route" style="font-size: 10px">active</span>
             <span v-else class="tag" style="font-size: 10px; background: rgba(141,141,160,0.15); color: var(--text-dim)">idle</span>
@@ -449,6 +519,10 @@ defineExpose({ refresh });
                     title="Create a standalone xray entry from this node so rules and sets can target it. Restarts xray.">
               {{ importing === n.fingerprint ? 'Adding…' : '+ Add' }}
             </button>
+            <button v-if="s.strategy === 'manual' || n.pinned" @click="togglePin(s.id, n)" :disabled="busy"
+                    :title="n.pinned ? 'Stop routing through this node' : 'Route this pool through this node (Manual strategy)'">
+              {{ n.pinned ? 'Unpin' : 'Pin' }}
+            </button>
             <button @click="toggleNode(s.id, n)" :disabled="busy">{{ n.disabled ? 'Enable' : 'Disable' }}</button>
           </div>
         </div>
@@ -458,6 +532,18 @@ defineExpose({ refresh });
 </template>
 
 <style scoped>
+.seg {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 0;
+  padding: 2px 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.seg:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+.seg:last-child  { border-right: 1px solid var(--border); border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+.seg.active { color: var(--text); background: var(--panel-2); border-color: var(--accent); }
 .usage-bar {
   height: 5px;
   border-radius: 3px;

@@ -297,8 +297,12 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		// 700ms node beats a 120ms one with 20ms of jitter. When the daemon
 		// has a shortlist (Preferred, ranked on average + jitter + failures),
 		// costs push everything else behind it; see slotDemotedCost.
+		expected := slotBalancerExpected
+		if slot.Expected > 0 {
+			expected = slot.Expected
+		}
 		settings := map[string]any{
-			"expected":  slotBalancerExpected,
+			"expected":  expected,
 			"tolerance": SlotBalancerTolerance,
 		}
 		fallback := ""
@@ -322,6 +326,13 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			})
 			settings["costs"] = costs
 			fallback = pref[0]
+		}
+		if slot.Fallback != "" {
+			for _, m := range slot.Members {
+				if m.Key == slot.Fallback {
+					fallback = m.Key
+				}
+			}
 		}
 		balancer := map[string]any{
 			"tag":      SlotBalancerTag(slot.Index),

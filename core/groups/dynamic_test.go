@@ -182,7 +182,7 @@ func TestGoogleMedia_SeedCoversMeetMediaIPs(t *testing.T) {
 		return false
 	}
 	for _, ip := range []string{
-		"74.125.250.1",  // Meet media
+		"74.125.250.1",   // Meet media
 		"142.250.82.100", // Meet media
 		"173.194.202.127",
 		"209.85.130.1",

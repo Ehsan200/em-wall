@@ -92,11 +92,11 @@ func TestMostSpecificIP(t *testing.T) {
 		ip     string
 		wantID int64
 	}{
-		{"10.1.2.3", 3},   // exact host beats both CIDRs
-		{"10.1.5.5", 2},   // /16 beats /8
-		{"10.9.9.9", 1},   // only /8 matches
+		{"10.1.2.3", 3},    // exact host beats both CIDRs
+		{"10.1.5.5", 2},    // /16 beats /8
+		{"10.9.9.9", 1},    // only /8 matches
 		{"192.168.1.1", 0}, // disabled rule skipped
-		{"8.8.8.8", 0},    // no match
+		{"8.8.8.8", 0},     // no match
 	}
 	for _, tc := range cases {
 		got := MostSpecificIP(rs, net.ParseIP(tc.ip))

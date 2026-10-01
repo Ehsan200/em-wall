@@ -32,6 +32,14 @@ import (
 // margins — the same idea as the set ranking's hysteresis (core/netprobe),
 // since every change is a live routing swap and near-equal nodes would
 // otherwise trade places on every poll.
+//
+// Margins alone weren't enough: one lost ping in a six-ping window inflates
+// a node's score by a third (shortlistFailWeight), which clears the 25%
+// margin, and on a ~500ms lossy uplink near-equal nodes each lose a ping
+// now and then — observed, the second seat changed hands every 30–60s.
+// So seats are judged on a smoothed score (shortlistSmoothing per round,
+// ~2 min memory); qualification still uses the raw window, so a node that
+// really fails loses its seat at once.
 
 const (
 	// shortlistMinPings is how many pings a member's window must hold
@@ -49,6 +57,10 @@ const (
 	// six is worth less than its RTT says, since every lost ping is a
 	// connection that stalled.
 	shortlistFailWeight = 2.0
+
+	// shortlistSmoothing is the weight of a round's score in a member's
+	// smoothed score (an EWMA over nodeHealthPollInterval rounds).
+	shortlistSmoothing = 0.25
 )
 
 // nodeScore is a member's shortlist cost: lower is better. ok is false for
@@ -83,12 +95,13 @@ func nodeScore(st nodeStatus) (time.Duration, bool) {
 // by name, of its dialer group). Safe on a nil receiver, which never
 // shortlists.
 type slotShortlist struct {
-	mu    sync.Mutex
-	picks map[string][]string // owner master → member keys, best first
+	mu     sync.Mutex
+	picks  map[string][]string                 // owner master → member keys, best first
+	smooth map[string]map[string]time.Duration // owner master → member key → smoothed score
 }
 
 func newSlotShortlist() *slotShortlist {
-	return &slotShortlist{picks: map[string][]string{}}
+	return &slotShortlist{picks: map[string][]string{}, smooth: map[string]map[string]time.Duration{}}
 }
 
 // preferred returns master's shortlist for a slot with these members, or
@@ -119,6 +132,9 @@ func (sl *slotShortlist) observe(slots []xray.DialerSlot, byTag map[string]nodeS
 	var changes []shortlistChange
 	live := make(map[string]bool, len(slots))
 	for _, slot := range slots {
+		if slot.Agile() || slot.Manual() {
+			continue // agile picks every round (xray_strategy.go); manual is the pins
+		}
 		live[slot.Master] = true
 		old := sl.picks[slot.Master]
 		if len(slot.Members) <= xray.SlotShortlistSize {
@@ -128,14 +144,18 @@ func (sl *slotShortlist) observe(slots []xray.DialerSlot, byTag map[string]nodeS
 			}
 			continue
 		}
+		prev := sl.smooth[slot.Master]
 		scores := make(map[string]time.Duration, len(slot.Members))
 		for _, m := range slot.Members {
 			if st, ok := byTag[xray.SlotMemberTag(slot.Index, m.Key)]; ok {
 				if c, ok := nodeScore(st); ok {
-					scores[m.Key] = c
+					scores[m.Key] = smoothScore(prev[m.Key], c)
 				}
 			}
 		}
+		// A member that doesn't qualify this round starts over next time:
+		// its old average says nothing about the node that comes back.
+		sl.smooth[slot.Master] = scores
 		next := pickShortlist(old, scores, xray.SlotShortlistSize)
 		if next == nil || equalStrings(next, old) {
 			continue
@@ -148,7 +168,21 @@ func (sl *slotShortlist) observe(slots []xray.DialerSlot, byTag map[string]nodeS
 			delete(sl.picks, m)
 		}
 	}
+	for m := range sl.smooth {
+		if !live[m] {
+			delete(sl.smooth, m)
+		}
+	}
 	return changes
+}
+
+// smoothScore folds this round's score into a member's smoothed one; prev
+// zero means no history.
+func smoothScore(prev, cur time.Duration) time.Duration {
+	if prev <= 0 {
+		return cur
+	}
+	return time.Duration(shortlistSmoothing*float64(cur) + (1-shortlistSmoothing)*float64(prev))
 }
 
 // pickShortlist returns the next shortlist of up to size keys given the

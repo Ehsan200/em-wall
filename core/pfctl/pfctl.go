@@ -3,8 +3,10 @@
 //
 // One-time install (done by app/internal/installer at app install time)
 // must add this to /etc/pf.conf:
-//   anchor "em-wall"
-//   load anchor "em-wall" from "/etc/pf.anchors/em-wall"
+//
+//	anchor "em-wall"
+//	load anchor "em-wall" from "/etc/pf.anchors/em-wall"
+//
 // and ensure pf is enabled (`pfctl -e`). At runtime this package
 // rewrites the anchor's rules and reloads them via `pfctl -a em-wall`.
 package pfctl

@@ -471,8 +471,8 @@ func (s *Store) QueryTraffic(ctx context.Context, from, to int64, dim string, bu
 		Model(&TrafficStat{}).
 		Select(timeExpr+" AS bucket_ts, "+keyExpr+" AS k, SUM(bytes_sent) AS bytes_sent, SUM(bytes_recv) AS bytes_recv").
 		Where("bucket_ts >= ? AND bucket_ts <= ?", from, to).
-		Group(timeExpr+", k").
-		Order(timeExpr+" ASC").
+		Group(timeExpr + ", k").
+		Order(timeExpr + " ASC").
 		Scan(&out).Error
 	return out, err
 }

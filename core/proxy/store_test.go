@@ -159,8 +159,8 @@ func TestStore_NamesExist(t *testing.T) {
 		{[]string{"home", "work"}, nil},
 		{[]string{"missing"}, []string{"missing"}},
 		{[]string{"work", "missing", "home"}, []string{"missing"}},
-		{[]string{"WORK", "Home"}, nil},     // normalized
-		{[]string{"work", "WORK"}, nil},     // duplicates collapsed
+		{[]string{"WORK", "Home"}, nil}, // normalized
+		{[]string{"work", "WORK"}, nil}, // duplicates collapsed
 		{nil, nil},
 	}
 	for _, c := range cases {

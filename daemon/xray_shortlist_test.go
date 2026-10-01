@@ -123,3 +123,35 @@ func TestSlotShortlistObserve(t *testing.T) {
 		t.Error("nil shortlist did something")
 	}
 }
+
+func TestShortlistSmoothsOneLostPing(t *testing.T) {
+	sl := newSlotShortlist()
+	slot := xray.DialerSlot{Master: "m", Index: 0}
+	for _, k := range []string{"a", "b", "c"} {
+		slot.Members = append(slot.Members, xray.DialerMember{Key: k})
+	}
+	round := func(st map[string]nodeStatus) {
+		byTag := map[string]nodeStatus{}
+		for k, v := range st {
+			byTag[xray.SlotMemberTag(0, k)] = v
+		}
+		sl.observe([]xray.DialerSlot{slot}, byTag)
+	}
+	steady := map[string]nodeStatus{"a": ping(300, 10, 6, 0), "b": ping(450, 30, 6, 0), "c": ping(480, 30, 6, 0)}
+	for i := 0; i < 5; i++ {
+		round(steady)
+	}
+	if got := sl.preferred("m", slot.Members); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("steady shortlist = %v", got)
+	}
+	// b loses one ping in six: raw score ×1.33 would hand c its seat.
+	round(map[string]nodeStatus{"a": ping(300, 10, 6, 0), "b": ping(450, 30, 6, 1), "c": ping(480, 30, 6, 0)})
+	if got := sl.preferred("m", slot.Members); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("one lost ping moved the seat: %v", got)
+	}
+	// b stops qualifying: it loses the seat at once.
+	round(map[string]nodeStatus{"a": ping(300, 10, 6, 0), "b": ping(450, 30, 6, 6), "c": ping(480, 30, 6, 0)})
+	if got := sl.preferred("m", slot.Members); !reflect.DeepEqual(got, []string{"a", "c"}) {
+		t.Errorf("failing member kept its seat: %v", got)
+	}
+}
