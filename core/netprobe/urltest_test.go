@@ -74,3 +74,41 @@ func TestMeasureURLSilentFails(t *testing.T) {
 		t.Fatalf("result = %+v, want timeout failure", r)
 	}
 }
+
+func downloadServer(t *testing.T, body int, stallAfter int) loopConnector {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(body))
+		w.WriteHeader(http.StatusOK)
+		buf := make([]byte, body)
+		if stallAfter > 0 && stallAfter < body {
+			_, _ = w.Write(buf[:stallAfter])
+			w.(http.Flusher).Flush()
+			<-r.Context().Done() // a choked path: the rest never comes
+			return
+		}
+		_, _ = w.Write(buf)
+	}))
+	t.Cleanup(srv.Close)
+	return loopConnector{addr: srv.Listener.Addr().String()}
+}
+
+func TestMeasureDownloadFull(t *testing.T) {
+	c := downloadServer(t, DownloadTestBytes, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if r := MeasureDownload(ctx, c, DownloadTestHost, DownloadTestPort, DownloadTestPath(DownloadTestBytes), DownloadTestBytes); !r.OK {
+		t.Fatalf("result = %+v, want OK", r)
+	}
+}
+
+// The failure the URL test can't see: the reply starts, then stalls a few
+// KB in. The download test must fail it.
+func TestMeasureDownloadStallFails(t *testing.T) {
+	c := downloadServer(t, DownloadTestBytes, 8<<10)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if r := MeasureDownload(ctx, c, DownloadTestHost, DownloadTestPort, DownloadTestPath(DownloadTestBytes), DownloadTestBytes); r.OK {
+		t.Fatalf("result = %+v, want failure on a stalled body", r)
+	}
+}

@@ -348,6 +348,7 @@ func main() {
 		t := time.NewTicker(proxyProbeFastInterval)
 		defer t.Stop()
 		var lastFull time.Time
+		fullRounds := 0
 		for {
 			full := false
 			select {
@@ -363,15 +364,20 @@ func main() {
 				continue
 			}
 			names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
+			transfer := false
 			if full {
 				lastFull = time.Now()
+				fullRounds++
+				transfer = fullRounds%proxyTransferEvery == 1
 			} else {
 				names = proxyLatency.Unsettled(names)
 			}
 			if len(names) == 0 {
 				continue
 			}
-			probeProxies(ctx, proxyStore, proxyLatency, names, netprobe.URLTestHost, netprobe.URLTestPort)
+			for _, n := range probeProxies(ctx, proxyStore, proxyLatency, names, netprobe.URLTestHost, netprobe.URLTestPort, transfer) {
+				log.Printf("netprobe: upstream %q answers the URL test but stalls a %d KB transfer — round counted as failed", n, netprobe.DownloadTestBytes>>10)
+			}
 		}
 	}()
 
@@ -415,6 +421,25 @@ func main() {
 				return
 			case <-t.C:
 				xraySup.PollNodeHealth(ctx)
+			}
+		}
+	}()
+
+	// Pool path prober: test the members that carry (or are next in line
+	// to carry) each master on the real path — a transfer through the
+	// node, and the master chained over it — since the observatory's tiny
+	// ping passes nodes that can't (see xray_pathprobe.go).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(pathProbeInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				xraySup.ProbePaths(ctx)
 			}
 		}
 	}()

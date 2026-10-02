@@ -66,6 +66,11 @@ const SlotBalancerTolerance = 0.5
 // xray's float→Duration conversion far from overflow.)
 const slotDemotedCost = 1e12
 
+// slotBrokenCost ranks a member the daemon's path prober caught failing
+// behind even the demoted ones (sqrt: ×10⁸, still far from overflow at a
+// 5e9ns deviation).
+const slotBrokenCost = 1e16
+
 // Generate produces a full xray-core JSON config from entries.
 //
 // For each enabled entry the config gets:
@@ -120,6 +125,21 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			masters[normalizeName(m)] = s
 		}
 	}
+
+	// Fragment settings by entry name: an entry's own dial, or for a master
+	// its slot's members (see fragment.go). Each distinct setting in use
+	// gets one freedom outbound, emitted after the slots.
+	frags := map[string]Fragment{}
+	for _, e := range sorted {
+		if f, ok := ParseFragment(e.Fragment); ok {
+			frags[normalizeName(e.Name)] = f
+		}
+	}
+	usedFrags := map[string]Fragment{}
+
+	// Each master's own outbound before its dialerProxy is set, for the
+	// path prober's chain outbounds (see probeRoutes).
+	masterObs := map[string][]byte{}
 
 	out := cfg{Inbounds: []inbound{}, Outbounds: []json.RawMessage{}}
 	if opt.LogDir != "" {
@@ -210,7 +230,14 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 		}
 		// Master entry: tunnel its own transport through the dialer chain.
 		if _, ok := masters[normalizeName(e.Name)]; ok {
+			raw, err := json.Marshal(ob)
+			if err != nil {
+				return nil, fmt.Errorf("xray: entry %q: re-marshal outbound: %w", e.Name, err)
+			}
+			masterObs[normalizeName(e.Name)] = raw
 			injectDialerProxy(ob, DialerOutboundTag(e.Name))
+		} else if f, ok := frags[normalizeName(e.Name)]; ok && applyFragment(ob, f) {
+			usedFrags[FragmentOutboundTag(f)] = f
 		}
 		// Auto-heal a known-bad shape we used to ship: xhttp's "extra"
 		// must be a JSON object (xray's conf.SplitHTTPConfig), but an
@@ -261,12 +288,25 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			out.Outbounds = append(out.Outbounds, dialerOut)
 		}
 
+		// SlotMasters lists the owner first; the owner's setting wins, then
+		// the first alias that has one.
+		slotFrag, fragged := Fragment{}, false
+		for _, m := range slot.SlotMasters() {
+			if f, ok := frags[normalizeName(m)]; ok {
+				slotFrag, fragged = f, true
+				break
+			}
+		}
+
 		for _, m := range slot.Members {
 			var mob map[string]any
 			if err := json.Unmarshal(m.Outbound, &mob); err != nil {
 				return nil, fmt.Errorf("xray: slot %d member %q: outbound JSON: %w", slot.Index, m.Key, err)
 			}
 			mob["tag"] = SlotMemberTag(slot.Index, m.Key)
+			if fragged && applyFragment(mob, slotFrag) {
+				usedFrags[FragmentOutboundTag(slotFrag)] = slotFrag
+			}
 			healXHTTPExtra(mob)
 			raw, err := json.Marshal(mob)
 			if err != nil {
@@ -305,29 +345,57 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 			"expected":  expected,
 			"tolerance": SlotBalancerTolerance,
 		}
+		// Broken members (the path prober's verdict) sort behind everything,
+		// even demoted members, and never serve as the fallback — unless
+		// every member is broken, when the ranking is all there is.
+		broken := slot.brokenSet()
+		usable := func(k string) bool { return !broken[k] }
+		if len(broken) >= len(slot.Members) {
+			broken, usable = nil, func(string) bool { return true }
+		}
 		fallback := ""
-		if len(slot.Members) > 0 {
-			fallback = slot.Members[0].Key
+		for _, m := range slot.Members {
+			if usable(m.Key) {
+				fallback = m.Key
+				break
+			}
+		}
+		var costs []any
+		exact := func(k string, v float64) {
+			costs = append(costs, map[string]any{
+				"regexp": true,
+				"match":  "^" + regexp.QuoteMeta(SlotMemberTag(slot.Index, k)) + "$",
+				"value":  v,
+			})
+		}
+		// First match wins: broken before preferred, so a broken member the
+		// shortlist hasn't caught up with yet still sorts last.
+		for _, m := range slot.Members {
+			if broken[m.Key] {
+				exact(m.Key, slotBrokenCost)
+			}
 		}
 		if pref := slot.presentPreferred(); len(pref) > 0 {
-			costs := make([]any, 0, len(pref)+1)
 			for _, k := range pref {
-				costs = append(costs, map[string]any{
-					"regexp": true,
-					"match":  "^" + regexp.QuoteMeta(SlotMemberTag(slot.Index, k)) + "$",
-					"value":  1,
-				})
+				exact(k, 1)
 			}
-			// First match wins, so this catches every member not listed above.
+			// Catches every member not listed above.
 			costs = append(costs, map[string]any{
 				"regexp": false,
 				"match":  SlotOutboundPrefix(slot.Index),
 				"value":  slotDemotedCost,
 			})
-			settings["costs"] = costs
-			fallback = pref[0]
+			for _, k := range pref {
+				if usable(k) {
+					fallback = k
+					break
+				}
+			}
 		}
-		if slot.Fallback != "" {
+		if len(costs) > 0 {
+			settings["costs"] = costs
+		}
+		if slot.Fallback != "" && usable(slot.Fallback) {
 			for _, m := range slot.Members {
 				if m.Key == slot.Fallback {
 					fallback = m.Key
@@ -392,6 +460,77 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 				"timeout":     timeout,
 			},
 		})
+	}
+
+	// Path prober: one password-auth socks inbound whose username picks the
+	// outbound — a slot member, or a master chained through one member. Its
+	// rules go right after the api rule, ahead of user rules: they only
+	// match the probe inbound, and a user catch-all must not swallow them.
+	if len(slots) > 0 {
+		var accounts []any
+		var probeRules []json.RawMessage
+		route := func(tag string) {
+			accounts = append(accounts, map[string]any{"user": tag, "pass": ProbePassword})
+			r, _ := json.Marshal(map[string]any{
+				"type":        "field",
+				"inboundTag":  []string{ProbeTag},
+				"user":        []string{tag},
+				"outboundTag": tag,
+			})
+			probeRules = append(probeRules, r)
+		}
+		for _, slot := range slots {
+			for _, m := range slot.Members {
+				route(SlotMemberTag(slot.Index, m.Key))
+			}
+			for _, master := range slot.SlotMasters() {
+				raw, ok := masterObs[normalizeName(master)]
+				if !ok {
+					continue
+				}
+				for _, m := range slot.Members {
+					var cob map[string]any
+					if err := json.Unmarshal(raw, &cob); err != nil {
+						return nil, fmt.Errorf("xray: chain probe %q: %w", master, err)
+					}
+					tag := ChainProbeTag(slot.Index, master, m.Key)
+					cob["tag"] = tag
+					injectDialerProxy(cob, SlotMemberTag(slot.Index, m.Key))
+					healXHTTPExtra(cob)
+					b, err := json.Marshal(cob)
+					if err != nil {
+						return nil, fmt.Errorf("xray: chain probe %q: %w", master, err)
+					}
+					out.Outbounds = append(out.Outbounds, b)
+					route(tag)
+				}
+			}
+		}
+		out.Inbounds = append(out.Inbounds, inbound{
+			Tag:      ProbeTag,
+			Listen:   "127.0.0.1",
+			Port:     ProbePort,
+			Protocol: "socks",
+			Settings: map[string]any{"auth": "password", "accounts": accounts, "udp": false},
+		})
+		// Anything else on the probe inbound fails closed.
+		catch, _ := json.Marshal(map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{ProbeTag},
+			"outboundTag": TagBlock,
+		})
+		probeRules = append(probeRules, catch)
+		rest := append([]json.RawMessage(nil), out.Routing.Rules[1:]...)
+		out.Routing.Rules = append(append(out.Routing.Rules[:1], probeRules...), rest...)
+	}
+
+	fragTags := make([]string, 0, len(usedFrags))
+	for t := range usedFrags {
+		fragTags = append(fragTags, t)
+	}
+	sort.Strings(fragTags)
+	for _, t := range fragTags {
+		out.Outbounds = append(out.Outbounds, fragmentOutbound(usedFrags[t]))
 	}
 
 	// Always-present outbounds so user rules can reference them (TagBlock

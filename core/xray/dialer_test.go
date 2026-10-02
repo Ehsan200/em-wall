@@ -479,3 +479,140 @@ func TestGenerate_SlotExpectedAndFallback(t *testing.T) {
 		t.Errorf("fallbackTag = %v, want the shortlist head", b["fallbackTag"])
 	}
 }
+
+// A member the path prober caught failing sorts behind every other one —
+// even one the shortlist still names — and never serves as the fallback.
+func TestGenerate_BrokenMembersCostLast(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"freedom"}`)
+	members := []DialerMember{{Key: "a", Outbound: ob}, {Key: "b", Outbound: ob}, {Key: "c", Outbound: ob}}
+	master := Config{Name: "m", Enabled: true, Dialer: "xraysub:s", Outbound: `{"protocol":"freedom"}`}
+
+	raw, err := Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{
+		Master: "m", Index: 0, Members: members, Preferred: []string{"a", "b"}, Broken: []string{"a"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := slotBalancer(t, raw)
+	if b["fallbackTag"] != SlotMemberTag(0, "b") {
+		t.Errorf("fallbackTag = %v, want the first unbroken shortlisted member", b["fallbackTag"])
+	}
+	costs := b["strategy"].(map[string]any)["settings"].(map[string]any)["costs"].([]any)
+	first := costs[0].(map[string]any)
+	if first["match"] != "^"+SlotMemberTag(0, "a")+"$" || first["value"] != slotBrokenCost {
+		t.Errorf("costs[0] = %v, want broken a at %v ahead of its shortlist cost", first, slotBrokenCost)
+	}
+
+	// No shortlist: the broken cost alone, and the fallback skips it.
+	raw, _ = Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{
+		Master: "m", Index: 0, Members: members, Broken: []string{"a"},
+	}}})
+	b = slotBalancer(t, raw)
+	if b["fallbackTag"] != SlotMemberTag(0, "b") {
+		t.Errorf("fallbackTag = %v, want first unbroken member", b["fallbackTag"])
+	}
+	if costs := b["strategy"].(map[string]any)["settings"].(map[string]any)["costs"].([]any); len(costs) != 1 {
+		t.Errorf("costs = %v, want only the broken member's", costs)
+	}
+
+	// Every member broken: plain ranking, nothing singled out.
+	raw, _ = Generate([]Config{master}, GenerateOptions{DialerSlots: []DialerSlot{{
+		Master: "m", Index: 0, Members: members, Broken: []string{"a", "b", "c"},
+	}}})
+	b = slotBalancer(t, raw)
+	if _, ok := b["strategy"].(map[string]any)["settings"].(map[string]any)["costs"]; ok {
+		t.Errorf("costs emitted with every member broken")
+	}
+	if b["fallbackTag"] != SlotMemberTag(0, "a") {
+		t.Errorf("fallbackTag = %v, want first member", b["fallbackTag"])
+	}
+}
+
+// The probe inbound routes each username to its outbound — every slot
+// member and every master chained over each member — ahead of user rules,
+// and fails closed for anything else.
+func TestGenerate_ProbeInboundRoutes(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"freedom"}`)
+	members := []DialerMember{{Key: "a", Outbound: ob}, {Key: "b", Outbound: ob}}
+	entries := []Config{
+		{Name: "m1", Enabled: true, Dialer: "xraysub:s", Outbound: `{"protocol":"vmess","settings":{"vnext":[{"address":"1.2.3.4","port":1,"users":[{"id":"x"}]}]}}`},
+		{Name: "m2", Enabled: true, Dialer: "xraysub:s", Outbound: `{"protocol":"freedom"}`},
+	}
+	raw, err := Generate(entries, GenerateOptions{
+		RoutingRules: `[{"type":"field","network":"tcp,udp","outboundTag":"direct"}]`,
+		DialerSlots:  []DialerSlot{{Master: "m1", Aliases: []string{"m2"}, Index: 0, Members: members}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := outboundsByTag(t, raw)
+	for _, m := range []string{"m1", "m2"} {
+		for _, k := range []string{"a", "b"} {
+			tag := ChainProbeTag(0, m, k)
+			if got := dialerProxyOf(obs[tag]); got != SlotMemberTag(0, k) {
+				t.Errorf("%s dialerProxy = %q, want the one member %q", tag, got, SlotMemberTag(0, k))
+			}
+		}
+	}
+	if got := dialerProxyOf(obs["out-m1"]); got != DialerOutboundTag("m1") {
+		t.Errorf("the master itself still dials through its slot: %q", got)
+	}
+
+	var cfg struct {
+		Inbounds []struct {
+			Tag      string         `json:"tag"`
+			Port     int            `json:"port"`
+			Settings map[string]any `json:"settings"`
+		} `json:"inbounds"`
+		Routing struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var accounts []any
+	for _, in := range cfg.Inbounds {
+		if in.Tag == ProbeTag {
+			if in.Port != ProbePort || in.Settings["auth"] != "password" {
+				t.Errorf("probe inbound = %+v", in)
+			}
+			accounts = in.Settings["accounts"].([]any)
+		}
+	}
+	if len(accounts) != 2+2*2 {
+		t.Fatalf("accounts = %d, want 2 members + 2 masters × 2 members", len(accounts))
+	}
+	// api rule, then 6 probe routes + the fail-closed catch-all, then the
+	// user's catch-all.
+	rules := cfg.Routing.Rules
+	if len(rules) < 9 {
+		t.Fatalf("rules = %v", rules)
+	}
+	for i := 1; i <= 7; i++ {
+		if in := rules[i]["inboundTag"].([]any); in[0] != ProbeTag {
+			t.Errorf("rules[%d] = %v, want a probe rule", i, rules[i])
+		}
+	}
+	if rules[1]["user"].([]any)[0] != rules[1]["outboundTag"] {
+		t.Errorf("probe rule routes user %v to %v", rules[1]["user"], rules[1]["outboundTag"])
+	}
+	if rules[7]["outboundTag"] != TagBlock || rules[7]["user"] != nil {
+		t.Errorf("probe catch-all = %v, want block", rules[7])
+	}
+	if rules[8]["outboundTag"] != "direct" {
+		t.Errorf("user rule moved: rules[8] = %v", rules[8])
+	}
+	// Chain tags must stay out of the observatory's prefix and the slot
+	// member pattern.
+	for tag := range obs {
+		if strings.HasPrefix(tag, "chain") {
+			if strings.HasPrefix(tag, ObservatorySelectorPrefix) {
+				t.Errorf("%s matches the observatory selector", tag)
+			}
+			if _, ok := SlotMemberKey(tag); ok {
+				t.Errorf("%s parses as a slot member", tag)
+			}
+		}
+	}
+}

@@ -8,6 +8,7 @@ import {
 } from '../../wailsjs/go/main/App';
 import MonacoJsonEditor from './MonacoJsonEditor.vue';
 import DialerPicker from './DialerPicker.vue';
+import FragmentControl, { type FragmentValue } from './FragmentControl.vue';
 import XraySubscriptionsPanel from './XraySubscriptionsPanel.vue';
 import SearchSelect from './SearchSelect.vue';
 
@@ -24,6 +25,10 @@ type XrayRow = {
   // this outbound ('' = it will).
   mux: boolean;
   muxNote: string;
+  // TLS ClientHello fragmentation; null = off. fragmentNote says why it
+  // won't apply ('' = it will).
+  fragment: FragmentValue | null;
+  fragmentNote: string;
   // Provenance for an entry promoted out of a subscription's node pool.
   // subName is the subscription it was copied from ('' when hand-written);
   // sourceGone marks one whose node has left that pool, so nothing is
@@ -80,8 +85,8 @@ const defaultOutbound = `{
   "settings": {}
 }`;
 
-const draft = ref<{ open: boolean; name: string; outbound: string; enabled: boolean; dialer: string; mux: boolean }>({
-  open: false, name: '', outbound: defaultOutbound, enabled: true, dialer: '', mux: false,
+const draft = ref<{ open: boolean; name: string; outbound: string; enabled: boolean; dialer: string; mux: boolean; fragment: FragmentValue | null }>({
+  open: false, name: '', outbound: defaultOutbound, enabled: true, dialer: '', mux: false, fragment: null,
 });
 
 // Shown on the Multiplex toggle. Mirrors core/xray/mux.go.
@@ -91,7 +96,7 @@ const MUX_HELP =
   'every connection on it drops together. Applies to VMess, VLESS (without XTLS flow) and Trojan ' +
   'over TCP / WebSocket / HTTPUpgrade; gRPC and XHTTP already multiplex. Your server needs no change.';
 
-type EditState = { id: number; name: string; outbound: string; enabled: boolean; dialer: string; mux: boolean; muxNote: string };
+type EditState = { id: number; name: string; outbound: string; enabled: boolean; dialer: string; mux: boolean; muxNote: string; fragment: FragmentValue | null; fragmentNote: string };
 const editing = ref<EditState | null>(null);
 
 const pendingDelete = ref<number | null>(null);
@@ -130,19 +135,20 @@ const enabledCount = computed(() => entries.value.filter((e) => e.enabled).lengt
 // three-way All / yes / no switch; they combine with AND. The entry being
 // edited always stays visible, so renaming it can't make it vanish.
 type FilterMode = 'all' | 'yes' | 'no';
-type EntryFilter = 'enabled' | 'dialer' | 'mux';
+type EntryFilter = 'enabled' | 'dialer' | 'mux' | 'fragment';
 const ENTRY_FILTERS: { key: EntryFilter; label: string; yes: string; no: string; test: (e: XrayRow) => boolean }[] = [
   { key: 'enabled', label: 'Status', yes: 'Enabled', no: 'Disabled', test: (e) => e.enabled },
   { key: 'dialer', label: 'Dialer', yes: 'With', no: 'Without', test: (e) => !!e.dialer },
   { key: 'mux', label: 'Mux', yes: 'On', no: 'Off', test: (e) => e.mux },
+  { key: 'fragment', label: 'Fragment', yes: 'On', no: 'Off', test: (e) => !!e.fragment },
 ];
 const search = ref<string>('');
-const filterModes = ref<Record<EntryFilter, FilterMode>>({ enabled: 'all', dialer: 'all', mux: 'all' });
+const filterModes = ref<Record<EntryFilter, FilterMode>>({ enabled: 'all', dialer: 'all', mux: 'all', fragment: 'all' });
 const filtersActive = computed(() =>
   !!search.value.trim() || Object.values(filterModes.value).some((m) => m !== 'all'));
 function clearFilters() {
   search.value = '';
-  filterModes.value = { enabled: 'all', dialer: 'all', mux: 'all' };
+  filterModes.value = { enabled: 'all', dialer: 'all', mux: 'all', fragment: 'all' };
 }
 function filterCount(test: (e: XrayRow) => boolean, mode: FilterMode): number {
   if (mode === 'all') return entries.value.length;
@@ -217,8 +223,13 @@ async function refresh() {
 
 // ---------- Outbound CRUD ----------
 
+// The Go side takes *ipc.XrayFragment, nil = off; Wails types it non-null.
+function fragmentArg(f: FragmentValue | null): any {
+  return f;
+}
+
 function openDraft() {
-  draft.value = { open: true, name: '', outbound: defaultOutbound, enabled: true, dialer: '', mux: false };
+  draft.value = { open: true, name: '', outbound: defaultOutbound, enabled: true, dialer: '', mux: false, fragment: null };
 }
 
 function cancelDraft() {
@@ -229,7 +240,7 @@ async function submitDraft() {
   if (!draftIsValid.value || busy.value) return;
   busy.value = true;
   try {
-    await AddXray(draft.value.name.trim().toLowerCase(), draft.value.outbound, draft.value.enabled, draft.value.dialer.trim(), draft.value.mux);
+    await AddXray(draft.value.name.trim().toLowerCase(), draft.value.outbound, draft.value.enabled, draft.value.dialer.trim(), draft.value.mux, fragmentArg(draft.value.fragment));
     draft.value.open = false;
     await refresh();
   } catch (e: any) {
@@ -240,7 +251,8 @@ async function submitDraft() {
 }
 
 function beginEdit(row: XrayRow) {
-  editing.value = { id: row.id, name: row.name, outbound: row.outbound, enabled: row.enabled, dialer: row.dialer || '', mux: !!row.mux, muxNote: row.muxNote || '' };
+  editing.value = { id: row.id, name: row.name, outbound: row.outbound, enabled: row.enabled, dialer: row.dialer || '', mux: !!row.mux, muxNote: row.muxNote || '',
+    fragment: row.fragment ? { ...row.fragment } : null, fragmentNote: row.fragmentNote || '' };
 }
 
 function cancelEdit() {
@@ -252,7 +264,7 @@ async function saveEdit() {
   if (!e || !editingIsValid.value || busy.value) return;
   busy.value = true;
   try {
-    await UpdateXray(e.id, e.name.trim().toLowerCase(), e.outbound, e.enabled, e.dialer.trim(), e.mux);
+    await UpdateXray(e.id, e.name.trim().toLowerCase(), e.outbound, e.enabled, e.dialer.trim(), e.mux, fragmentArg(e.fragment));
     editing.value = null;
     await refresh();
   } catch (err: any) {
@@ -542,7 +554,7 @@ async function applyImport() {
   if (!linkDialog.value.link.trim()) return;
   try {
     const r = await ParseXrayLink(linkDialog.value.link.trim());
-    draft.value = { open: true, name: r.name, outbound: r.outbound, enabled: true, dialer: '', mux: false };
+    draft.value = { open: true, name: r.name, outbound: r.outbound, enabled: true, dialer: '', mux: false, fragment: null };
     linkDialog.value.open = false;
     linkDialog.value.link = '';
     subTab.value = 'outbounds';
@@ -684,6 +696,10 @@ defineExpose({ refresh });
                     title="Connections share a few long-lived tunnels to the server: no handshake per new connection.">mux</span>
               <span v-else-if="row.mux" class="tag" style="font-size: 11px; background: var(--panel-2); color: var(--text-dim)"
                     :title="`Multiplexing is on but not applied: ${row.muxNote}.`">mux · n/a</span>
+              <span v-if="row.fragment && !row.fragmentNote" class="tag" style="font-size: 11px; background: var(--panel-2); color: var(--text-dim)"
+                    :title="`TLS ClientHello split: packets ${row.fragment.packets}, ${row.fragment.length} bytes, ${row.fragment.interval} ms apart${row.dialer ? ' — applied to the pool nodes' : ''}.`">fragment</span>
+              <span v-else-if="row.fragment" class="tag" style="font-size: 11px; background: var(--panel-2); color: var(--text-dim)"
+                    :title="`Fragmentation is on but not applied: ${row.fragmentNote}.`">fragment · n/a</span>
               <code style="font-size: 11px; color: var(--text-dim)">127.0.0.1:{{ row.socksPort }}</code>
               <span v-if="testingIds.has(row.id)" class="tag" style="font-size: 11px">testing…</span>
               <span v-else-if="testResults[row.id]" class="tag"
@@ -747,6 +763,7 @@ defineExpose({ refresh });
           <span v-if="editing.mux && editing.muxNote" class="muted" style="font-size: 11px; color: var(--warn)">
             Multiplexing won't apply to this outbound: {{ editing.muxNote }}.
           </span>
+          <FragmentControl v-model="editing.fragment" :master="!!editing.dialer.trim()" :note="editing.fragmentNote" />
           <DialerPicker v-model="editing.dialer" :xray-names="entryNames" :sub-names="subNames"
                         :proxy-names="proxyNames" :self-name="editing.name" />
           <MonacoJsonEditor v-model="editing.outbound" height="380px" />
@@ -773,6 +790,7 @@ defineExpose({ refresh });
         <span class="muted" style="font-size: 11px">
           The <code>tag</code> field is auto-managed (forced to <code>out-{{ draft.name || 'NAME' }}</code> on save) — any value you set here is overwritten.
         </span>
+        <FragmentControl v-model="draft.fragment" :master="!!draft.dialer.trim()" />
         <DialerPicker v-model="draft.dialer" :xray-names="entryNames" :sub-names="subNames"
                       :proxy-names="proxyNames" :self-name="draft.name" />
         <MonacoJsonEditor v-model="draft.outbound" height="380px" />

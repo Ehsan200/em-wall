@@ -409,12 +409,21 @@ func (s *xraySupervisor) PollNodeHealth(ctx context.Context) {
 // live. Called on a real network change: a node judged dead on the old
 // network may well work on this one, and waiting out its park time would
 // keep it out of its pool for up to nodeParkMax.
+//
+// Path verdicts (xray_pathprobe.go) are dropped too: a node the old
+// network choked may carry everything on this one.
 func (s *xraySupervisor) ReturnParked(ctx context.Context) {
+	cleared := s.paths.reset()
 	events := s.parker.releaseAll()
-	if len(events) == 0 {
+	if len(events) == 0 && !cleared {
 		return
 	}
-	s.logger.Printf("xray supervisor: network changed — %d parked pool node(s) back on trial", len(events))
+	if len(events) > 0 {
+		s.logger.Printf("xray supervisor: network changed — %d parked pool node(s) back on trial", len(events))
+	}
+	if cleared {
+		s.logger.Printf("xray supervisor: network changed — path verdicts cleared, every pool node re-tested")
+	}
 	if err := s.Reconcile(ctx); err != nil {
 		s.logger.Printf("xray supervisor: return parked nodes: %v", err)
 	}

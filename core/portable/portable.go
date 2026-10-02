@@ -94,6 +94,7 @@ type BundleXray struct {
 	Enabled  bool   `json:"enabled"`
 	Dialer   string `json:"dialer"`
 	Mux      bool   `json:"mux,omitempty"`
+	Fragment string `json:"fragment,omitempty"`
 }
 
 // BundleRule is a rule stripped of DB identity (ID/timestamps). Interface

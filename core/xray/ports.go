@@ -46,3 +46,15 @@ func nextFreePort(used map[int]bool) (int, error) {
 	}
 	return 0, ErrNoPortFree
 }
+
+// ProbePort is the loopback SOCKS5 inbound the daemon's path prober dials
+// (daemon/xray_pathprobe.go). It requires a username, and a routing rule
+// per username sends the connection to that outbound — one port reaches
+// every slot member and every master-through-member chain, instead of one
+// port each. The password is not a secret (the listener is loopback); it
+// exists because xray only reads a username under password auth.
+const (
+	ProbePort     = 11934
+	ProbeTag      = "probe-in"
+	ProbePassword = "em-wall"
+)

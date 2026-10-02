@@ -280,6 +280,19 @@ func pickAgile(sl xray.DialerSlot, byTag map[string]nodeStatus, old agilePick) (
 	if len(alive) == 0 {
 		return agilePick{}, false
 	}
+	// Members the path prober caught failing the real path go, unless
+	// nothing else is alive (see dropBroken).
+	if len(sl.Broken) > 0 {
+		var ok []cand
+		for _, c := range alive {
+			if !slices.Contains(sl.Broken, c.key) {
+				ok = append(ok, c)
+			}
+		}
+		if len(ok) > 0 {
+			alive = ok
+		}
+	}
 	sort.SliceStable(alive, func(i, j int) bool {
 		if alive[i].cost != alive[j].cost {
 			return alive[i].cost < alive[j].cost

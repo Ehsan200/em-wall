@@ -153,6 +153,7 @@ func (sl *slotShortlist) observe(slots []xray.DialerSlot, byTag map[string]nodeS
 				}
 			}
 		}
+		dropBroken(scores, slot.Broken)
 		// A member that doesn't qualify this round starts over next time:
 		// its old average says nothing about the node that comes back.
 		sl.smooth[slot.Master] = scores
@@ -271,4 +272,26 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// dropBroken removes the path prober's broken members (DialerSlot.Broken)
+// from a round's scores, so they neither keep nor win a seat — unless that
+// would leave nothing, when every member failing the real path says more
+// about the link than about any one of them.
+func dropBroken(scores map[string]time.Duration, broken []string) {
+	if len(broken) == 0 {
+		return
+	}
+	bad := make(map[string]bool, len(broken))
+	for _, k := range broken {
+		bad[k] = true
+	}
+	for k := range scores {
+		if !bad[k] {
+			for k := range bad {
+				delete(scores, k)
+			}
+			return
+		}
+	}
 }

@@ -125,17 +125,47 @@ func proxyToDTO(p proxy.Proxy) ipc.ProxyDTO {
 
 func xrayToDTO(c xray.Config) ipc.XrayDTO {
 	return ipc.XrayDTO{
-		ID:        c.ID,
-		Name:      c.Name,
-		Outbound:  c.Outbound,
-		SocksPort: c.SocksPort,
-		Enabled:   c.Enabled,
-		Dialer:    c.Dialer,
-		Mux:       c.Mux,
-		MuxNote:   muxNote(c),
-		CreatedAt: c.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: c.UpdatedAt.Format(time.RFC3339),
+		ID:           c.ID,
+		Name:         c.Name,
+		Outbound:     c.Outbound,
+		SocksPort:    c.SocksPort,
+		Enabled:      c.Enabled,
+		Dialer:       c.Dialer,
+		Mux:          c.Mux,
+		MuxNote:      muxNote(c),
+		Fragment:     fragmentToDTO(c.Fragment),
+		FragmentNote: fragmentNote(c),
+		CreatedAt:    c.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:    c.UpdatedAt.Format(time.RFC3339),
 	}
+}
+
+// fragmentToDTO / fragmentFromDTO convert between the stored JSON form
+// and the wire shape; nil means off.
+func fragmentToDTO(stored string) *ipc.XrayFragment {
+	f, ok := xray.ParseFragment(stored)
+	if !ok {
+		return nil
+	}
+	return &ipc.XrayFragment{Packets: f.Packets, Length: f.Length, Interval: f.Interval}
+}
+
+func fragmentFromDTO(f *ipc.XrayFragment) string {
+	if f == nil {
+		return ""
+	}
+	return xray.Fragment{Packets: f.Packets, Length: f.Length, Interval: f.Interval}.Encode()
+}
+
+// fragmentNote explains why an entry's fragment setting won't take effect;
+// empty when it will, or when fragment is off.
+func fragmentNote(c xray.Config) string {
+	f, ok := xray.ParseFragment(c.Fragment)
+	if !ok {
+		return ""
+	}
+	_, why := xray.FragmentSupport(c.Outbound, strings.TrimSpace(c.Dialer) != "", f)
+	return why
 }
 
 // muxNote explains why an entry's mux setting won't take effect for its

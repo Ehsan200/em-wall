@@ -836,6 +836,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			Enabled:  p.Enabled,
 			Dialer:   p.Dialer,
 			Mux:      p.Mux,
+			Fragment: fragmentFromDTO(p.Fragment),
 		})
 		if err != nil {
 			return nil, err
@@ -868,6 +869,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			Enabled:  p.Enabled,
 			Dialer:   p.Dialer,
 			Mux:      p.Mux,
+			Fragment: fragmentFromDTO(p.Fragment),
 		}); err != nil {
 			return nil, err
 		}

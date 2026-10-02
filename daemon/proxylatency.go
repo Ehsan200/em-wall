@@ -36,6 +36,13 @@ const (
 	// proxyLatencyTTL must exceed the interval so a sample stays valid
 	// between probe rounds (and survives one skipped round).
 	proxyLatencyTTL = 90 * time.Second
+	// A transfer test (netprobe.MeasureDownload) rides every
+	// proxyTransferEvery-th full round: a member can answer every URL test
+	// and still choke real connections a few KB in (see probeProxies).
+	// Not every round — it moves DownloadTestBytes per member through the
+	// user's own exits.
+	proxyTransferEvery   = 2
+	proxyTransferTimeout = 8 * time.Second
 )
 
 // The ranking prober runs a URL test (netprobe.MeasureURL) — the same
@@ -94,11 +101,19 @@ func multiBindingProxyNames(rs []rules.Rule) []string {
 // again together (observed as every member of every set flapping in
 // lockstep through a local outage). Such a round is dropped; ranking keeps
 // its last good picture until the link returns.
-func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.LatencyTracker, names []string, host string, port int) {
+//
+// With transfer set, a name that passed at least one URL test must also
+// pull netprobe.DownloadTestBytes in one go. A path that stalls past a
+// few KB (observed: raw-TCP VLESS on a filtering home ISP, 7–13 KB then
+// nothing) answers every 204 in time but can't finish a TLS handshake, so
+// its URL results mean nothing: the whole round is recorded as failures.
+// Choked names are returned for logging.
+func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.LatencyTracker, names []string, host string, port int, transfer bool) (choked []string) {
 	sem := make(chan struct{}, proxyProbeParallel)
 	var wg sync.WaitGroup
 	results := make([][]netprobe.Result, len(names))
 	probed := make([]bool, len(names))
+	stalled := make([]bool, len(names))
 	for i, name := range names {
 		p, err := store.GetByName(ctx, name)
 		if err != nil {
@@ -120,6 +135,19 @@ func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.Lat
 				pctx, cancel := context.WithTimeout(ctx, proxyProbeTimeout)
 				results[i] = append(results[i], netprobe.MeasureURL(pctx, d, host, port, netprobe.URLTestPath))
 				cancel()
+			}
+			if !transfer || ctx.Err() != nil || !anyOK(results[i]) {
+				return
+			}
+			tctx, cancel := context.WithTimeout(ctx, proxyTransferTimeout)
+			defer cancel()
+			r := netprobe.MeasureDownload(tctx, d, netprobe.DownloadTestHost, netprobe.DownloadTestPort,
+				netprobe.DownloadTestPath(netprobe.DownloadTestBytes), netprobe.DownloadTestBytes)
+			if !r.OK {
+				stalled[i] = true
+				for a := range results[i] {
+					results[i][a] = netprobe.Result{Stage: r.Stage, Err: r.Err}
+				}
 			}
 		}(i, dialer)
 	}
@@ -144,6 +172,19 @@ func probeProxies(ctx context.Context, store *proxy.Store, tracker *netprobe.Lat
 			for _, r := range results[i] {
 				tracker.Record(name, r.Latency, r.OK)
 			}
+			if stalled[i] {
+				choked = append(choked, name)
+			}
 		}
 	}
+	return choked
+}
+
+func anyOK(rs []netprobe.Result) bool {
+	for _, r := range rs {
+		if r.OK {
+			return true
+		}
+	}
+	return false
 }

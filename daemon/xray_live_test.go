@@ -98,8 +98,9 @@ func TestPlanLive(t *testing.T) {
 		}}}
 		later, _ := genLive(t, []xray.Config{base[0], m}, xray.GenerateOptions{DialerSlots: slots2})
 		p = planLive(now, later)
-		if p.restart || len(p.addOut) != 1 || len(p.rmOut) != 1 {
-			t.Fatalf("pool churn plan = %+v, want one member swapped live", p)
+		// The member and its chain-probe outbound (master over that member).
+		if p.restart || len(p.addOut) != 2 || len(p.rmOut) != 2 {
+			t.Fatalf("pool churn plan = %+v, want one member (and its chain probe) swapped live", p)
 		}
 	})
 

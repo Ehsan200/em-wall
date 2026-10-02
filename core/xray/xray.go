@@ -43,7 +43,10 @@ type Config struct {
 	// at a node that no longer exists.
 	// Mux opts the entry into connection multiplexing (see mux.go). Applied
 	// only where it helps and is compatible; ignored otherwise.
-	Mux            bool      `gorm:"not null;default:false;column:mux"`
+	Mux bool `gorm:"not null;default:false;column:mux"`
+	// Fragment, when non-empty, is the entry's Fragment settings in their
+	// stored JSON form (see fragment.go); empty = off.
+	Fragment       string    `gorm:"not null;default:'';column:fragment;type:text"`
 	SubID          int64     `gorm:"not null;default:0;index;column:sub_id"`
 	SubFingerprint string    `gorm:"not null;default:'';column:sub_fingerprint"`
 	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime"`

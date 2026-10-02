@@ -59,6 +59,7 @@ type xraySupervisor struct {
 	shortlist   *slotShortlist  // best members per slot, from observatory data; nil = leastLoad alone
 	timeline    *poolTimeline   // recent per-node pool health, for the health view; nil records nothing
 	agile       *agilePicker    // agile pools' current picks (xray_strategy.go); nil = none
+	paths       *pathProber     // real-path verdicts on pool members (xray_pathprobe.go); nil = none
 	auto        *autoClassifier // auto pools' stable/agile verdicts; nil = always stable
 	noPins      map[string]bool // manual pools already warned for having no pinned node; under mu
 	lastDecide  time.Time       // last park/shortlist round; touched only by PollNodeHealth
@@ -110,6 +111,7 @@ func newXraySupervisor(binary, dataDir, runtimeDir, logDir string, xs *xray.Stor
 		shortlist:  newSlotShortlist(),
 		timeline:   newPoolTimeline(),
 		agile:      newAgilePicker(),
+		paths:      newPathProber(),
 		auto:       newAutoClassifier(),
 	}
 	if fi, err := os.Stat(binary); err == nil && !fi.IsDir() {
@@ -436,6 +438,11 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 		}
 		slots = append(slots, slot)
 		idx++
+	}
+	// After the loop: aliases join a slot after it was built, and a member
+	// that can't carry an alias is as broken for the slot as for its owner.
+	for i := range slots {
+		slots[i].Broken = s.paths.broken(slots[i])
 	}
 	s.parker.retain(known)
 	s.noPins = noPins

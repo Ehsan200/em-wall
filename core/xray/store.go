@@ -173,6 +173,7 @@ func (s *Store) Update(ctx context.Context, c Config) error {
 		"enabled":    c.Enabled,
 		"dialer":     c.Dialer,
 		"mux":        c.Mux,
+		"fragment":   c.Fragment,
 		"updated_at": c.UpdatedAt,
 	}
 
@@ -302,6 +303,17 @@ func validate(c *Config) error {
 		}
 	}
 	c.Dialer = FormatDialer(refs)
+
+	if f, ok := ParseFragment(c.Fragment); ok {
+		if f, err = f.Normalize(); err != nil {
+			return err
+		}
+		c.Fragment = f.Encode()
+	} else if strings.TrimSpace(c.Fragment) != "" {
+		return ErrInvalidFragment
+	} else {
+		c.Fragment = ""
+	}
 	return nil
 }
 

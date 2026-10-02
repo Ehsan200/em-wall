@@ -46,7 +46,7 @@ func probeStore(t *testing.T, names ...string) *proxy.Store {
 func TestProbeRoundAllFailRecordsNothing(t *testing.T) {
 	st := probeStore(t, "a", "b")
 	tr := netprobe.NewLatencyTracker(time.Minute)
-	probeProxies(context.Background(), st, tr, []string{"a", "b"}, "example.com", 443)
+	probeProxies(context.Background(), st, tr, []string{"a", "b"}, "example.com", 443, false)
 	if snap := tr.Snapshot(); len(snap) != 0 {
 		t.Fatalf("all-fail round recorded %+v, want nothing", snap)
 	}
@@ -57,7 +57,7 @@ func TestProbeRoundAllFailRecordsNothing(t *testing.T) {
 func TestProbeRoundSingleFailureRecorded(t *testing.T) {
 	st := probeStore(t, "a")
 	tr := netprobe.NewLatencyTracker(time.Minute)
-	probeProxies(context.Background(), st, tr, []string{"a"}, "example.com", 443)
+	probeProxies(context.Background(), st, tr, []string{"a"}, "example.com", 443, false)
 	if snap := tr.Snapshot(); len(snap) != 1 || snap[0].Fails != proxyProbeAttempts {
 		t.Fatalf("snapshot = %+v, want %d failures for a (one per attempt)", snap, proxyProbeAttempts)
 	}

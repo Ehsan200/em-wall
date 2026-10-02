@@ -161,6 +161,26 @@ type DialerSlot struct {
 	// (an agile pool's spare: answering, but carrying nothing).
 	Expected int
 	Fallback string
+
+	// Broken are member keys the daemon's path prober caught failing on the
+	// real path (daemon/xray_pathprobe.go): the node chokes a transfer past
+	// a few KB, or can't carry one of the slot's masters. Their observatory
+	// pings can look perfect — the ping is too small to notice — so
+	// Generate costs them behind every other member and never names one as
+	// the fallback. Still a ranking, not an exclusion.
+	Broken []string
+}
+
+// brokenSet returns Broken as a set; nil when empty.
+func (s DialerSlot) brokenSet() map[string]bool {
+	if len(s.Broken) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(s.Broken))
+	for _, k := range s.Broken {
+		out[k] = true
+	}
+	return out
 }
 
 // Agile reports whether the pool runs the agile strategy.
@@ -217,6 +237,15 @@ func SlotMemberKey(tag string) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+// ChainProbeTag is the probe-only outbound that dials master's server
+// through slot member key: a copy of the master's outbound whose
+// dialerProxy is that one member instead of the slot's balancer. Only the
+// probe inbound routes to it. It must not start with "slot" (the
+// observatory's selector prefix) or contain a slot member tag.
+func ChainProbeTag(slot int, master, key string) string {
+	return fmt.Sprintf("chain%d.%s.%s", slot, sanitizeTag(master), sanitizeTag(key))
 }
 
 // DialerOutboundTag is the stable socks outbound a master's dialerProxy

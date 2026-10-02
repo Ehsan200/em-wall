@@ -541,6 +541,11 @@ type XrayDTO struct {
 	// won't take effect for this outbound (empty = it will).
 	Mux     bool   `json:"mux"`
 	MuxNote string `json:"muxNote"`
+	// Fragment splits the TLS ClientHello (or first packets) of the
+	// entry's own dial — for a master, of its pool nodes' dials. Nil =
+	// off. FragmentNote says why it won't take effect (empty = it will).
+	Fragment     *XrayFragment `json:"fragment"`
+	FragmentNote string        `json:"fragmentNote"`
 	// Origin, when this entry was promoted out of a subscription's node
 	// pool. SubName is the subscription it came from, empty for a
 	// hand-written entry. SourceGone marks a promoted entry whose node is
@@ -553,21 +558,32 @@ type XrayDTO struct {
 	UpdatedAt  string `json:"updatedAt"`
 }
 
+// XrayFragment mirrors xray.Fragment: Packets "tlshello" or "1-3",
+// Length and Interval as "MIN-MAX" (bytes / milliseconds). Empty fields
+// take the defaults.
+type XrayFragment struct {
+	Packets  string `json:"packets"`
+	Length   string `json:"length"`
+	Interval string `json:"interval"`
+}
+
 type XrayAddParams struct {
-	Name     string `json:"name"`
-	Outbound string `json:"outbound"`
-	Enabled  bool   `json:"enabled"`
-	Dialer   string `json:"dialer"`
-	Mux      bool   `json:"mux"`
+	Name     string        `json:"name"`
+	Outbound string        `json:"outbound"`
+	Enabled  bool          `json:"enabled"`
+	Dialer   string        `json:"dialer"`
+	Mux      bool          `json:"mux"`
+	Fragment *XrayFragment `json:"fragment"`
 }
 
 type XrayUpdateParams struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Outbound string `json:"outbound"`
-	Enabled  bool   `json:"enabled"`
-	Dialer   string `json:"dialer"`
-	Mux      bool   `json:"mux"`
+	ID       int64         `json:"id"`
+	Name     string        `json:"name"`
+	Outbound string        `json:"outbound"`
+	Enabled  bool          `json:"enabled"`
+	Dialer   string        `json:"dialer"`
+	Mux      bool          `json:"mux"`
+	Fragment *XrayFragment `json:"fragment"`
 }
 
 // XraySetDTO is the public view of one outbound set. Members are typed
