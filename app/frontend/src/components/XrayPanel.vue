@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue';
 import {
-  XrayStatus, ListXray, AddXray, UpdateXray, DeleteXray, SetXrayEnabled,
+  XrayStatus, ListXray, AddXray, UpdateXray, DeleteXray, SetXrayEnabled, BulkXrayDialer,
   XrayRouting, SetXrayRouting, ParseXrayLink, TestXray,
   ListXraySubs, ListProxies,
   ListXraySets, AddXraySet, UpdateXraySet, DeleteXraySet, SetXraySetEnabled,
@@ -196,6 +196,7 @@ async function refresh() {
   try {
     status.value = (await XrayStatus()) as unknown as XrayStatusRow;
     entries.value = ((await ListXray()) || []) as unknown as XrayRow[];
+    pruneSelection();
     // Names for the Dialer picker. Proxy list excludes the hidden internal
     // rows the supervisor mints (names start with "_").
     try {
@@ -269,6 +270,103 @@ async function saveEdit() {
     await refresh();
   } catch (err: any) {
     error.value = err?.message || String(err);
+  } finally {
+    busy.value = false;
+  }
+}
+
+// ---------- Bulk dialer edit ----------
+//
+// Rows carry a checkbox; with anything selected a toolbar edits the
+// Dialer of every selected entry in one daemon call (validated as a whole
+// batch, one xray reconcile). Replace sets the exact list (empty clears
+// it), Add appends refs an entry lacks, Remove drops the ticked refs —
+// offered from what the selected entries actually name, so a dangling
+// ref to a deleted subscription can be removed too.
+
+type BulkDialerMode = 'replace' | 'add' | 'remove';
+const BULK_MODE_OPTIONS = [
+  { value: 'replace', label: 'Replace with' },
+  { value: 'add', label: 'Add' },
+  { value: 'remove', label: 'Remove' },
+];
+
+const selected = ref<Set<number>>(new Set());
+const selectedCount = computed(() => selected.value.size);
+const bulkDialer = ref<{ mode: BulkDialerMode; dialer: string; remove: string[] } | null>(null);
+
+function toggleSelected(id: number) {
+  const next = new Set(selected.value);
+  if (next.has(id)) next.delete(id); else next.add(id);
+  selected.value = next;
+}
+function selectAllVisible() {
+  selected.value = new Set(filteredEntries.value.map((e) => e.id));
+}
+function clearSelection() {
+  selected.value = new Set();
+  bulkDialer.value = null;
+}
+// Drop IDs of entries that no longer exist (deleted, or renamed away by
+// another client) so the daemon never sees a stale batch.
+function pruneSelection() {
+  if (selected.value.size === 0) return;
+  const ids = new Set(entries.value.map((e) => e.id));
+  const next = new Set([...selected.value].filter((id) => ids.has(id)));
+  if (next.size !== selected.value.size) selected.value = next;
+  if (next.size === 0) bulkDialer.value = null;
+}
+
+function openBulkDialer() {
+  bulkDialer.value = { mode: 'replace', dialer: '', remove: [] };
+}
+
+// Refs named by any selected entry, for Remove.
+const selectedDialerRefs = computed<string[]>(() => {
+  const out = new Set<string>();
+  for (const e of entries.value) {
+    if (!selected.value.has(e.id)) continue;
+    for (const r of (e.dialer || '').split(',')) if (r.trim()) out.add(r.trim());
+  }
+  return [...out].sort();
+});
+
+function toggleBulkRemove(ref: string) {
+  const b = bulkDialer.value;
+  if (!b) return;
+  const i = b.remove.indexOf(ref);
+  if (i >= 0) b.remove.splice(i, 1); else b.remove.push(ref);
+}
+
+const bulkDialerValue = computed(() => {
+  const b = bulkDialer.value;
+  if (!b) return '';
+  return b.mode === 'remove' ? b.remove.join(',') : b.dialer.trim();
+});
+const bulkDialerIsValid = computed(() => {
+  const b = bulkDialer.value;
+  if (!b || selectedCount.value === 0) return false;
+  return b.mode === 'replace' || !!bulkDialerValue.value;
+});
+const bulkApplyLabel = computed(() => {
+  const n = selectedCount.value;
+  const what = `${n} entr${n === 1 ? 'y' : 'ies'}`;
+  const b = bulkDialer.value;
+  if (b?.mode === 'replace' && !bulkDialerValue.value) return `Clear dialer on ${what}`;
+  return `Apply to ${what}`;
+});
+
+async function applyBulkDialer() {
+  const b = bulkDialer.value;
+  if (!b || !bulkDialerIsValid.value || busy.value) return;
+  busy.value = true;
+  try {
+    const r = await BulkXrayDialer([...selected.value], b.mode, bulkDialerValue.value);
+    bulkDialer.value = null;
+    await refresh();
+    if (r.updated === 0) error.value = 'No dialer changed — the selected entries already matched.';
+  } catch (e: any) {
+    error.value = e?.message || String(e);
   } finally {
     busy.value = false;
   }
@@ -671,12 +769,56 @@ defineExpose({ refresh });
         No outbounds match the current search and filters.
       </div>
 
+      <div v-if="selectedCount > 0" class="bulk-toolbar col" style="gap: 10px">
+        <div class="row" style="gap: 10px; align-items: center; flex-wrap: wrap">
+          <strong style="font-size: 13px">{{ selectedCount }} selected</strong>
+          <button v-if="!bulkDialer" class="primary" @click="openBulkDialer" :disabled="busy">Change dialer…</button>
+          <button @click="selectAllVisible" :disabled="busy || filteredEntries.every((e) => selected.has(e.id))"
+                  title="Select every outbound matching the current search and filters">
+            Select all visible ({{ filteredEntries.length }})
+          </button>
+          <button @click="clearSelection" :disabled="busy">Clear</button>
+        </div>
+        <template v-if="bulkDialer">
+          <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
+            <span class="muted" style="font-size: 11px">dialer:</span>
+            <SearchSelect v-model="bulkDialer.mode" :options="BULK_MODE_OPTIONS" style="width: 140px" />
+            <div style="flex: 1"></div>
+            <button @click="bulkDialer = null" :disabled="busy">Cancel</button>
+            <button class="primary" @click="applyBulkDialer" :disabled="!bulkDialerIsValid || busy">{{ bulkApplyLabel }}</button>
+          </div>
+          <template v-if="bulkDialer.mode === 'remove'">
+            <div v-if="selectedDialerRefs.length === 0" class="muted" style="font-size: 11px">
+              None of the selected entries has a dialer.
+            </div>
+            <div v-else class="row" style="gap: 6px; flex-wrap: wrap">
+              <label v-for="r in selectedDialerRefs" :key="r" class="row tag"
+                     style="gap: 4px; align-items: center; font-size: 11px; cursor: pointer; background: var(--panel-2)">
+                <input type="checkbox" :checked="bulkDialer.remove.includes(r)" @change="toggleBulkRemove(r)" />
+                {{ r }}
+              </label>
+            </div>
+          </template>
+          <template v-else>
+            <DialerPicker v-model="bulkDialer.dialer" :xray-names="entryNames" :sub-names="subNames" :proxy-names="proxyNames" />
+            <span class="muted" style="font-size: 11px">
+              {{ bulkDialer.mode === 'replace'
+                ? 'Each selected entry’s dialer becomes exactly this list. Leave it empty to clear the dialer.'
+                : 'Appended to each selected entry’s dialer; refs it already has are skipped.' }}
+              A selected entry can’t be its own dialer.
+            </span>
+          </template>
+        </template>
+      </div>
+
       <div v-for="row in filteredEntries" :key="row.id"
            class="col" style="gap: 8px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <!-- View mode -->
         <template v-if="!editing || editing.id !== row.id">
           <div class="row" style="justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap">
             <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0">
+              <input type="checkbox" :checked="selected.has(row.id)" @change="toggleSelected(row.id)"
+                     :aria-label="`select xray:${row.name}`" style="margin: 0; cursor: pointer" />
               <strong style="font-size: 13px">xray:{{ row.name }}</strong>
               <span class="tag" :class="row.enabled ? 'tag-route' : 'tag-off'" style="font-size: 11px">
                 {{ row.enabled ? 'enabled' : 'disabled' }}
@@ -1033,6 +1175,16 @@ defineExpose({ refresh });
 </template>
 
 <style scoped>
+.bulk-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
 .search-row input[type="search"] {
   padding: 8px 12px;
   background: var(--bg);

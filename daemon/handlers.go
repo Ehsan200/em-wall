@@ -1101,6 +1101,14 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return map[string]any{"ok": true}, nil
 	})
 
+	s.Handle(ipc.MethodXrayBulkDialer, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XrayBulkDialerParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return d.bulkEditDialer(ctx, p)
+	})
+
 	registerXraySubHandlers(s, d)
 	registerXraySetHandlers(s, d)
 	registerCustomGroupHandlers(s, d)
@@ -1452,6 +1460,15 @@ func (d *handlerDeps) validateDialer(ctx context.Context, selfID int64, selfName
 	if len(refs) == 0 {
 		return nil
 	}
+	if err := d.validateDialerRefs(ctx, refs); err != nil {
+		return err
+	}
+	return d.checkDialerCycle(ctx, selfID, selfName, dialer)
+}
+
+// validateDialerRefs checks that every ref names an existing xray entry,
+// subscription or proxy.
+func (d *handlerDeps) validateDialerRefs(ctx context.Context, refs []xray.DialerRef) error {
 	xNames, subNames, pNames := xray.RefsByKind(refs)
 	if len(xNames) > 0 {
 		missing, err := d.xrayStore.NamesExist(ctx, xNames)
@@ -1480,7 +1497,7 @@ func (d *handlerDeps) validateDialer(ctx context.Context, selfID int64, selfName
 			return fmt.Errorf("dialer references unknown proxy(ies): %s", strings.Join(missing, ", "))
 		}
 	}
-	return d.checkDialerCycle(ctx, selfID, selfName, dialer)
+	return nil
 }
 
 // checkDialerCycle detects a cycle in the master-dialer graph formed by

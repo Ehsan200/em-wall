@@ -481,6 +481,15 @@ func (a *App) SetXrayEnabled(id int64, enabled bool) error {
 	return a.call(ipc.MethodXraySetEnabled, ipc.XraySetEnabledParams{ID: id, Enabled: enabled}, nil)
 }
 
+// BulkXrayDialer edits the Dialer of every entry in ids at once. mode is
+// "replace", "add" or "remove"; the daemon validates the whole batch and
+// writes it atomically with a single xray reconcile.
+func (a *App) BulkXrayDialer(ids []int64, mode, dialer string) (ipc.XrayBulkDialerResult, error) {
+	var out ipc.XrayBulkDialerResult
+	err := a.call(ipc.MethodXrayBulkDialer, ipc.XrayBulkDialerParams{IDs: ids, Mode: mode, Dialer: dialer}, &out)
+	return out, err
+}
+
 // ---------- outbound sets ----------
 //
 // A set bundles several xray entries / proxies under one name; a rule

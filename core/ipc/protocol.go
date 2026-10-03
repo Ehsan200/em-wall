@@ -67,6 +67,7 @@ const (
 	MethodXrayUpdate             = "xray.update"
 	MethodXrayDelete             = "xray.delete"
 	MethodXraySetEnabled         = "xray.setEnabled"
+	MethodXrayBulkDialer         = "xray.bulkDialer" // edit the Dialer of many entries at once
 	MethodXrayStatus             = "xray.status"
 	MethodXrayGetRouting         = "xray.getRouting"
 	MethodXraySetRouting         = "xray.setRouting"
@@ -584,6 +585,22 @@ type XrayUpdateParams struct {
 	Dialer   string        `json:"dialer"`
 	Mux      bool          `json:"mux"`
 	Fragment *XrayFragment `json:"fragment"`
+}
+
+// XrayBulkDialerParams edits the Dialer of every entry in IDs in one
+// atomic write and one xray reconcile. Mode is "replace" (Dialer becomes
+// exactly the given refs; empty clears it), "add" (append refs an entry
+// doesn't already name) or "remove" (drop the given refs). The whole batch
+// is rejected if any ref is unknown or any resulting dialer graph cycles.
+type XrayBulkDialerParams struct {
+	IDs    []int64 `json:"ids"`
+	Mode   string  `json:"mode"`
+	Dialer string  `json:"dialer"`
+}
+
+// XrayBulkDialerResult counts entries whose Dialer actually changed.
+type XrayBulkDialerResult struct {
+	Updated int `json:"updated"`
 }
 
 // XraySetDTO is the public view of one outbound set. Members are typed
