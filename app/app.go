@@ -549,6 +549,14 @@ func (a *App) ParseXrayLink(link string) (ipc.XrayParseLinkResult, error) {
 	return out, err
 }
 
+// XrayShareLink exports entry id as a share URI (vless://, vmess://,
+// trojan://, ss://). For a master the link is only its own server.
+func (a *App) XrayShareLink(id int64) (ipc.XrayShareLinkResult, error) {
+	var out ipc.XrayShareLinkResult
+	err := a.call(ipc.MethodXrayShareLink, ipc.XrayShareLinkParams{ID: id}, &out)
+	return out, err
+}
+
 // TestXray dials Target through the entry's local SOCKS5 inbound to
 // check reachability. target is "host:port"; pass "" to use the
 // daemon default (1.1.1.1:443).

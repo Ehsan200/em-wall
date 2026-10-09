@@ -1060,6 +1060,34 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return ipc.XrayParseLinkResult{Name: name, Outbound: outbound}, nil
 	})
 
+	s.Handle(ipc.MethodXrayShareLink, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XrayShareLinkParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		entry, err := d.xrayStore.Get(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		link, omitted, err := xray.BuildLink(entry.Name, entry.Outbound)
+		if err != nil {
+			return nil, err
+		}
+		// Entry-level settings live outside the outbound JSON.
+		if entry.Mux {
+			omitted = append(omitted, "multiplexing (mux)")
+		}
+		if entry.Fragment != "" {
+			omitted = append(omitted, "ClientHello fragmentation")
+		}
+		return ipc.XrayShareLinkResult{
+			Link:    link,
+			Master:  entry.Dialer != "",
+			Dialer:  entry.Dialer,
+			Omitted: omitted,
+		}, nil
+	})
+
 	s.Handle(ipc.MethodXrayGetRouting, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		rules, err := d.xrayStore.GetRoutingRules(ctx)
 		if err != nil {

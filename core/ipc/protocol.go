@@ -72,6 +72,7 @@ const (
 	MethodXrayGetRouting         = "xray.getRouting"
 	MethodXraySetRouting         = "xray.setRouting"
 	MethodXrayParseLink          = "xray.parseLink"
+	MethodXrayShareLink          = "xray.shareLink" // entry → vless:// / vmess:// / trojan:// / ss:// URI
 	MethodXrayTest               = "xray.test"
 	MethodXrayObservatory        = "xray.observatory" // live balancer/winner status (raw `xray api bi`)
 	MethodXraySubList            = "xraysub.list"
@@ -834,6 +835,24 @@ type XrayParseLinkParams struct {
 type XrayParseLinkResult struct {
 	Name     string `json:"name"`
 	Outbound string `json:"outbound"`
+}
+
+// XrayShareLinkParams names the entry to export as a share URI.
+type XrayShareLinkParams struct {
+	ID int64 `json:"id"`
+}
+
+// XrayShareLinkResult is the entry as a share URI (the inverse of
+// parseLink). Master is set when the entry has a Dialer: the link holds
+// only the master's own server, so whoever imports it connects to that
+// server directly — the dialer chain through the pool is not in it.
+// Omitted lists everything else the link could not carry (mux,
+// fragment, extra servers, sockopt, …); empty means nothing was lost.
+type XrayShareLinkResult struct {
+	Link    string   `json:"link"`
+	Master  bool     `json:"master"`
+	Dialer  string   `json:"dialer"`
+	Omitted []string `json:"omitted"`
 }
 
 // XrayTestParams asks the daemon to dial Target through entry ID's

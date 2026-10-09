@@ -2,10 +2,11 @@
 import { ref, computed, onMounted } from 'vue';
 import {
   XrayStatus, ListXray, AddXray, UpdateXray, DeleteXray, SetXrayEnabled, BulkXrayDialer,
-  XrayRouting, SetXrayRouting, ParseXrayLink, TestXray,
+  XrayRouting, SetXrayRouting, ParseXrayLink, TestXray, XrayShareLink,
   ListXraySubs, ListProxies,
   ListXraySets, AddXraySet, UpdateXraySet, DeleteXraySet, SetXraySetEnabled,
 } from '../../wailsjs/go/main/App';
+import { ClipboardSetText } from '../../wailsjs/runtime/runtime';
 import MonacoJsonEditor from './MonacoJsonEditor.vue';
 import DialerPicker from './DialerPicker.vue';
 import FragmentControl, { type FragmentValue } from './FragmentControl.vue';
@@ -105,6 +106,9 @@ let pendingDeleteTimer: number | undefined;
 const testTarget = ref<string>('1.1.1.1:443');
 const testResults = ref<Record<number, { ok: boolean; message: string; latencyMs: number; exitIp?: string; country?: string; region?: string; city?: string }>>({});
 const revealedIPs = ref<Record<number, boolean>>({});
+// Exported share links, keyed by entry id; present = the share box is open.
+type ShareState = { link: string; master: boolean; dialer: string; omitted: string[]; copied: boolean; error: string };
+const shares = ref<Record<number, ShareState>>({});
 
 const sets = ref<XraySetRow[]>([]);
 // One editor at a time: `null` = closed, `id: 0` = creating a new set.
@@ -637,6 +641,44 @@ function discardRouting() {
   refresh();
 }
 
+// ---------- Share link export ----------
+
+// toggleShare opens (fetching from the daemon) or closes the row's share
+// box. The link is rebuilt on every open so it follows the latest edit.
+async function toggleShare(row: XrayRow) {
+  if (shares.value[row.id]) {
+    const next = { ...shares.value };
+    delete next[row.id];
+    shares.value = next;
+    return;
+  }
+  try {
+    const r = await XrayShareLink(row.id);
+    shares.value = {
+      ...shares.value,
+      [row.id]: { link: r.link, master: r.master, dialer: r.dialer, omitted: r.omitted || [], copied: false, error: '' },
+    };
+  } catch (e: any) {
+    shares.value = {
+      ...shares.value,
+      [row.id]: { link: '', master: !!row.dialer, dialer: row.dialer, omitted: [], copied: false, error: e?.message || String(e) },
+    };
+  }
+}
+
+async function copyShare(id: number) {
+  const s = shares.value[id];
+  if (!s?.link) return;
+  const ok = await ClipboardSetText(s.link).catch(() => false);
+  shares.value = { ...shares.value, [id]: { ...s, copied: !!ok, error: ok ? '' : 'could not write to the clipboard' } };
+  if (ok) {
+    setTimeout(() => {
+      const cur = shares.value[id];
+      if (cur) shares.value = { ...shares.value, [id]: { ...cur, copied: false } };
+    }, 1500);
+  }
+}
+
 // ---------- Link import ----------
 
 function openImport() {
@@ -866,6 +908,10 @@ defineExpose({ refresh });
             </div>
             <div class="row" style="gap: 6px">
               <button @click="runTest(row)" :disabled="busy || testing || testingIds.has(row.id) || !row.enabled">Test</button>
+              <button @click="toggleShare(row)" :disabled="busy"
+                      :title="row.dialer ? 'Export as a share link — the master’s own server only; its dialer is not included' : 'Export as a share link (vless://, vmess://, trojan://, ss://)'">
+                {{ shares[row.id] ? 'Hide link' : 'Share' }}
+              </button>
               <button @click="toggleEnabled(row)" :disabled="busy">{{ row.enabled ? 'Disable' : 'Enable' }}</button>
               <button @click="beginEdit(row)" :disabled="busy">Edit</button>
               <button @click="askDelete(row)" :disabled="busy"
@@ -877,6 +923,27 @@ defineExpose({ refresh });
           <div v-if="testResults[row.id] && !testResults[row.id].ok" class="muted"
                style="font-size: 11px; color: var(--danger)">
             ✗ {{ testResults[row.id].message }}
+          </div>
+          <div v-if="shares[row.id]" class="col"
+               style="gap: 6px; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px">
+            <span v-if="shares[row.id].error" style="font-size: 11px; color: var(--danger)">
+              ✗ {{ shares[row.id].error }}
+            </span>
+            <template v-else>
+              <div v-if="shares[row.id].master" style="font-size: 11px; color: var(--warn); line-height: 1.5">
+                ⚠ This is a master entry. The link holds only its own server — the dialer
+                (<code style="font-size: 11px">{{ shares[row.id].dialer }}</code>) and the pool nodes behind it
+                are not included, so whoever imports it connects to this server directly.
+              </div>
+              <div class="row" style="gap: 6px; align-items: flex-start">
+                <textarea readonly :value="shares[row.id].link" rows="3" @focus="($event.target as HTMLTextAreaElement).select()"
+                          style="flex: 1; font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; resize: vertical"></textarea>
+                <button class="primary" @click="copyShare(row.id)">{{ shares[row.id].copied ? 'Copied' : 'Copy' }}</button>
+              </div>
+              <span v-if="shares[row.id].omitted.length" class="muted" style="font-size: 11px">
+                Not in the link: {{ shares[row.id].omitted.join(', ') }}.
+              </span>
+            </template>
           </div>
           <details>
             <summary style="cursor: pointer; font-size: 11px; color: var(--text-dim)">show outbound JSON</summary>
