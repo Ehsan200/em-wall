@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { fmtDateTime, fmtTime } from '../timezone';
 import { Line } from 'vue-chartjs';
 import {
   Chart as ChartJS,
@@ -171,7 +172,7 @@ function colorFor(key: string): string {
 
 const chartData = computed(() => {
   const labels = buckets.value.map(b =>
-    new Date(b * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+    fmtDateTime(b * 1000, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
   const bucketIndex = new Map(buckets.value.map((b, i) => [b, i]));
   const keys = chartKeys.value;
   const keySet = new Set(keys);
@@ -354,7 +355,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
     </div>
 
     <div class="muted" style="font-size: 11px; margin-bottom: 8px">
-      live · 5s refresh · {{ lastRefresh ? lastRefresh.toLocaleTimeString() : '—' }} ·
+      live · 5s refresh · {{ lastRefresh ? fmtTime(lastRefresh) : '—' }} ·
       total ↑ {{ humanBytes(grandTotal.sent) }} · ↓ {{ humanBytes(grandTotal.recv) }}
     </div>
 

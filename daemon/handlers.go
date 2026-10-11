@@ -259,6 +259,13 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				return nil, fmt.Errorf("invalid DNS server %q — use IPv4/IPv6 addresses (optionally host:port), separated by commas or newlines", bad)
 			}
 		}
+		// Display timezone: "" follows the system zone, anything else must
+		// be an IANA name the UI (and CLI) can format with.
+		if p.Key == "display_timezone" && p.Value != "" {
+			if _, err := time.LoadLocation(p.Value); err != nil || p.Value == "Local" {
+				return nil, fmt.Errorf("unknown timezone %q", p.Value)
+			}
+		}
 		if err := d.store.SetSetting(ctx, p.Key, p.Value); err != nil {
 			return nil, err
 		}

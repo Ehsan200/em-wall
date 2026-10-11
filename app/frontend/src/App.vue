@@ -10,9 +10,10 @@ import ProxiesPanel from './components/ProxiesPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
-import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, PublicIP } from '../wailsjs/go/main/App';
+import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, CancelUpdate, PublicIP } from '../wailsjs/go/main/App';
 import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
+import { loadDisplayTimezone } from './timezone';
 
 type Tab = 'rules' | 'logs' | 'usage' | 'health' | 'network' | 'proxies' | 'xray' | 'settings';
 const tab = ref<Tab>('rules');
@@ -67,11 +68,29 @@ async function checkUpdate() {
 const updating = ref(false);
 const updateProgress = ref(0);
 const updateError = ref('');
+// Set while the backend waits to retry a dropped download; cleared as soon
+// as bytes flow again. Bytes already on disk are kept across retries,
+// cancels and app restarts, so a retry resumes rather than restarts.
+type UpdateRetry = { attempt: number; max: number; waitSec: number; error: string; downloaded: number; size: number };
+const updateRetry = ref<UpdateRetry | null>(null);
+
+function mb(n: number): string { return (n / (1024 * 1024)).toFixed(1) + ' MB'; }
+// Partial download from an earlier attempt (but not a finished one).
+const updateResumable = computed(() => {
+  const u = updateInfo.value;
+  return !!u && u.downloaded > 0 && (!u.size || u.downloaded < u.size);
+});
+const updateCached = computed(() => {
+  const u = updateInfo.value;
+  return !!u && u.size > 0 && u.downloaded === u.size;
+});
 
 async function startUpdate() {
   if (!updateInfo.value) return;
   updateError.value = '';
-  updateProgress.value = 0;
+  updateRetry.value = null;
+  const u = updateInfo.value;
+  updateProgress.value = u.size ? u.downloaded / u.size : 0;
   updating.value = true;
   try {
     // Resolves to nothing: the app quits on success. A thrown error
@@ -80,6 +99,9 @@ async function startUpdate() {
   } catch (e: any) {
     updateError.value = e?.message || String(e);
     updating.value = false;
+    updateRetry.value = null;
+    // Refresh the kept-bytes count so the button can offer Resume.
+    checkUpdate();
   }
 }
 // Public egress identity (default-route IP + geo). Polled on a slow
@@ -178,14 +200,17 @@ onMounted(async () => {
   // close-and-reopen needed. The first call runs in the background so it
   // never delays the initial UI render.
   checkUpdate();
+  loadDisplayTimezone();
   updateTimer = window.setInterval(checkUpdate, UPDATE_POLL_MS);
-  EventsOn('update:progress', (p: number) => { updateProgress.value = p; });
+  EventsOn('update:progress', (p: number) => { updateProgress.value = p; updateRetry.value = null; });
+  EventsOn('update:retry', (r: UpdateRetry) => { updateRetry.value = r; });
 });
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
   if (egressTimer) window.clearTimeout(egressTimer);
   if (updateTimer) window.clearInterval(updateTimer);
   EventsOff('update:progress');
+  EventsOff('update:retry');
 });
 </script>
 
@@ -212,17 +237,29 @@ onUnmounted(() => {
       Update available: <strong>{{ updateInfo.version }}</strong>
       <span v-if="updateError" style="color: #c0392b; font-size: 12px; margin-left: 8px">{{ updateError }}</span>
     </span>
+    <span v-else-if="updateRetry">
+      Connection dropped ({{ updateRetry.error }}) — retrying in {{ Math.ceil(updateRetry.waitSec) }}s,
+      attempt {{ updateRetry.attempt + 1 }}/{{ updateRetry.max }}<span v-if="updateRetry.downloaded">
+      · {{ mb(updateRetry.downloaded) }} kept</span>
+    </span>
     <span v-else>
       Downloading {{ updateInfo.version }}… {{ Math.round(updateProgress * 100) }}%
       — the app will restart automatically.
     </span>
     <div v-if="!updating" class="row" style="gap: 8px">
-      <button v-if="updateInfo.downloadUrl" class="primary" @click="startUpdate">Download &amp; install</button>
+      <button v-if="updateInfo.downloadUrl" class="primary" @click="startUpdate">
+        <template v-if="updateCached">Install</template>
+        <template v-else-if="updateResumable">Resume download ({{ mb(updateInfo.downloaded) }} of {{ mb(updateInfo.size) }})</template>
+        <template v-else>Download &amp; install</template>
+      </button>
       <button :class="{ primary: !updateInfo.downloadUrl }" @click="BrowserOpenURL(updateInfo!.url)">View release</button>
       <button @click="dismissUpdate">Dismiss</button>
     </div>
-    <div v-else class="update-progress">
-      <div class="update-progress-fill" :style="{ width: (updateProgress * 100) + '%' }"></div>
+    <div v-else class="row" style="gap: 8px; align-items: center; flex: 1">
+      <div class="update-progress">
+        <div class="update-progress-fill" :style="{ width: (updateProgress * 100) + '%' }"></div>
+      </div>
+      <button @click="CancelUpdate()">Cancel</button>
     </div>
   </div>
 

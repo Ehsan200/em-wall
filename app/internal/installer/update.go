@@ -38,6 +38,10 @@ func AppBundlePath() (string, error) {
 // after this returns nil — the script waits on the current PID before
 // touching the bundle.
 //
+// On a successful swap the script deletes dmgPath (and its cache
+// metadata, dmgPath+".json"); on failure it is kept so a retry needn't
+// download it again.
+//
 // The swap is non-destructive: the old bundle is moved aside first and
 // only deleted after the copy succeeds, and the quarantine xattr is
 // cleared on the new copy so the unsigned relaunch isn't blocked by
@@ -49,6 +53,13 @@ func ApplyAppUpdate(ctx context.Context, dmgPath string) error {
 	dst, err := AppBundlePath()
 	if err != nil {
 		return err
+	}
+
+	// Check the image's own checksums before trusting it. The download is
+	// resumable, so this is the last guard against a spliced or truncated
+	// file when the release published no digest to compare against.
+	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", "verify", "-quiet", dmgPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("update: downloaded image is corrupt (%v: %s)", err, strings.TrimSpace(string(out)))
 	}
 
 	device, mountPoint, err := attachDMG(ctx, dmgPath)
@@ -70,7 +81,7 @@ func ApplyAppUpdate(ctx context.Context, dmgPath string) error {
 		return fmt.Errorf("update: temp dir: %w", err)
 	}
 	scriptPath := filepath.Join(tmp, "swap.sh")
-	if err := os.WriteFile(scriptPath, []byte(swapScript(os.Getpid(), src, dst, device)), 0o700); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(swapScript(os.Getpid(), src, dst, device, dmgPath)), 0o700); err != nil {
 		detach()
 		return fmt.Errorf("update: write script: %w", err)
 	}
@@ -136,7 +147,7 @@ func findAppInDir(dir string) (string, error) {
 // destination bundle with the one from the mounted dmg, clears the
 // quarantine flag, detaches the dmg, and relaunches. Old bundle is kept
 // as .old until the copy succeeds so a failed copy isn't fatal.
-func swapScript(pid int, src, dst, device string) string {
+func swapScript(pid int, src, dst, device, dmg string) string {
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -uo pipefail
 
@@ -144,6 +155,7 @@ PID=%d
 SRC=%q
 DST=%q
 DEVICE=%q
+DMG=%q
 
 # Wait (up to ~30s) for the running app to quit before swapping.
 for _ in $(seq 1 100); do
@@ -169,8 +181,9 @@ fi
 xattr -dr com.apple.quarantine "$DST" >/dev/null 2>&1 || true
 rm -rf "$DST.old"
 cleanup
+rm -f "$DMG" "$DMG.json"
 /usr/bin/open "$DST" >/dev/null 2>&1 || true
 `,
-		pid, src, dst, device,
+		pid, src, dst, device, dmg,
 	)
 }

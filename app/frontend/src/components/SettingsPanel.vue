@@ -8,6 +8,11 @@ import {
 } from '../../wailsjs/go/main/App';
 import type { ipc, installer } from '../../wailsjs/go/models';
 import ExportDialog from './ExportDialog.vue';
+import SearchSelect from './SearchSelect.vue';
+import {
+  displayTimezone, systemTimezone, allTimezones, utcOffsetLabel,
+  saveDisplayTimezone, loadDisplayTimezone, fmtTime,
+} from '../timezone';
 import ImportDialog from './ImportDialog.vue';
 
 // focusReinstallSeq is bumped by the parent when the user clicks the
@@ -42,6 +47,30 @@ const fallbackDns = ref<string>('');
 const fallbackBusy = ref<boolean>(false);
 const fallbackError = ref<string>('');
 const fallbackSaved = ref<boolean>(false);
+
+// ---- Display timezone ----
+// '' = follow the system zone (default). Picking any zone — even the one
+// the system is on — makes it custom; "Use system" goes back to following.
+const tzBusy = ref<boolean>(false);
+const tzError = ref<string>('');
+const tzOptions = computed(() => allTimezones().map((tz) => ({
+  value: tz, label: tz, hint: utcOffsetLabel(tz),
+})));
+const tzPick = computed<string>({
+  get: () => displayTimezone.value || systemTimezone,
+  set: (tz) => { void setTimezone(tz); },
+});
+async function setTimezone(tz: string) {
+  tzBusy.value = true;
+  tzError.value = '';
+  try {
+    await saveDisplayTimezone(tz);
+  } catch (e: any) {
+    tzError.value = e?.message || String(e);
+  } finally {
+    tzBusy.value = false;
+  }
+}
 
 // ---- Backup & restore (export / import) ----
 const knownGroups = ref<ipc.GroupDTO[]>([]);
@@ -209,6 +238,7 @@ async function loadSettings() {
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  await loadDisplayTimezone();
 }
 
 async function saveFallbackDns() {
@@ -320,7 +350,7 @@ onUnmounted(() => {
             <strong>System DNS hijack</strong>
             <span class="muted" style="font-size: 11px">
               Refreshes every 1.5s ·
-              {{ lastRefresh ? `last update ${lastRefresh.toLocaleTimeString()}` : '—' }}
+              {{ lastRefresh ? `last update ${fmtTime(lastRefresh)}` : '—' }}
             </span>
           </div>
           <span :class="sysStatus?.active ? 'tag tag-route' : 'tag tag-off'">
@@ -425,6 +455,33 @@ onUnmounted(() => {
             <span class="track"></span>
           </label>
         </label>
+      </div>
+
+      <!-- Display timezone -->
+      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+        <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px">
+          <div class="col" style="gap: 4px; flex: 1">
+            <strong>Timezone</strong>
+            <span class="muted" style="font-size: 12px; line-height: 1.5">
+              Zone used for every time shown in the app — logs, charts,
+              health, subscriptions. Defaults to the system zone
+              (<code>{{ systemTimezone }}</code>, {{ utcOffsetLabel(systemTimezone) }}) and
+              follows it if it changes; choosing a zone here pins it.
+            </span>
+          </div>
+          <span :class="displayTimezone ? 'tag tag-route' : 'tag tag-off'">
+            {{ displayTimezone ? 'custom' : 'system' }}
+          </span>
+        </div>
+        <div class="row" style="gap: 10px; align-items: center">
+          <div style="min-width: 280px">
+            <SearchSelect v-model="tzPick" :options="tzOptions" :disabled="tzBusy"
+                          search-placeholder="search zones…" />
+          </div>
+          <button :disabled="tzBusy || !displayTimezone" @click="setTimezone('')">Use system</button>
+          <span class="muted" style="font-size: 11px">now {{ fmtTime(new Date()) }}</span>
+          <span v-if="tzError" class="error" style="margin: 0">{{ tzError }}</span>
+        </div>
       </div>
 
       <!-- Reinstall daemon (recovery) -->

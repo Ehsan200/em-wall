@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+import { fmtDateTime, fmtDate } from '../timezone';
 import {
   ListXraySubs, AddXraySub, UpdateXraySub, DeleteXraySub,
   SetXraySubEnabled, RefreshXraySub, XraySubNodes, SetXraySubNodeDisabled,
@@ -59,7 +60,7 @@ function secToHours(s: number): string {
 function fmtTime(iso: string): string {
   if (!iso) return 'never';
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return isNaN(d.getTime()) ? iso : fmtDateTime(d);
 }
 
 // ---- Data-quota display (Subscription-Userinfo header, v2rayN-style) ----
@@ -89,7 +90,7 @@ function usageRemaining(s: Sub): number {
 function fmtExpire(unix: number): string {
   if (!unix || unix <= 0) return '';
   const d = new Date(unix * 1000);
-  return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
+  return isNaN(d.getTime()) ? '' : fmtDate(d);
 }
 
 async function refresh() {

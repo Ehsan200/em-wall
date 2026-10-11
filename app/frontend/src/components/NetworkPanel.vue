@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+import { fmtTime as fmtZoned } from '../timezone';
 import { Interfaces, SystemRoutes, ActiveRoutes } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
@@ -31,7 +32,7 @@ async function refresh() {
 }
 
 function fmtTime(s: string): string {
-  try { return new Date(s).toLocaleTimeString(); } catch { return s; }
+  try { return fmtZoned(s); } catch { return s; }
 }
 
 function isTunnel(name: string): boolean {
@@ -62,7 +63,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
         </button>
       </div>
       <span class="muted" style="font-size: 11px">
-        refreshing every 5s · {{ lastRefresh ? lastRefresh.toLocaleTimeString() : '—' }}
+        refreshing every 5s · {{ lastRefresh ? fmtZoned(lastRefresh) : '—' }}
       </span>
     </div>
 

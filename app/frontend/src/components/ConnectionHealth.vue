@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { fmtTime } from '../timezone';
 import { HealthStats } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
@@ -69,7 +70,7 @@ function failClass(p: number): string {
 
 function until(iso: string): string {
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return isNaN(d.getTime()) ? iso : fmtTime(d, { hour: '2-digit', minute: '2-digit' });
 }
 
 onMounted(() => {

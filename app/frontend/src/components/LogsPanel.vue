@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { fmtTime as fmtZoned } from '../timezone';
 import { RecentLogs, ClearLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
@@ -78,7 +79,7 @@ const counts = computed(() => {
 });
 
 function fmtTime(s: string): string {
-  try { return new Date(s).toLocaleTimeString(); } catch { return s; }
+  try { return fmtZoned(s); } catch { return s; }
 }
 
 function actionTag(action: string): string {
@@ -144,7 +145,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
     </div>
 
     <div class="muted" style="font-size: 11px; margin-bottom: 8px">
-      live · 1s refresh · {{ lastRefresh ? lastRefresh.toLocaleTimeString() : '—' }} ·
+      live · 1s refresh · {{ lastRefresh ? fmtZoned(lastRefresh) : '—' }} ·
       showing {{ filtered.length }} of {{ logs.length }}
     </div>
 

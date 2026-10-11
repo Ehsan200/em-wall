@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { fmtTime } from '../timezone';
 import { HealthPools } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 
@@ -67,7 +68,7 @@ function bytes(n: number): string {
 }
 
 function clock(unix: number): string {
-  return new Date(unix * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return fmtTime(unix * 1000, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function cellTitle(p: ipc.PoolTimelineDTO, n: ipc.PoolNodeTimelineDTO, i: number): string {
@@ -101,7 +102,7 @@ function strategyText(p: ipc.PoolTimelineDTO): string {
   if (!p.strategy) return '';
   if (!p.strategyAuto) return p.strategy;
   let out = `auto → ${p.strategy}`;
-  if (p.strategySince) out += ` since ${new Date(p.strategySince).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  if (p.strategySince) out += ` since ${fmtTime(p.strategySince, { hour: '2-digit', minute: '2-digit' })}`;
   return out;
 }
 

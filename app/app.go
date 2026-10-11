@@ -5,11 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"app/internal/installer"
@@ -31,6 +31,13 @@ type App struct {
 	ctx        context.Context
 	socketPath string
 	pool       chan *ipc.Client // buffered channel used as a connection pool
+
+	// Self-update state: the last release CheckForUpdate saw (so a
+	// download knows its version, size and digest) and the cancel func
+	// of the download in flight, if any.
+	updMu     sync.Mutex
+	updTarget *updateTarget
+	updCancel context.CancelFunc
 }
 
 // rpcPoolCap is the max number of idle daemon connections kept open.
@@ -732,6 +739,11 @@ type UpdateInfo struct {
 	Version     string `json:"version"`     // latest tag, e.g. "v1.2.3"
 	URL         string `json:"url"`         // GitHub release page
 	DownloadURL string `json:"downloadUrl"` // .dmg asset, "" if none published
+	Size        int64  `json:"size"`        // .dmg size in bytes, 0 if unknown
+	// Downloaded is how much of this release's .dmg is already in the
+	// update cache from an earlier attempt (== Size when complete), so
+	// the banner can offer "Resume" instead of starting over.
+	Downloaded int64 `json:"downloaded"`
 }
 
 // CheckForUpdate fetches the latest GitHub release and compares it with
@@ -761,6 +773,8 @@ func (a *App) CheckForUpdate() UpdateInfo {
 		Assets  []struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
+			Size               int64  `json:"size"`
+			Digest             string `json:"digest"` // "sha256:<hex>" on recent releases
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
@@ -769,14 +783,23 @@ func (a *App) CheckForUpdate() UpdateInfo {
 	if !semverNewer(release.TagName, current) {
 		return UpdateInfo{}
 	}
-	dmg := ""
-	for _, a := range release.Assets {
-		if strings.HasSuffix(strings.ToLower(a.Name), ".dmg") {
-			dmg = a.BrowserDownloadURL
+	info := UpdateInfo{HasUpdate: true, Version: release.TagName, URL: release.HTMLURL}
+	for _, asset := range release.Assets {
+		if strings.HasSuffix(strings.ToLower(asset.Name), ".dmg") {
+			t := updateTarget{
+				Version: release.TagName,
+				URL:     asset.BrowserDownloadURL,
+				Size:    asset.Size,
+				Digest:  asset.Digest,
+			}
+			a.rememberUpdateTarget(t)
+			info.DownloadURL = t.URL
+			info.Size = t.Size
+			info.Downloaded = cachedUpdateBytes(t)
 			break
 		}
 	}
-	return UpdateInfo{HasUpdate: true, Version: release.TagName, URL: release.HTMLURL, DownloadURL: dmg}
+	return info
 }
 
 // DownloadAndApplyUpdate downloads the release .dmg from downloadURL,
@@ -787,9 +810,14 @@ func (a *App) CheckForUpdate() UpdateInfo {
 // reports a newer version than the running daemon, which trips the
 // existing "reinstall daemon" banner.
 //
+// The download lands in a persistent cache (see update_download.go): it
+// resumes from whatever an earlier attempt or app run left behind, retries
+// transient failures on its own, and is skipped entirely once a verified
+// .dmg is already there.
+//
 // Returns an error only when the download or mount fails before handoff;
 // in that case the running app is untouched. Emits "update:progress"
-// (0..1) events during the download for the UI's progress bar.
+// (0..1) and "update:retry" events for the UI.
 func (a *App) DownloadAndApplyUpdate(downloadURL string) error {
 	if downloadURL == "" {
 		return fmt.Errorf("no downloadable build for this release — use View release to update manually")
@@ -802,13 +830,23 @@ func (a *App) DownloadAndApplyUpdate(downloadURL string) error {
 		return err
 	}
 
-	dmgPath, err := a.downloadDMG(downloadURL)
+	ctx, cancel := context.WithCancel(a.ctx)
+	if !a.beginUpdateDownload(cancel) {
+		cancel()
+		return fmt.Errorf("an update download is already running")
+	}
+	defer a.endUpdateDownload()
+
+	t := a.updateTargetFor(downloadURL)
+	dmgPath, err := a.fetchUpdate(ctx, t)
 	if err != nil {
 		return err
 	}
 
 	if err := installer.ApplyAppUpdate(a.ctx, dmgPath); err != nil {
-		_ = os.Remove(dmgPath)
+		// A dmg that won't mount or has no app in it is bad: drop it so
+		// the next attempt fetches a fresh copy instead of reusing it.
+		discardUpdate(dmgPath)
 		return err
 	}
 	// Hand-off succeeded: the swap script is waiting on our PID. Quit so it
@@ -817,61 +855,15 @@ func (a *App) DownloadAndApplyUpdate(downloadURL string) error {
 	return nil
 }
 
-// downloadDMG streams downloadURL to a temp file, emitting fractional
-// progress events. Returns the path to the downloaded .dmg.
-func (a *App) downloadDMG(downloadURL string) (string, error) {
-	req, err := http.NewRequestWithContext(a.ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("update: request: %w", err)
+// CancelUpdate stops an in-flight update download. What was downloaded
+// so far stays in the cache, so the next DownloadAndApplyUpdate resumes.
+func (a *App) CancelUpdate() {
+	a.updMu.Lock()
+	cancel := a.updCancel
+	a.updMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
-	req.Header.Set("User-Agent", "em-wall/"+version.Version)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("update: download: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("update: download: HTTP %d", resp.StatusCode)
-	}
-
-	f, err := os.CreateTemp("", "em-wall-update-*.dmg")
-	if err != nil {
-		return "", fmt.Errorf("update: temp file: %w", err)
-	}
-	pw := &progressWriter{ctx: a.ctx, total: resp.ContentLength}
-	if _, err := io.Copy(io.MultiWriter(f, pw), resp.Body); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("update: write: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("update: close: %w", err)
-	}
-	runtime.EventsEmit(a.ctx, "update:progress", 1.0)
-	return f.Name(), nil
-}
-
-// progressWriter emits "update:progress" (fraction 0..1) as bytes flow.
-// Throttled to whole-percent changes so the event stream stays light.
-type progressWriter struct {
-	ctx     context.Context
-	total   int64
-	written int64
-	lastPct int
-}
-
-func (p *progressWriter) Write(b []byte) (int, error) {
-	n := len(b)
-	p.written += int64(n)
-	if p.total > 0 {
-		pct := int(float64(p.written) / float64(p.total) * 100)
-		if pct != p.lastPct {
-			p.lastPct = pct
-			runtime.EventsEmit(p.ctx, "update:progress", float64(pct)/100)
-		}
-	}
-	return n, nil
 }
 
 // semverNewer reports whether latest is a higher version than current.
