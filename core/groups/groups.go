@@ -747,6 +747,18 @@ func KnownGroups() []Group {
 			Icon: svgAtlassian(),
 		},
 		{
+			Key:         "medium",
+			DisplayName: "Medium",
+			Description: "Medium web/app, member publications, image + static CDNs",
+			Patterns: []string{
+				// Covers *.medium.com member subdomains plus the CDNs,
+				// which all live under it (miro, cdn-images-1,
+				// cdn-static-1, cdn-client, glyph).
+				"*.medium.com",
+			},
+			Icon: svgBranded("M", "#000000", "#000000", "#ffffff"),
+		},
+		{
 			Key:         "airbnb",
 			DisplayName: "Airbnb",
 			Description: "Airbnb web/app, localized country sites, photo CDN, HotelTonight",

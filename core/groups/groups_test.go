@@ -419,6 +419,8 @@ func TestConsumerBrands_CoverCDNHosts(t *testing.T) {
 		{"booking", "www.booking.com"},
 		{"booking", "cf.bstatic.com"},
 		{"booking", "q-xx.bstatic.com"},
+		{"medium", "medium.com"},
+		{"medium", "miro.medium.com"},
 	} {
 		if !covers(c.key, c.host) {
 			t.Errorf("group %q must cover %q but does not", c.key, c.host)

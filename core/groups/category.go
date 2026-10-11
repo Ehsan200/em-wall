@@ -84,6 +84,7 @@ var categories = map[string]string{
 	"notion":    CategoryWork,
 	"figma":     CategoryWork,
 	"atlassian": CategoryWork,
+	"medium":    CategoryMedia,
 
 	"telemetry-common": CategoryOther,
 }
