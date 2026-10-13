@@ -12,6 +12,8 @@ import type { ipc } from '../../wailsjs/go/models';
 
 const stats = ref<ipc.HealthStatsDTO | null>(null);
 const error = ref('');
+// Until the first reply, tiles would read "0" — real-looking numbers.
+const loaded = ref(false);
 let stopPoll: (() => void) | undefined;
 
 async function refresh() {
@@ -21,6 +23,7 @@ async function refresh() {
   } catch (e: any) {
     error.value = String(e?.message ?? e);
   }
+  loaded.value = true;
 }
 
 const CAUSE_LABELS: Record<string, string> = {
@@ -89,6 +92,16 @@ onUnmounted(() => stopPoll?.());
     </div>
     <div v-if="error" class="error">{{ error }}</div>
 
+    <div v-if="!loaded" class="tiles">
+      <div v-for="i in 7" :key="i" class="tile">
+        <span class="skeleton" style="width: 60%; height: 10px"></span>
+        <span class="skeleton" style="width: 40%; height: 18px"></span>
+      </div>
+    </div>
+    <div v-if="!loaded" class="skeleton-stack">
+      <span v-for="i in 3" :key="i" class="skeleton" style="height: 22px"></span>
+    </div>
+    <template v-else>
     <div class="tiles">
       <div class="tile">
         <span class="label">Connections</span>
@@ -168,6 +181,7 @@ onUnmounted(() => stopPoll?.());
       </tbody>
     </table>
     <div v-else class="muted empty">No proxied connections in this window yet.</div>
+    </template>
 
     <div v-if="stats?.parkedNodes?.length" class="parked">
       <span class="label">Parked pool nodes</span>

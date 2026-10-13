@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import { startPoll } from '../poll';
+import SkeletonRows from './SkeletonRows.vue';
 import { fmtTime as fmtZoned } from '../timezone';
 import { Interfaces, SystemRoutes, ActiveRoutes } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -13,6 +14,7 @@ const sysRoutes = ref<ipc.SystemRouteDTO[]>([]);
 const ourRoutes = ref<ipc.ActiveRouteDTO[]>([]);
 const lastRefresh = ref<Date | null>(null);
 const error = ref<string>('');
+const loaded = ref(false);
 let stopPoll: (() => void) | undefined;
 
 async function refresh() {
@@ -30,6 +32,7 @@ async function refresh() {
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
 }
 
 function fmtTime(s: string): string {
@@ -54,13 +57,13 @@ onUnmounted(() => stopPoll?.());
     <div class="row" style="justify-content: space-between; align-items: baseline; margin-bottom: 12px">
       <div class="row" style="gap: 0">
         <button :class="{active: section==='interfaces'}" class="seg" @click="section='interfaces'">
-          Interfaces <span class="count">{{ interfaces.length }}</span>
+          Interfaces <span class="count">{{ loaded ? interfaces.length : '…' }}</span>
         </button>
         <button :class="{active: section==='routes'}" class="seg" @click="section='routes'">
-          System routes <span class="count">{{ sysRoutes.length }}</span>
+          System routes <span class="count">{{ loaded ? sysRoutes.length : '…' }}</span>
         </button>
         <button :class="{active: section==='pinned'}" class="seg" @click="section='pinned'">
-          Pinned routes <span class="count">{{ ourRoutes.length }}</span>
+          Pinned routes <span class="count">{{ loaded ? ourRoutes.length : '…' }}</span>
         </button>
       </div>
       <span class="muted" style="font-size: 11px">
@@ -87,7 +90,8 @@ onUnmounted(() => stopPoll?.());
             <td class="muted">{{ i.mtu }}</td>
             <td class="muted" style="font-size: 11px">{{ i.flags }}</td>
           </tr>
-          <tr v-if="!interfaces.length">
+          <SkeletonRows v-if="!loaded" :cols="5" />
+          <tr v-else-if="!interfaces.length">
             <td colspan="5" class="muted" style="text-align:center; padding: 24px">No active interfaces.</td>
           </tr>
         </tbody>
@@ -107,7 +111,8 @@ onUnmounted(() => stopPoll?.());
             <td class="muted" style="font-size: 11px">{{ r.flags }}</td>
             <td><code>{{ r.interface }}</code></td>
           </tr>
-          <tr v-if="!sysRoutes.length">
+          <SkeletonRows v-if="!loaded" :cols="5" />
+          <tr v-else-if="!sysRoutes.length">
             <td colspan="5" class="muted" style="text-align:center; padding: 24px">No routes.</td>
           </tr>
         </tbody>
@@ -130,7 +135,8 @@ onUnmounted(() => stopPoll?.());
             <td class="muted">#{{ r.ruleId }}</td>
             <td class="muted">{{ fmtTime(r.expiresAt) }}</td>
           </tr>
-          <tr v-if="!ourRoutes.length">
+          <SkeletonRows v-if="!loaded" :cols="4" />
+          <tr v-else-if="!ourRoutes.length">
             <td colspan="4" class="muted" style="text-align:center; padding: 24px">
               No pinned routes — em-wall hasn't installed any yet.
             </td>

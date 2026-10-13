@@ -196,34 +196,53 @@ function looksLikeOutbound(raw: string): boolean {
 
 // ---------- Loading ----------
 
+// loaded: the first refresh landed. Before it, status reads "unknown",
+// "xray binary is not installed" and "No outbounds configured yet" — all
+// false. refreshing: a refresh is in flight (Refresh button, Discard).
+const loaded = ref(false);
+const refreshing = ref(false);
+
 async function refresh() {
+  refreshing.value = true;
+  // Six independent reads: fetch together. Status and the outbound list are
+  // required; the rest are non-fatal (the picker, sets list and routing
+  // editor degrade on their own).
+  const wantRouting = !routing.value.dirty;
+  const [st, es, subs, prox, ss, rt] = await Promise.allSettled([
+    XrayStatus(), ListXray(), ListXraySubs(), ListProxies(), ListXraySets(),
+    wantRouting ? XrayRouting() : Promise.resolve(null),
+  ]);
   try {
-    status.value = (await XrayStatus()) as unknown as XrayStatusRow;
-    entries.value = ((await ListXray()) || []) as unknown as XrayRow[];
+    if (st.status === 'rejected') throw st.reason;
+    if (es.status === 'rejected') throw es.reason;
+    status.value = st.value as unknown as XrayStatusRow;
+    entries.value = (es.value || []) as unknown as XrayRow[];
     pruneSelection();
     // Names for the Dialer picker. Proxy list excludes the hidden internal
     // rows the supervisor mints (names start with "_").
-    try {
-      subNames.value = (((await ListXraySubs()) || []) as any[]).map((s) => s.name);
-      proxyNames.value = (((await ListProxies()) || []) as any[]).map((p) => p.name).filter((n: string) => !n.startsWith('_'));
-    } catch { /* non-fatal for the picker */ }
-    try {
+    if (subs.status === 'fulfilled') subNames.value = ((subs.value || []) as any[]).map((s) => s.name);
+    if (prox.status === 'fulfilled') {
+      proxyNames.value = ((prox.value || []) as any[]).map((p) => p.name).filter((n: string) => !n.startsWith('_'));
+    }
+    if (ss.status === 'fulfilled') {
       // Go marshals a nil slice as null; the list template indexes both
       // slices, so normalise before they reach the render.
-      sets.value = (((await ListXraySets()) || []) as any[]).map((s) => ({
+      sets.value = ((ss.value || []) as any[]).map((s) => ({
         ...s,
         members: s.members || [],
         missingMembers: s.missingMembers || [],
       })) as unknown as XraySetRow[];
-    } catch { /* non-fatal — the outbounds list still renders */ }
-    if (!routing.value.dirty) {
-      const r = await XrayRouting();
-      routing.value.raw = r?.rules || '';
+    }
+    if (wantRouting && !routing.value.dirty) {
+      if (rt.status === 'rejected') throw rt.reason;
+      routing.value.raw = (rt.value as any)?.rules || '';
     }
     error.value = '';
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
+  refreshing.value = false;
 }
 
 // ---------- Outbound CRUD ----------
@@ -480,6 +499,7 @@ async function saveSet() {
 }
 
 async function toggleSet(s: XraySetRow) {
+  if (busy.value) return; // the label's click isn't stopped by a disabled input
   busy.value = true;
   try {
     await SetXraySetEnabled(s.id, !s.enabled);
@@ -645,6 +665,9 @@ function discardRouting() {
 
 // toggleShare opens (fetching from the daemon) or closes the row's share
 // box. The link is rebuilt on every open so it follows the latest edit.
+// Share links being generated, by entry id.
+const sharing = ref<Set<number>>(new Set());
+
 async function toggleShare(row: XrayRow) {
   if (shares.value[row.id]) {
     const next = { ...shares.value };
@@ -652,6 +675,8 @@ async function toggleShare(row: XrayRow) {
     shares.value = next;
     return;
   }
+  if (sharing.value.has(row.id)) return;
+  sharing.value = new Set(sharing.value).add(row.id);
   try {
     const r = await XrayShareLink(row.id);
     shares.value = {
@@ -663,6 +688,10 @@ async function toggleShare(row: XrayRow) {
       ...shares.value,
       [row.id]: { link: '', master: !!row.dialer, dialer: row.dialer, omitted: [], copied: false, error: e?.message || String(e) },
     };
+  } finally {
+    const next = new Set(sharing.value);
+    next.delete(row.id);
+    sharing.value = next;
   }
 }
 
@@ -690,8 +719,11 @@ function cancelImport() {
   linkDialog.value.open = false;
 }
 
+const parsing = ref(false);
+
 async function applyImport() {
-  if (!linkDialog.value.link.trim()) return;
+  if (!linkDialog.value.link.trim() || parsing.value) return;
+  parsing.value = true;
   try {
     const r = await ParseXrayLink(linkDialog.value.link.trim());
     draft.value = { open: true, name: r.name, outbound: r.outbound, enabled: true, dialer: '', mux: false, fragment: null };
@@ -700,6 +732,8 @@ async function applyImport() {
     subTab.value = 'outbounds';
   } catch (e: any) {
     error.value = 'import: ' + (e?.message || String(e));
+  } finally {
+    parsing.value = false;
   }
 }
 
@@ -715,10 +749,12 @@ defineExpose({ refresh });
         <div class="col" style="gap: 2px; min-width: 0">
           <strong style="font-size: 14px">Xray-core</strong>
           <code v-if="status?.version" style="font-size: 11px; color: var(--text-dim)">{{ status.version }}</code>
+          <span v-else-if="!loaded" class="skeleton inline" style="width: 8em; height: 10px"></span>
           <span v-else class="muted" style="font-size: 11px">version unknown</span>
         </div>
         <div class="row" style="gap: 8px; align-items: center">
-          <span class="tag" :style="{
+          <span v-if="!loaded" class="skeleton inline" style="width: 5em; height: 18px"></span>
+          <span v-else class="tag" :style="{
             backgroundColor: statusBadge.color === 'var(--success)' ? 'rgba(95,208,122,0.15)'
                             : statusBadge.color === 'var(--danger)' ? 'rgba(255,111,111,0.15)'
                             : statusBadge.color === 'var(--warn)' ? 'rgba(255,200,87,0.15)'
@@ -726,13 +762,18 @@ defineExpose({ refresh });
             color: statusBadge.color,
             fontSize: '11px',
           }">● {{ statusBadge.label }}</span>
-          <button @click="refresh" :disabled="busy">Refresh</button>
+          <button @click="refresh" :disabled="busy || refreshing">
+            <span v-if="refreshing" class="spinner"></span>{{ refreshing ? 'Refreshing…' : 'Refresh' }}
+          </button>
         </div>
       </div>
       <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
-        <span class="muted" style="font-size: 11px">ports {{ status?.portRangeStart || '?' }}–{{ status?.portRangeEnd || '?' }}</span>
-        <span class="muted" style="font-size: 11px">·</span>
-        <span class="muted" style="font-size: 11px">{{ enabledCount }} / {{ entries.length }} enabled</span>
+        <span v-if="!loaded" class="skeleton inline" style="width: 12em; height: 10px"></span>
+        <template v-else>
+          <span class="muted" style="font-size: 11px">ports {{ status?.portRangeStart || '?' }}–{{ status?.portRangeEnd || '?' }}</span>
+          <span class="muted" style="font-size: 11px">·</span>
+          <span class="muted" style="font-size: 11px">{{ enabledCount }} / {{ entries.length }} enabled</span>
+        </template>
         <div style="flex: 1"></div>
         <span class="muted" style="font-size: 11px">Test target:</span>
         <input v-model="testTarget" placeholder="host:port" style="width: 160px" />
@@ -800,7 +841,10 @@ defineExpose({ refresh });
         <button v-if="filtersActive" class="seg-btn seg-clear" @click="clearFilters">Clear</button>
       </div>
 
-      <div v-if="entries.length === 0 && !draft.open" class="col"
+      <div v-if="!loaded" class="skeleton-stack">
+        <span v-for="i in 3" :key="i" class="skeleton" style="height: 52px"></span>
+      </div>
+      <div v-else-if="entries.length === 0 && !draft.open" class="col"
            style="padding: 24px; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; align-items: center; gap: 6px">
         <span style="font-size: 13px">No outbounds configured yet.</span>
         <span class="muted" style="font-size: 12px">Add one with the button above, or paste a share link to import.</span>
@@ -908,9 +952,9 @@ defineExpose({ refresh });
             </div>
             <div class="row" style="gap: 6px">
               <button @click="runTest(row)" :disabled="busy || testing || testingIds.has(row.id) || !row.enabled">Test</button>
-              <button @click="toggleShare(row)" :disabled="busy"
+              <button @click="toggleShare(row)" :disabled="busy || sharing.has(row.id)"
                       :title="row.dialer ? 'Export as a share link — the master’s own server only; its dialer is not included' : 'Export as a share link (vless://, vmess://, trojan://, ss://)'">
-                {{ shares[row.id] ? 'Hide link' : 'Share' }}
+                <span v-if="sharing.has(row.id)" class="spinner"></span>{{ shares[row.id] ? 'Hide link' : 'Share' }}
               </button>
               <button @click="toggleEnabled(row)" :disabled="busy">{{ row.enabled ? 'Disable' : 'Enable' }}</button>
               <button @click="beginEdit(row)" :disabled="busy">Edit</button>
@@ -1022,7 +1066,9 @@ defineExpose({ refresh });
                   style="width: 100%; font-family: ui-monospace, monospace; font-size: 12px"></textarea>
         <div class="row" style="gap: 6px; justify-content: flex-end">
           <button @click="cancelImport" :disabled="busy">Cancel</button>
-          <button class="primary" @click="applyImport" :disabled="!linkDialog.link.trim() || busy">Parse</button>
+          <button class="primary" @click="applyImport" :disabled="!linkDialog.link.trim() || busy || parsing">
+            {{ parsing ? 'Parsing…' : 'Parse' }}
+          </button>
         </div>
       </div>
     </template>
@@ -1083,7 +1129,10 @@ defineExpose({ refresh });
           </div>
         </div>
 
-        <div v-if="sets.length === 0 && !setDraft" class="col"
+        <div v-if="!loaded" class="skeleton-stack">
+          <span v-for="i in 2" :key="i" class="skeleton" style="height: 44px"></span>
+        </div>
+        <div v-else-if="sets.length === 0 && !setDraft" class="col"
              style="padding: 24px; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; align-items: center; gap: 6px">
           <span style="font-size: 13px">No sets yet.</span>
           <span class="muted" style="font-size: 12px">
@@ -1113,8 +1162,8 @@ defineExpose({ refresh });
               </span>
             </div>
             <div class="row" style="gap: 6px">
-              <label class="toggle" @click.prevent="toggleSet(s)">
-                <input type="checkbox" :checked="s.enabled" />
+              <label class="toggle" :class="{ stale: busy }" @click.prevent="toggleSet(s)">
+                <input type="checkbox" :checked="s.enabled" :disabled="busy" />
                 <span class="track"></span>
               </label>
               <button @click="editSet(s)" :disabled="busy">Edit</button>
@@ -1175,7 +1224,8 @@ defineExpose({ refresh });
           <span class="muted" style="font-size: 11px">→ blackhole (drop)</span>
         </div>
 
-        <MonacoJsonEditor :model-value="routing.raw" @update:model-value="onRoutingInput" height="420px" />
+        <div v-if="!loaded" class="skeleton" style="height: 420px"></div>
+        <MonacoJsonEditor v-else :model-value="routing.raw" @update:model-value="onRoutingInput" height="420px" />
 
         <details>
           <summary style="cursor: pointer; font-size: 11px; color: var(--text-dim)">examples</summary>
@@ -1233,6 +1283,7 @@ defineExpose({ refresh });
         </div>
         <pre v-if="status?.recentLogs?.length"
              style="margin: 0; padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace">{{ status.recentLogs.join('\n') }}</pre>
+        <div v-else-if="!loaded" class="skeleton" style="height: 120px"></div>
         <span v-else class="muted" style="font-size: 12px; padding: 8px 0">
           {{ status?.enabled ? 'No output captured yet — xray may not have started.' : 'xray binary is not installed.' }}
         </span>

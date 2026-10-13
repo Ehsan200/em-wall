@@ -21,7 +21,7 @@ export const RELATIVE_PRESETS: { secs: number; short: string }[] = [
   { secs: 12 * HOUR, short: '12h' }, { secs: DAY, short: '24h' }, { secs: 3 * DAY, short: '3d' },
   { secs: 7 * DAY, short: '7d' }, { secs: 14 * DAY, short: '14d' }, { secs: 30 * DAY, short: '30d' },
   { secs: 90 * DAY, short: '90d' },
-];
+].filter((p) => p.secs <= RETENTION_SECS); // never offer more history than is kept
 
 export function spanLabel(secs: number): string {
   if (secs % DAY === 0) return secs === DAY ? '24 hours' : `${secs / DAY} days`;
@@ -68,14 +68,30 @@ export function rangeLabel(sel: RangeSel): string {
   return `${fmtPoint(sel.from)} – ${fmtPoint(sel.to)}`;
 }
 
+// Oldest instant the daemon still holds usage for.
+export const retentionStart = (now = nowSec()) => now - RETENTION_SECS;
+
 // Move the window back (dir -1) or forward (+1) by its own length. Stepping
 // forward into the present turns it back into a live "last N" window.
+// Stepping back never reaches past retention: the window is cut at the
+// oldest stored data rather than showing an empty stretch before it.
 export function shiftRange(sel: RangeSel, dir: -1 | 1, now = nowSec()): RangeSel {
   const r = resolveRange(sel, now);
   const span = r.to - r.from;
   const to = r.to + dir * span;
   if (dir > 0 && to >= now) return { kind: 'last', secs: span };
-  return { kind: 'between', from: r.from + dir * span, to };
+  return { kind: 'between', from: Math.max(r.from + dir * span, retentionStart(now)), to };
+}
+
+// Why a custom window can't be shown, or null when it can. Ranges are
+// checked here rather than trusting the inputs' min/max, which a typed
+// date bypasses.
+export function customRangeError(from: number | null, to: number | null, now = nowSec()): string | null {
+  if (from === null || to === null) return 'Pick both a start and an end.';
+  if (to <= from) return 'End must be after start.';
+  if (from > now) return 'Start is in the future.';
+  if (to <= retentionStart(now)) return `No data that old — history is kept ${RETENTION_SECS / DAY} days.`;
+  return null;
 }
 
 const BUCKETS = [MIN, 5 * MIN, 10 * MIN, 15 * MIN, 30 * MIN, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY];

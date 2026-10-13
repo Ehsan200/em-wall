@@ -41,6 +41,14 @@ const points = ref<ipc.UsagePointDTO[]>([]);
 const groupMeta = ref<ipc.GroupDTO[]>([]);
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
+// loaded: first reply has landed (until then show skeletons, not the
+// "no traffic" empty state). pending: a query the user asked for (range or
+// dimension change) is in flight, so the old data is dimmed. shownDim is
+// the dimension the data on screen was queried with — labels and colours
+// follow it, not the button that was just clicked.
+const loaded = ref(false);
+const pending = ref(false);
+const shownDim = ref<Dimension>(dimension.value);
 let stopPoll: (() => void) | undefined;
 
 // Show at most this many series; the rest collapse into "other" so a
@@ -66,20 +74,26 @@ function valueOf(p: ipc.UsagePointDTO): number {
 // newer one.
 let querySeq = 0;
 
-async function refresh() {
+async function refresh(userAsked = false) {
   const r = resolveRange(range.value);
   const bucket = bucketFor(r);
+  const dim = dimension.value;
   const seq = ++querySeq;
+  if (userAsked) pending.value = true;
   try {
-    const pts = (await UsageStats(r.from, r.to, dimension.value, bucket)) || [];
+    const pts = (await UsageStats(r.from, r.to, dim, bucket)) || [];
     if (seq !== querySeq) return;
     points.value = pts;
     bucketSecs.value = bucket;
+    shownDim.value = dim;
     error.value = '';
     lastRefresh.value = new Date();
   } catch (e: any) {
+    if (seq !== querySeq) return;
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
+  pending.value = false;
 }
 
 // Distinct bucket timestamps present in the data, ascending.
@@ -174,9 +188,9 @@ function colorFor(key: string): string {
   if (key === 'Total (all)') return '#ffffff';
   if (key === 'other') return '#6a6a78';
   if (key === 'ungrouped' || key === '(unknown)') return '#8a8a96';
-  if (dimension.value === 'group') {
+  if (shownDim.value === 'group') {
     if (BRAND[key]) return BRAND[key];
-  } else if (dimension.value === 'domain') {
+  } else if (shownDim.value === 'domain') {
     const c = brandForDomain(key);
     if (c) return c;
   }
@@ -286,7 +300,7 @@ const legendItems = computed(() =>
 // in-place reactive update can miss when only data values (not identity)
 // shift on the 5s poll.
 const chartKey = computed(() =>
-  `${dimension.value}:${metric.value}:${showTotal.value}:${bucketSecs.value}:` +
+  `${shownDim.value}:${metric.value}:${showTotal.value}:${bucketSecs.value}:` +
   `${groupMeta.value.length}:${buckets.value.length}:${buckets.value[buckets.value.length - 1] ?? 0}:${points.value.length}`);
 
 const chartOptions = computed(() => ({
@@ -326,7 +340,7 @@ const grandTotal = computed(() =>
 
 // Dimension / range change the server query → refetch.
 // Metric is a pure client-side recompute, no refetch needed.
-watch([dimension, range], refresh);
+watch([dimension, range], () => refresh(true));
 watch(range, (r) => {
   if (r.kind !== 'last') return;
   try { localStorage.setItem(RANGE_KEY, String(r.secs)); } catch { /* storage unavailable */ }
@@ -336,7 +350,8 @@ const live = computed(() => range.value.kind !== 'between');
 
 onMounted(async () => {
   // Group registry is static; fetch once for brand colors + domain matching.
-  try { groupMeta.value = (await Groups()) || []; } catch { /* fall back to palette */ }
+  // Fetched alongside the first query, not before it.
+  Groups().then((g) => { groupMeta.value = g || []; }, () => { /* fall back to palette */ });
   refresh();
   // A fixed past window doesn't change; only live windows poll.
   stopPoll = startPoll(() => { if (live.value) refresh(); }, 5000);
@@ -382,13 +397,16 @@ onUnmounted(() => stopPoll?.());
       </div>
     </div>
 
+    <div class="loading-bar" :class="{ idle: !pending }"></div>
     <div class="muted" style="font-size: 11px; margin-bottom: 8px">
       <template v-if="live">live · 5s refresh · {{ lastRefresh ? fmtTime(lastRefresh) : '—' }} ·</template>
       <template v-else>fixed window ·</template>
       {{ bucketLabel }} buckets ·
-      total ↑ {{ humanBytes(grandTotal.sent) }} · ↓ {{ humanBytes(grandTotal.recv) }}
+      <template v-if="loaded">total ↑ {{ humanBytes(grandTotal.sent) }} · ↓ {{ humanBytes(grandTotal.recv) }}</template>
+      <span v-else class="skeleton inline" style="width: 9em"></span>
     </div>
 
+    <div :class="{ stale: pending }">
     <div v-if="buckets.length" class="legend">
       <span v-for="it in legendItems" :key="it.label" class="legend-item">
         <span class="swatch" :class="{ dashed: it.dashed }" :style="{ background: it.color }"></span>
@@ -397,14 +415,15 @@ onUnmounted(() => stopPoll?.());
     </div>
 
     <div class="chart-wrap">
-      <Line v-if="buckets.length" :key="chartKey" :data="chartData" :options="chartOptions" />
+      <div v-if="!loaded" class="skeleton" style="height: 100%"></div>
+      <Line v-else-if="buckets.length" :key="chartKey" :data="chartData" :options="chartOptions" />
       <div v-else class="muted empty">No proxied traffic recorded in this window yet.</div>
     </div>
 
     <table>
       <thead>
         <tr>
-          <th>{{ dimension === 'group' ? 'Group' : dimension === 'proxy' ? 'Proxy' : 'Domain' }}</th>
+          <th>{{ shownDim === 'group' ? 'Group' : shownDim === 'proxy' ? 'Proxy' : 'Domain' }}</th>
           <th style="text-align:right">Sent ↑</th>
           <th style="text-align:right">Recv ↓</th>
           <th style="text-align:right">Total</th>
@@ -420,7 +439,10 @@ onUnmounted(() => stopPoll?.());
           <td class="muted num">{{ humanBytes(r.recv) }}</td>
           <td class="num"><strong>{{ humanBytes(r.total) }}</strong></td>
         </tr>
-        <tr v-if="!tableRows.length">
+        <template v-if="!loaded">
+          <tr v-for="i in 4" :key="'sk' + i"><td colspan="4"><span class="skeleton"></span></td></tr>
+        </template>
+        <tr v-else-if="!tableRows.length">
           <td colspan="4" class="muted" style="text-align:center; padding:24px">
             Nothing to show. Route a rule through a proxy and generate some traffic.
           </td>
@@ -435,6 +457,7 @@ onUnmounted(() => stopPoll?.());
         </tr>
       </tfoot>
     </table>
+    </div>
   </div>
 </template>
 

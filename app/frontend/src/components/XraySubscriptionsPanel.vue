@@ -94,22 +94,39 @@ function fmtExpire(unix: number): string {
   return isNaN(d.getTime()) ? '' : fmtDate(d);
 }
 
+// loaded: first list landed (until then, skeleton cards rather than "No
+// subscriptions yet"). nodesLoading: subs whose node table is being fetched
+// for the first time. refreshing: the subscription(s) being re-fetched from
+// their provider — a slow network call, so its button says so.
+const loaded = ref(false);
+const nodesLoading = ref<Set<number>>(new Set());
+const refreshing = ref<number | 'all' | null>(null);
+
 async function refresh() {
   try {
     subs.value = ((await ListXraySubs()) || []) as unknown as Sub[];
     error.value = '';
-    // Reload node tables for any expanded subs.
-    for (const id of expanded.value) await loadNodes(id);
+    // Reload node tables for any expanded subs, together.
+    await Promise.all([...expanded.value].map((id) => loadNodes(id)));
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
 }
 
 async function loadNodes(id: number) {
+  const first = !nodesBySub.value[id];
+  if (first) nodesLoading.value = new Set(nodesLoading.value).add(id);
   try {
     nodesBySub.value[id] = ((await XraySubNodes(id)) || []) as unknown as Node[];
   } catch (e: any) {
     error.value = e?.message || String(e);
+  } finally {
+    if (first) {
+      const next = new Set(nodesLoading.value);
+      next.delete(id);
+      nodesLoading.value = next;
+    }
   }
 }
 
@@ -212,7 +229,9 @@ async function confirmDelete(s: Sub) {
 }
 
 async function refreshOne(s: Sub) {
+  if (busy.value) return;
   busy.value = true;
+  refreshing.value = s.id;
   try {
     const r = await RefreshXraySub(s.id);
     if (r && !r.ok && r.message) error.value = r.message;
@@ -222,10 +241,13 @@ async function refreshOne(s: Sub) {
     error.value = e?.message || String(e);
   } finally {
     busy.value = false;
+    refreshing.value = null;
   }
 }
 async function refreshAll() {
+  if (busy.value) return;
   busy.value = true;
+  refreshing.value = 'all';
   try {
     await RefreshXraySub(0);
     await refresh();
@@ -234,6 +256,7 @@ async function refreshAll() {
     error.value = e?.message || String(e);
   } finally {
     busy.value = false;
+    refreshing.value = null;
   }
 }
 
@@ -266,6 +289,8 @@ async function setStrategy(s: Sub, v: string) {
 }
 
 async function togglePin(subId: number, n: Node) {
+  if (busy.value) return;
+  busy.value = true;
   try {
     await SetXraySubNodePinned(subId, n.fingerprint, !n.pinned);
     await loadNodes(subId);
@@ -273,10 +298,14 @@ async function togglePin(subId: number, n: Node) {
     emit('changed');
   } catch (e: any) {
     error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
   }
 }
 
 async function clearPins(s: Sub) {
+  if (busy.value) return;
+  busy.value = true;
   try {
     await SetXraySubNodePinned(s.id, '', false);
     await loadNodes(s.id);
@@ -284,10 +313,14 @@ async function clearPins(s: Sub) {
     emit('changed');
   } catch (e: any) {
     error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
   }
 }
 
 async function toggleNode(subId: number, n: Node) {
+  if (busy.value) return;
+  busy.value = true;
   try {
     await SetXraySubNodeDisabled(subId, n.fingerprint, !n.disabled);
     await loadNodes(subId);
@@ -295,6 +328,8 @@ async function toggleNode(subId: number, n: Node) {
     emit('changed');
   } catch (e: any) {
     error.value = e?.message || String(e);
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -383,7 +418,9 @@ defineExpose({ refresh });
     <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
       <button v-if="!draft.open" @click="openDraft" :disabled="busy">+ Add subscription</button>
       <div style="flex: 1"></div>
-      <button @click="refreshAll" :disabled="busy || subs.length === 0">Refresh all</button>
+      <button @click="refreshAll" :disabled="busy || subs.length === 0">
+        <span v-if="refreshing === 'all'" class="spinner"></span>{{ refreshing === 'all' ? 'Refreshing all…' : 'Refresh all' }}
+      </button>
     </div>
 
     <div v-if="error" class="error" style="margin: 0">{{ error }}</div>
@@ -421,7 +458,10 @@ defineExpose({ refresh });
       </template>
     </div>
 
-    <div v-if="subs.length === 0 && !draft.open" class="col"
+    <div v-if="!loaded" class="skeleton-stack">
+      <span v-for="i in 2" :key="i" class="skeleton" style="height: 56px"></span>
+    </div>
+    <div v-else-if="subs.length === 0 && !draft.open" class="col"
          style="padding: 24px; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; align-items: center; gap: 6px">
       <span style="font-size: 13px">No subscriptions yet.</span>
       <span class="muted" style="font-size: 12px">Add a base64 share-link subscription URL; its nodes feed a master entry's Dialer.</span>
@@ -443,7 +483,9 @@ defineExpose({ refresh });
         </div>
         <div class="row" style="gap: 6px">
           <button @click="toggleExpand(s.id)" :disabled="busy">{{ expanded.has(s.id) ? 'Hide nodes' : 'Nodes' }}</button>
-          <button @click="refreshOne(s)" :disabled="busy">Refresh</button>
+          <button @click="refreshOne(s)" :disabled="busy">
+            <span v-if="refreshing === s.id" class="spinner"></span>{{ refreshing === s.id ? 'Refreshing…' : 'Refresh' }}
+          </button>
           <button @click="toggleEnabled(s)" :disabled="busy">{{ s.enabled ? 'Disable' : 'Enable' }}</button>
           <button @click="beginEdit(s)" :disabled="busy">Edit</button>
           <button @click="askDelete(s)" :disabled="busy" :class="pendingDelete === s.id ? 'danger' : ''">
@@ -495,7 +537,10 @@ defineExpose({ refresh });
 
       <!-- Node table -->
       <div v-if="expanded.has(s.id)" class="col" style="gap: 4px; margin-top: 4px">
-        <div v-if="(nodesBySub[s.id]?.length || 0) === 0" class="muted" style="font-size: 12px; padding: 6px 0">
+        <div v-if="nodesLoading.has(s.id)" class="skeleton-stack">
+          <span v-for="i in 3" :key="i" class="skeleton" style="height: 20px"></span>
+        </div>
+        <div v-else-if="(nodesBySub[s.id]?.length || 0) === 0" class="muted" style="font-size: 12px; padding: 6px 0">
           No nodes — refresh to fetch.
         </div>
         <div v-for="n in nodesBySub[s.id]" :key="n.fingerprint"

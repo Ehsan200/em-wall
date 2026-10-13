@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { startPoll } from '../poll';
+import SkeletonRows from './SkeletonRows.vue';
 import { fmtTime as fmtZoned } from '../timezone';
 import { RecentLogs, ClearLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -25,30 +26,39 @@ function daemonFilter(f: Filter): string {
   return f;
 }
 
+// loaded: first reply landed (until then, skeleton rows — not "No
+// decisions logged yet"). pending: a filter switch is in flight, so the
+// rows on screen belong to the previous chip. seq drops replies overtaken
+// by a newer query; the 1s poll otherwise races a chip switch and can
+// land the old filter's rows under the new chip.
+const loaded = ref(false);
+const pending = ref(false);
+let seq = 0;
+
 async function refresh() {
+  const mine = ++seq;
+  const f = filter.value;
   try {
     // Latest entries scoped to the active filter (so Routed actually
-    // returns the most recent routes, not the most recent anything).
-    logs.value = (await RecentLogs(500, daemonFilter(filter.value))) || [];
-    // Header counters stay accurate by also fetching counts per group
-    // via separate small queries. We piggy-back on the same RecentLogs
-    // call with bigger limits per filter — cheap enough.
-    if (filter.value !== 'all') {
-      // For non-"all", we already have the filtered list, but the chip
-      // counters need the full breakdown. Fall through to a full fetch
-      // for counter accuracy.
-    }
-    const allRows = filter.value === 'all'
-      ? logs.value
-      : ((await RecentLogs(2000, '')) || []);
+    // returns the most recent routes, not the most recent anything). The
+    // chip counters need the full breakdown, fetched alongside.
+    const [rows, allRows] = await Promise.all([
+      RecentLogs(500, daemonFilter(f)),
+      f === 'all' ? Promise.resolve(null) : RecentLogs(500, ''),
+    ]);
+    if (mine !== seq) return;
+    logs.value = rows || [];
     const counts: Record<string, number> = {};
-    for (const r of allRows) counts[r.action] = (counts[r.action] || 0) + 1;
+    for (const r of (allRows ?? logs.value)) counts[r.action] = (counts[r.action] || 0) + 1;
     totalsByAction.value = counts;
     lastRefresh.value = new Date();
     error.value = '';
   } catch (e: any) {
+    if (mine !== seq) return;
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
+  pending.value = false;
 }
 
 // "Unavailable" groups every block-* variant + forward-failed:
@@ -108,7 +118,7 @@ async function clearLogs() {
 
 // Switching chips should refetch immediately, not wait for the
 // 1s timer.
-watch(filter, () => { refresh(); });
+watch(filter, () => { pending.value = true; refresh(); });
 
 onMounted(() => {
   refresh();
@@ -124,17 +134,17 @@ onUnmounted(() => stopPoll?.());
     <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 12px">
       <div class="row" style="gap: 0">
         <button :class="{active: filter==='all'}" class="seg" @click="filter='all'">
-          All <span class="count">{{ counts.all }}</span>
+          All <span class="count">{{ loaded ? counts.all : '…' }}</span>
         </button>
         <button :class="{active: filter==='block'}" class="seg" @click="filter='block'">
-          Blocked <span class="count">{{ counts.block }}</span>
+          Blocked <span class="count">{{ loaded ? counts.block : '…' }}</span>
         </button>
         <button :class="{active: filter==='route'}" class="seg" @click="filter='route'">
-          Routed <span class="count">{{ counts.route }}</span>
+          Routed <span class="count">{{ loaded ? counts.route : '…' }}</span>
         </button>
         <button :class="{active: filter==='unavailable'}" class="seg" @click="filter='unavailable'"
                 title="Iface down + App down + App busy + App unsupported">
-          Unavailable <span class="count">{{ counts.unavailable }}</span>
+          Unavailable <span class="count">{{ loaded ? counts.unavailable : '…' }}</span>
         </button>
       </div>
       <div class="row" style="gap: 8px; align-items: center">
@@ -147,10 +157,12 @@ onUnmounted(() => stopPoll?.());
 
     <div class="muted" style="font-size: 11px; margin-bottom: 8px">
       live · 1s refresh · {{ lastRefresh ? fmtZoned(lastRefresh) : '—' }} ·
-      showing {{ filtered.length }} of {{ logs.length }}
+      <template v-if="loaded">showing {{ filtered.length }} of {{ logs.length }}</template>
+      <span v-else class="skeleton inline" style="width: 7em"></span>
     </div>
 
-    <table>
+    <div class="loading-bar" :class="{ idle: !pending }"></div>
+    <table :class="{ stale: pending }">
       <thead>
         <tr><th>Time</th><th>Domain</th><th>Action</th><th>Interface</th><th>Client</th></tr>
       </thead>
@@ -162,7 +174,8 @@ onUnmounted(() => stopPoll?.());
           <td class="muted">{{ l.interface || '—' }}</td>
           <td class="muted">{{ l.clientIp || '—' }}</td>
         </tr>
-        <tr v-if="!filtered.length">
+        <SkeletonRows v-if="!loaded" :cols="5" :rows="8" />
+        <tr v-else-if="!filtered.length">
           <td colspan="5" class="muted" style="text-align:center; padding:24px">
             <span v-if="!logs.length">No decisions logged yet. Plain allows are not logged.</span>
             <span v-else>No matches for current filter.</span>

@@ -23,6 +23,11 @@ const error = ref<string>('');
 const appVersion = ref<string>('');
 const install = ref<installer.Status | null>(null);
 const packaged = ref<boolean>(true);
+// False until the first refresh() lands. Before that we don't know whether
+// the daemon is installed, so show a neutral splash instead of flashing
+// the install gate (or a "daemon unreachable" status) on every launch.
+const booted = ref(false);
+const egressLoading = ref(false);
 // True while Settings → Reinstall is mid-flight. Reinstall bootouts the
 // LaunchDaemon and re-bootstraps it; in between, our 2s poll observes
 // daemonRunning=false and would flip the whole UI back to the install
@@ -173,11 +178,13 @@ async function refresh() {
 
 async function refreshEgress() {
   let probed = false;
+  egressLoading.value = true;
   try {
     const r = await PublicIP();
     egress.value = r;
     probed = !!r?.probed;
   } catch { /* daemon may be down / starting; leave last value */ }
+  egressLoading.value = false;
   // Self-scheduling: retry quickly until we have a real exit IP (covers
   // daemon-still-starting and transient probe failures), then back off
   // to a slow poll since a public IP rarely changes.
@@ -191,9 +198,14 @@ async function onInstalled() {
 }
 
 onMounted(async () => {
-  try { packaged.value = await IsPackaged(); } catch { packaged.value = false; }
-  try { appVersion.value = await AppVersion(); } catch { appVersion.value = ''; }
-  await refresh();
+  // Independent calls: run them together so the splash is as short as
+  // the slowest one, not their sum.
+  await Promise.all([
+    IsPackaged().then((v) => { packaged.value = v; }, () => { packaged.value = false; }),
+    AppVersion().then((v) => { appVersion.value = v; }, () => { appVersion.value = ''; }),
+    refresh(),
+  ]);
+  booted.value = true;
   stopPoll = startPoll(refresh, 2000);
   refreshEgress(); // self-schedules its own next run
   // Check for updates on startup, then keep re-checking on a slow cadence
@@ -218,7 +230,8 @@ onUnmounted(() => {
 <template>
   <StatusBar :status="status" :error="error" :appVersion="appVersion"
              :incompatible="daemonIncompatible" :daemonVersion="daemonVersion"
-             :egress="egress" @refresh-egress="refreshEgress" />
+             :egress="egress" :egressLoading="egressLoading" :booted="booted"
+             @refresh-egress="refreshEgress" />
 
   <div v-if="daemonIncompatible && !reinstalling" class="compat-banner">
     <div class="col" style="gap: 2px">
@@ -264,7 +277,11 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <template v-if="showInstallGate">
+  <div v-if="!booted" class="boot">
+    <span class="spinner lg"></span>
+    <span>Connecting to em-wall…</span>
+  </div>
+  <template v-else-if="showInstallGate">
     <InstallPanel :status="install" :packaged="packaged" @installed="onInstalled" />
   </template>
   <template v-else>

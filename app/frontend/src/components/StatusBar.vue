@@ -1,17 +1,55 @@
 <script lang="ts" setup>
-import { ref } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
 import type { ipc } from '../../wailsjs/go/models';
 
-defineProps<{
+const props = defineProps<{
   status: ipc.StatusResult | null;
   error: string;
   appVersion: string;
   incompatible?: boolean;
   daemonVersion?: string;
   egress?: ipc.ExitIPResult | null;
+  egressLoading?: boolean;
+  // False until the app's first Status() call returns — "connecting", not
+  // "unreachable".
+  booted?: boolean;
 }>();
 
 const emit = defineEmits<{ (e: 'refresh-egress'): void }>();
+
+// Uptime ticks every second locally. Status() arrives every ~2s, so
+// showing its value directly made the counter jump 2–3s at a time. We
+// anchor on the daemon's uptimeSec at the moment each reply landed and add
+// the wall time since; each new reply re-anchors, so drift can't build up.
+const now = ref(Date.now());
+let anchor: { sec: number; at: number } | null = null;
+const elapsed = (a: { sec: number; at: number }, t: number) => a.sec + Math.max(0, Math.floor((t - a.at) / 1000));
+watch(() => props.status?.uptimeSec, (sec) => {
+  const t = Date.now();
+  if (typeof sec !== 'number') { anchor = null; }
+  // Within a second of what we already show: keep the old anchor, or
+  // reply latency and rounding would make the counter step back by one.
+  // A bigger gap (daemon restarted, laptop slept) re-anchors.
+  else if (!anchor || Math.abs(elapsed(anchor, t) - sec) > 1) { anchor = { sec, at: t }; }
+  now.value = t;
+}, { immediate: true });
+let ticker: number | undefined;
+onMounted(() => { ticker = window.setInterval(() => { now.value = Date.now(); }, 1000); });
+onUnmounted(() => { if (ticker) window.clearInterval(ticker); });
+
+// Same shape as Go's time.Duration.String() for whole seconds ("13m13s",
+// "1h0m5s") so it matches the CLI.
+function fmtDuration(total: number): string {
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  if (h) return `${h}h${m}m${s}s`;
+  if (m) return `${m}m${s}s`;
+  return `${s}s`;
+}
+const uptime = computed(() => {
+  // An older daemon without uptimeSec: show its string as before.
+  if (!anchor) return props.status?.uptime ?? '';
+  return fmtDuration(elapsed(anchor, now.value));
+});
 
 // Public IP is masked by default; click to reveal.
 const egressRevealed = ref(false);
@@ -47,7 +85,7 @@ function maskIP(ip?: string): string {
         </span>
       </div>
       <div><span class="label">Rules</span> {{ status.ruleCount }}</div>
-      <div><span class="label">Uptime</span> {{ status.uptime }}</div>
+      <div><span class="label">Uptime</span> {{ uptime }}</div>
 
       <!-- Public egress: what every site sees for traffic no rule matches. -->
       <div class="egress"
@@ -64,8 +102,10 @@ function maskIP(ip?: string): string {
           </span>
           <span v-if="egress.city" class="muted">· {{ egress.city }}</span>
         </template>
-        <span v-else class="muted">{{ egress ? 'unknown' : '…' }}</span>
-        <button class="egress-refresh" title="Refresh public IP" @click="emit('refresh-egress')">⟳</button>
+        <span v-else-if="egress" class="muted">unknown</span>
+        <span v-else class="skeleton inline" style="width: 6em"></span>
+        <span v-if="egressLoading" class="spinner" title="Checking public IP…"></span>
+        <button v-else class="egress-refresh" title="Refresh public IP" @click="emit('refresh-egress')">⟳</button>
       </div>
 
       <div v-if="incompatible" class="tag tag-block"
@@ -75,7 +115,8 @@ function maskIP(ip?: string): string {
       <div v-else class="muted">v{{ appVersion || status.version }}</div>
     </template>
     <template v-else>
-      <div><span class="tag tag-block">daemon unreachable</span> <span class="muted">{{ error || 'connecting…' }}</span></div>
+      <div v-if="booted === false" class="muted"><span class="spinner"></span> connecting to daemon…</div>
+      <div v-else><span class="tag tag-block">daemon unreachable</span> <span class="muted">{{ error || 'connecting…' }}</span></div>
       <div v-if="appVersion" style="margin-left:auto" class="muted">v{{ appVersion }}</div>
     </template>
   </div>

@@ -37,6 +37,10 @@ const sysStatus = ref<ipc.SystemDNSStatus | null>(null);
 const error = ref<string>('');
 const busy = ref<boolean>(false);
 const lastRefresh = ref<Date | null>(null);
+// Until these land, the hijack tag would read "inactive" (with Activate
+// enabled) and the DoH toggle "off" — wrong states, not just empty ones.
+const settingsLoaded = ref(false);
+const statusLoaded = ref(false);
 let timer: number | undefined;
 
 // ---- Fallback DNS ----
@@ -238,6 +242,7 @@ async function loadSettings() {
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  settingsLoaded.value = true;
   await loadDisplayTimezone();
 }
 
@@ -268,9 +273,11 @@ async function refreshStatus() {
   } catch (e: any) {
     if (!busy.value) error.value = e?.message || String(e);
   }
+  statusLoaded.value = true;
 }
 
 async function toggleEncrypted() {
+  if (busy.value || !settingsLoaded.value) return; // the label's click isn't stopped by the disabled input
   busy.value = true;
   try {
     blockEncrypted.value = !blockEncrypted.value;
@@ -349,11 +356,12 @@ onUnmounted(() => {
           <div class="col" style="gap: 2px">
             <strong>System DNS hijack</strong>
             <span class="muted" style="font-size: 11px">
-              Refreshes every 1.5s ·
+              Refreshes every 5s ·
               {{ lastRefresh ? `last update ${fmtTime(lastRefresh)}` : '—' }}
             </span>
           </div>
-          <span :class="sysStatus?.active ? 'tag tag-route' : 'tag tag-off'">
+          <span v-if="!statusLoaded" class="skeleton inline" style="width: 4.5em; height: 18px"></span>
+          <span v-else :class="sysStatus?.active ? 'tag tag-route' : 'tag tag-off'">
             {{ sysStatus?.active ? 'ACTIVE' : 'inactive' }}
           </span>
         </div>
@@ -372,7 +380,10 @@ onUnmounted(() => {
           upstream to <code>127.0.0.1</code> in the VPN's own settings.
         </span>
 
-        <div v-if="sysStatus" class="col" style="gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border)">
+        <div v-if="!statusLoaded" class="skeleton-stack" style="margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border)">
+          <span v-for="i in 3" :key="i" class="skeleton" style="width: 70%"></span>
+        </div>
+        <div v-else-if="sysStatus" class="col" style="gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border)">
           <div class="row" style="gap: 12px"><span class="label muted" style="min-width: 140px">Upstream (validated)</span>
             <code v-if="sysStatus.upstream && sysStatus.upstream.length">{{ sysStatus.upstream.join('  •  ') }}</code>
             <span v-else class="muted" style="color: var(--warn)">none — daemon cannot resolve</span>
@@ -390,11 +401,11 @@ onUnmounted(() => {
         </div>
 
         <div class="row" style="margin-top: 8px; gap: 10px">
-          <button class="primary" :disabled="busy || sysStatus?.active" @click="activate">
-            {{ busy ? '…' : 'Activate' }}
+          <button class="primary" :disabled="busy || !statusLoaded || sysStatus?.active" @click="activate">
+            <span v-if="busy && !sysStatus?.active" class="spinner"></span>{{ busy && !sysStatus?.active ? 'Activating…' : 'Activate' }}
           </button>
-          <button :disabled="busy || !sysStatus?.active" @click="deactivate">
-            {{ busy ? '…' : 'Deactivate' }}
+          <button :disabled="busy || !statusLoaded || !sysStatus?.active" @click="deactivate">
+            <span v-if="busy && sysStatus?.active" class="spinner"></span>{{ busy && sysStatus?.active ? 'Deactivating…' : 'Deactivate' }}
           </button>
         </div>
       </div>
@@ -419,14 +430,15 @@ onUnmounted(() => {
         </div>
         <textarea
           v-model="fallbackDns"
+          :disabled="!settingsLoaded"
+          :placeholder="settingsLoaded ? '1.1.1.1\n8.8.8.8' : 'Loading…'"
           @input="fallbackSaved = false; fallbackError = ''"
           spellcheck="false"
           rows="3"
-          placeholder="1.1.1.1&#10;8.8.8.8"
           style="width: 100%; font-family: var(--mono, monospace); font-size: 12px; padding: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; resize: vertical"
         ></textarea>
         <div class="row" style="gap: 10px; align-items: center">
-          <button class="primary" :disabled="fallbackBusy" @click="saveFallbackDns">
+          <button class="primary" :disabled="fallbackBusy || !settingsLoaded" @click="saveFallbackDns">
             {{ fallbackBusy ? 'Saving…' : 'Save' }}
           </button>
           <span v-if="fallbackSaved" class="muted" style="font-size: 11px; color: var(--success)">
@@ -450,8 +462,8 @@ onUnmounted(() => {
               Trade-off: your queries become visible to your ISP again.
             </span>
           </div>
-          <label class="toggle" @click.prevent="toggleEncrypted">
-            <input type="checkbox" :checked="blockEncrypted" :disabled="busy" />
+          <label class="toggle" :class="{ stale: !settingsLoaded }" @click.prevent="toggleEncrypted">
+            <input type="checkbox" :checked="blockEncrypted" :disabled="busy || !settingsLoaded" />
             <span class="track"></span>
           </label>
         </label>

@@ -227,3 +227,65 @@ th {
   100% { box-shadow: 0 0 0 0 rgba(255, 200, 87, 0.0); border-color: var(--border); }
 }
 .reinstall-flash { animation: reinstall-flash 1.8s ease-out; }
+
+/* ---------- Loading states ----------
+   .spinner    inline ring for buttons and small "in flight" cues.
+   .skeleton   shimmering placeholder block shown before first data, so an
+               empty-state message never flashes while a fetch is pending.
+   .stale      dims content whose replacement is being fetched (range or
+               filter change) so old numbers don't read as the new answer.
+   .loading-bar thin indeterminate bar for a refetch in progress.        */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  opacity: 0.75;
+  animation: spin 0.7s linear infinite;
+}
+.spinner.lg { width: 22px; height: 22px; border-width: 3px; }
+button .spinner { margin-right: 6px; }
+
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+.skeleton {
+  display: block;
+  min-height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--panel-2) 25%, var(--border) 37%, var(--panel-2) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+.skeleton.inline { display: inline-block; width: 3em; vertical-align: middle; }
+.skeleton-stack { display: flex; flex-direction: column; gap: 8px; }
+
+.stale { opacity: 0.55; transition: opacity 0.15s ease; pointer-events: none; }
+
+@keyframes loading-bar { 0% { left: -35%; width: 35%; } 100% { left: 100%; width: 35%; } }
+.loading-bar { position: relative; height: 2px; overflow: hidden; background: transparent; }
+.loading-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: var(--accent);
+  animation: loading-bar 1s ease-in-out infinite;
+}
+.loading-bar.idle::after { display: none; }
+
+.boot {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .skeleton, .loading-bar::after { animation-duration: 3s; }
+}

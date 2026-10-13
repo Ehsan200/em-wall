@@ -153,9 +153,12 @@ func (d *handlerDeps) chooseUpstream(ctx context.Context, snap map[string][]stri
 
 	// Always offer the public resolvers as LOWEST-priority candidates,
 	// appended after every network-local one. MultiUpstream.Forward stops
-	// at the first positive reply, so for any name a local resolver can
-	// answer these are never even queried — privacy and latency are
-	// preserved, and a public NXDOMAIN can't outrank a local positive for
+	// at the first positive reply and only brings the next upstream in when
+	// the ones asked fail or are slower than upstreamHedgeDelay, so while a
+	// local resolver answers promptly these are never queried — privacy and
+	// latency are preserved. (It does ask first whichever upstream answered
+	// last, for upstreamPreferFor; then list order gets another try.) A
+	// public NXDOMAIN can't outrank a local positive for
 	// an in-country split-DNS .ir name. They only get consulted when EVERY
 	// local resolver soft-fails a name (SERVFAIL / timeout) — e.g. a
 	// VPN-pushed resolver that can't resolve certain .ir CDN hosts — which

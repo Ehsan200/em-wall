@@ -26,6 +26,9 @@ const proxies = ref<ProxyRow[]>([]);
 const error = ref<string>('');
 const busy = ref<boolean>(false);
 const testResult = ref<Record<number, { ok: boolean; message: string }>>({});
+const loaded = ref(false);
+// Proxies with a test in flight; each row's Test button shows its own.
+const testing = ref<Set<number>>(new Set());
 
 const draft = ref<{
   open: boolean;
@@ -83,6 +86,7 @@ async function refresh() {
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
 }
 
 function openDraft() {
@@ -181,11 +185,17 @@ async function confirmDelete(p: ProxyRow) {
 }
 
 async function test(p: ProxyRow) {
+  if (testing.value.has(p.id)) return;
+  testing.value = new Set(testing.value).add(p.id);
   try {
     const r = await TestProxy(p.id);
     testResult.value = { ...testResult.value, [p.id]: { ok: r.ok, message: r.message } };
   } catch (e: any) {
     testResult.value = { ...testResult.value, [p.id]: { ok: false, message: e?.message || String(e) } };
+  } finally {
+    const next = new Set(testing.value);
+    next.delete(p.id);
+    testing.value = next;
   }
 }
 
@@ -217,7 +227,10 @@ defineExpose({ refresh });
     <div v-if="error" class="error" style="margin: 6px 0">{{ error }}</div>
 
     <!-- Existing proxies -->
-    <div v-if="proxies.length === 0 && !draft.open" class="muted" style="font-size: 12px; padding: 8px 0">
+    <div v-if="!loaded" class="skeleton-stack">
+      <span v-for="i in 2" :key="i" class="skeleton" style="height: 44px"></span>
+    </div>
+    <div v-else-if="proxies.length === 0 && !draft.open" class="muted" style="font-size: 12px; padding: 8px 0">
       No proxies configured.
     </div>
 
@@ -236,7 +249,9 @@ defineExpose({ refresh });
             </div>
           </div>
           <div class="row" style="gap: 6px">
-            <button @click="test(p)" :disabled="busy">Test</button>
+            <button @click="test(p)" :disabled="busy || testing.has(p.id)">
+              <span v-if="testing.has(p.id)" class="spinner"></span>{{ testing.has(p.id) ? 'Testing…' : 'Test' }}
+            </button>
             <button @click="beginEdit(p)" :disabled="busy">Edit</button>
             <button @click="askDelete(p)" :disabled="busy"
                     :class="pendingDelete === p.id ? 'danger' : ''">
@@ -244,7 +259,7 @@ defineExpose({ refresh });
             </button>
           </div>
         </div>
-        <div v-if="testResult[p.id]" class="muted" style="font-size: 11px"
+        <div v-if="testResult[p.id]" class="muted" :class="{ stale: testing.has(p.id) }" style="font-size: 11px"
              :style="{ color: testResult[p.id].ok ? 'var(--success)' : 'var(--text-dim)' }">
           {{ testResult[p.id].ok ? '✓' : '·' }} {{ testResult[p.id].message }}
         </div>
@@ -266,7 +281,7 @@ defineExpose({ refresh });
         </div>
         <div class="row" style="gap: 6px; justify-content: flex-end">
           <button @click="cancelEdit" :disabled="busy">Cancel</button>
-          <button class="primary" @click="saveEdit" :disabled="!editingIsValid || busy">Save</button>
+          <button class="primary" @click="saveEdit" :disabled="!editingIsValid || busy">{{ busy ? 'Saving…' : 'Save' }}</button>
         </div>
       </template>
     </div>
@@ -287,7 +302,7 @@ defineExpose({ refresh });
       </div>
       <div class="row" style="gap: 6px; justify-content: flex-end">
         <button @click="cancelDraft" :disabled="busy">Cancel</button>
-        <button class="primary" @click="submitDraft" :disabled="!draftIsValid || busy">Add proxy</button>
+        <button class="primary" @click="submitDraft" :disabled="!draftIsValid || busy">{{ busy ? 'Adding…' : 'Add proxy' }}</button>
       </div>
     </div>
   </div>

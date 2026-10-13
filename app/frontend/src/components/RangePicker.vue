@@ -2,7 +2,8 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import {
   type RangeSel, RELATIVE_PRESETS, RETENTION_SECS, ROLLUP_AGE_SECS,
-  calendarPresets, fmtPoint, rangeLabel, resolveRange, shiftRange, toLocalInput, fromLocalInput,
+  calendarPresets, customRangeError, fmtPoint, rangeLabel, resolveRange, retentionStart, shiftRange,
+  toLocalInput, fromLocalInput,
 } from '../usageRange';
 
 const model = defineModel<RangeSel>({ required: true });
@@ -16,8 +17,7 @@ const customError = ref('');
 
 const label = computed(() => rangeLabel(model.value));
 const live = computed(() => model.value.kind !== 'between');
-const canBack = computed(() =>
-  resolveRange(model.value).from > Math.floor(Date.now() / 1000) - RETENTION_SECS);
+const canBack = computed(() => resolveRange(model.value).from > retentionStart());
 
 function isActive(sel: RangeSel): boolean {
   const m = model.value;
@@ -37,7 +37,9 @@ function toggle() {
   open.value = !open.value;
   if (!open.value) return;
   // Rebuild on open: "Today" must mean today even if the app ran overnight.
-  calendar.value = calendarPresets();
+  calendar.value = calendarPresets().filter((c) => resolveRange(c.sel).to > retentionStart());
+  nowInput.value = toLocalInput(Math.floor(Date.now() / 1000));
+  minInput.value = toLocalInput(retentionStart());
   const r = resolveRange(model.value);
   customFrom.value = toLocalInput(r.from);
   customTo.value = toLocalInput(r.to);
@@ -45,11 +47,14 @@ function toggle() {
 }
 
 function applyCustom() {
-  const from = fromLocalInput(customFrom.value);
+  let from = fromLocalInput(customFrom.value);
   const to = fromLocalInput(customTo.value);
-  if (from === null || to === null) { customError.value = 'Pick both a start and an end.'; return; }
-  if (to <= from) { customError.value = 'End must be after start.'; return; }
+  const err = customRangeError(from, to);
+  if (err) { customError.value = err; return; }
   const now = Math.floor(Date.now() / 1000);
+  // A start before retention is cut to the oldest stored data.
+  from = Math.max(from!, retentionStart(now));
+  if (to === null) return;
   // An end in the future (or within a minute of now) means "until now", live.
   pick(to >= now - 60 ? { kind: 'since', from, label: `Since ${fmtPoint(from)}` } : { kind: 'between', from, to });
 }
@@ -74,7 +79,10 @@ onUnmounted(() => {
 });
 watch(model, () => { customError.value = ''; });
 
-const minInput = computed(() => toLocalInput(Math.floor(Date.now() / 1000) - RETENTION_SECS));
+// Refreshed each time the popover opens, so a long-running app doesn't
+// offer stale bounds.
+const minInput = ref(toLocalInput(retentionStart()));
+const nowInput = ref(toLocalInput(Math.floor(Date.now() / 1000)));
 const rollupDays = ROLLUP_AGE_SECS / 86400;
 const retentionDays = RETENTION_SECS / 86400;
 </script>
@@ -107,8 +115,8 @@ const retentionDays = RETENTION_SECS / 86400;
 
       <div class="sec-title">Custom</div>
       <div class="custom">
-        <label>From <input v-model="customFrom" type="datetime-local" :min="minInput" /></label>
-        <label>To <input v-model="customTo" type="datetime-local" :min="minInput" /></label>
+        <label>From <input v-model="customFrom" type="datetime-local" :min="minInput" :max="nowInput" /></label>
+        <label>To <input v-model="customTo" type="datetime-local" :min="minInput" :max="nowInput" /></label>
         <button class="apply" @click="applyCustom">Apply</button>
       </div>
       <div v-if="customError" class="err">{{ customError }}</div>

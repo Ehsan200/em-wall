@@ -21,17 +21,29 @@ const windowSec = ref(600);
 const error = ref('');
 let stopPoll: (() => void) | undefined;
 
+// pending: a window switch is in flight, so the strips on screen are the
+// old window's. seq drops a reply overtaken by a newer query (the 10 s poll
+// can race a switch).
+const pending = ref(false);
+let seq = 0;
+
 async function refresh() {
+  const mine = ++seq;
   try {
-    pools.value = (await HealthPools('', windowSec.value)) ?? [];
+    const got = (await HealthPools('', windowSec.value)) ?? [];
+    if (mine !== seq) return;
+    pools.value = got;
     error.value = '';
   } catch (e: any) {
+    if (mine !== seq) return;
     error.value = String(e?.message ?? e);
   }
+  pending.value = false;
 }
 
 function setWindow(sec: number) {
   windowSec.value = sec;
+  pending.value = true;
   refresh();
 }
 
@@ -135,8 +147,10 @@ onUnmounted(() => stopPoll?.());
         <button v-for="w in WINDOWS" :key="w.sec" class="seg" :class="{ active: windowSec === w.sec }"
                 @click="setWindow(w.sec)">{{ w.label }}</button>
       </div>
+      <span v-if="pending" class="spinner" title="Loading window…"></span>
     </div>
     <div v-if="error" class="error">{{ error }}</div>
+    <div :class="{ stale: pending }">
 
     <div v-for="p in visible" :key="p.master" class="pool">
       <div class="pool-head">
@@ -220,6 +234,7 @@ onUnmounted(() => stopPoll?.());
       <span><i class="cell carry m-demoted" /> master demoted</span>
       <span><i class="cell carry m-down" /> master down</span>
     </div>
+  </div>
   </section>
 </template>
 

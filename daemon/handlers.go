@@ -72,6 +72,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return ipc.StatusResult{
 			Version:           version.Version,
 			Uptime:            time.Since(d.startedAt).Round(time.Second).String(),
+			UptimeSec:         int64(time.Since(d.startedAt) / time.Second),
 			BlockEncryptedDNS: blockEnc == "true",
 			UpstreamDNS:       d.upstream,
 			ListenAddr:        d.listenAddr,

@@ -64,6 +64,24 @@ const xrays = ref<XrayRow[]>([]);
 const xraySets = ref<XraySetRow[]>([]);
 const knownGroups = ref<ipc.GroupDTO[]>([]);
 const error = ref<string>('');
+// loaded: the first refresh landed — until then show skeleton rows, not
+// "No rules yet". busyKeys: actions in flight, keyed per target
+// ('add', 'rule:ID', 'group:KEY', …) so a row shows its own spinner and a
+// second click (double toggle, double Create) can't re-enter.
+const loaded = ref(false);
+const busyKeys = ref<Set<string>>(new Set());
+const isBusy = (key: string) => busyKeys.value.has(key);
+async function run(key: string, fn: () => Promise<void>) {
+  if (busyKeys.value.has(key)) return;
+  busyKeys.value = new Set(busyKeys.value).add(key);
+  try {
+    await fn();
+  } finally {
+    const next = new Set(busyKeys.value);
+    next.delete(key);
+    busyKeys.value = next;
+  }
+}
 const pendingDelete = ref<number | null>(null);
 const pendingDeleteGroup = ref<string | null>(null);
 const search = ref<string>('');
@@ -260,7 +278,10 @@ function askDeleteCustomGroup(g: ipc.GroupDTO) {
   if (pendingDeleteCustomTimer) window.clearTimeout(pendingDeleteCustomTimer);
   pendingDeleteCustomTimer = window.setTimeout(() => { pendingDeleteCustom.value = null; }, 3000);
 }
-async function confirmDeleteCustomGroup(g: ipc.GroupDTO) {
+function confirmDeleteCustomGroup(g: ipc.GroupDTO) {
+  return run(`custom:${g.key}`, () => confirmDeleteCustomGroupNow(g));
+}
+async function confirmDeleteCustomGroupNow(g: ipc.GroupDTO) {
   if (pendingDeleteCustomTimer) window.clearTimeout(pendingDeleteCustomTimer);
   pendingDeleteCustom.value = null;
   try {
@@ -345,7 +366,10 @@ function groupEnabledState(rs: ipc.RuleDTO[]): 'on' | 'off' | 'mixed' {
   return 'mixed';
 }
 
-async function setGroupEnabledAll(g: ipc.GroupDTO, enabled: boolean) {
+function setGroupEnabledAll(g: ipc.GroupDTO, enabled: boolean) {
+  return run(`group:${g.key}`, () => setGroupEnabledAllNow(g, enabled));
+}
+async function setGroupEnabledAllNow(g: ipc.GroupDTO, enabled: boolean) {
   try {
     await SetGroupEnabled(g.key, enabled);
     await refresh();
@@ -392,7 +416,10 @@ function askDeleteGroup(g: ipc.GroupDTO) {
   }, 3000);
 }
 
-async function confirmDeleteGroup(g: ipc.GroupDTO) {
+function confirmDeleteGroup(g: ipc.GroupDTO) {
+  return run(`group:${g.key}`, () => confirmDeleteGroupNow(g));
+}
+async function confirmDeleteGroupNow(g: ipc.GroupDTO) {
   if (pendingDeleteGroupTimer) window.clearTimeout(pendingDeleteGroupTimer);
   pendingDeleteGroup.value = null;
   try {
@@ -468,7 +495,10 @@ function groupApplyValid(): boolean {
   return false;
 }
 
-async function applyGroup() {
+function applyGroup() {
+  return run('group-apply', () => applyGroupNow());
+}
+async function applyGroupNow() {
   const g = groupApply.value;
   if (!g || !groupApplyValid()) return;
   try {
@@ -721,7 +751,10 @@ function bulkIsValid(): boolean {
   return false;
 }
 
-async function applyBulk() {
+function applyBulk() {
+  return run('bulk', () => applyBulkNow());
+}
+async function applyBulkNow() {
   const b = bulk.value;
   if (!b || !bulkIsValid() || selected.value.size === 0) return;
   try {
@@ -837,7 +870,10 @@ function toggleEditingXray(name: string) {
   else editing.value.xrays.push(name);
 }
 
-async function saveEdit() {
+function saveEdit() {
+  return run(`rule:${editing.value?.id}`, () => saveEditNow());
+}
+async function saveEditNow() {
   const e = editing.value;
   if (!editingIsValid()) return;
   try {
@@ -852,18 +888,22 @@ async function saveEdit() {
 
 async function refresh() {
   try {
-    rules.value = (await ListRules()) || [];
-    interfaces.value = (await Interfaces()) || [];
-    proxies.value = ((await ListProxies()) || []) as unknown as ProxyRow[];
-    xrays.value = ((await ListXray()) || []) as unknown as XrayRow[];
+    // Independent lists: fetch together, assign together. Sequential awaits
+    // cost six round trips and showed rules ungrouped until Groups landed.
+    const [rs, ifs, ps, xs, sets, gs] = await Promise.all([
+      ListRules(), Interfaces(), ListProxies(), ListXray(), ListXraySets(),
+      knownGroups.value.length === 0 ? Groups() : Promise.resolve(knownGroups.value),
+    ]);
+    rules.value = rs || [];
+    interfaces.value = ifs || [];
+    proxies.value = (ps || []) as unknown as ProxyRow[];
+    xrays.value = (xs || []) as unknown as XrayRow[];
     // nil slices arrive as null from Go — setOptions indexes members.
-    xraySets.value = (((await ListXraySets()) || []) as any[]).map((s) => ({
+    xraySets.value = ((sets || []) as any[]).map((s) => ({
       ...s,
       members: s.members || [],
     })) as unknown as XraySetRow[];
-    if (knownGroups.value.length === 0) {
-      knownGroups.value = (await Groups()) || [];
-    }
+    knownGroups.value = gs || [];
     error.value = '';
     // Drop cached exit IPs for rules that no longer exist or whose
     // binding changed, so stale entries don't linger, then auto-fetch
@@ -881,9 +921,13 @@ async function refresh() {
   } catch (e: any) {
     error.value = e?.message || String(e);
   }
+  loaded.value = true;
 }
 
-async function add() {
+function add() {
+  return run('add', () => addNow());
+}
+async function addNow() {
   if (!draftIsValid()) return;
   try {
     await AddRule(draft.value.pattern.trim(), draft.value.action,
@@ -900,7 +944,10 @@ async function add() {
   }
 }
 
-async function toggle(r: ipc.RuleDTO) {
+function toggle(r: ipc.RuleDTO) {
+  return run(`rule:${r.id}`, () => toggleNow(r));
+}
+async function toggleNow(r: ipc.RuleDTO) {
   try {
     await UpdateRule(r.id, r.pattern, r.action, r.interface, !r.enabled);
     await refresh();
@@ -922,7 +969,10 @@ function askDelete(r: ipc.RuleDTO) {
   }, 3000);
 }
 
-async function confirmDelete(r: ipc.RuleDTO) {
+function confirmDelete(r: ipc.RuleDTO) {
+  return run(`rule:${r.id}`, () => confirmDeleteNow(r));
+}
+async function confirmDeleteNow(r: ipc.RuleDTO) {
   if (pendingDeleteTimer) window.clearTimeout(pendingDeleteTimer);
   pendingDelete.value = null;
   try {
@@ -1103,8 +1153,11 @@ onUnmounted(() => stopLivePoll?.());
              placeholder="Search rules and groups (e.g. docker, anthropic, *.openai.com)"
              style="flex: 1" />
       <span class="muted" style="font-size: 11px; min-width: 140px; text-align: right">
-        {{ filteredGroups.length }} / {{ knownGroups.length }} groups ·
-        {{ filteredRules.length }} / {{ rules.length }} {{ rules.length === 1 ? 'rule' : 'rules' }}
+        <template v-if="loaded">
+          {{ filteredGroups.length }} / {{ knownGroups.length }} groups ·
+          {{ filteredRules.length }} / {{ rules.length }} {{ rules.length === 1 ? 'rule' : 'rules' }}
+        </template>
+        <span v-else class="skeleton inline" style="width: 10em"></span>
       </span>
     </div>
 
@@ -1156,11 +1209,12 @@ onUnmounted(() => stopLivePoll?.());
           <button class="icon-btn"
                   :class="{ danger: pendingDeleteCustom === g.key }"
                   :title="pendingDeleteCustom === g.key ? 'Click again to confirm' : 'Delete group (keeps its rules)'"
+                  :disabled="isBusy(`custom:${g.key}`)"
                   @click="askDeleteCustomGroup(g)">
             {{ pendingDeleteCustom === g.key ? '✓?' : '🗑' }}
           </button>
         </div>
-        <span v-if="!filteredCustom.length" class="muted" style="font-size: 11px; padding: 6px">
+        <span v-if="loaded && !filteredCustom.length" class="muted" style="font-size: 11px; padding: 6px">
           {{ search.trim() ? 'No custom groups match.' : 'No custom groups yet.' }}
         </span>
       </div>
@@ -1182,7 +1236,9 @@ onUnmounted(() => stopLivePoll?.());
           <input type="checkbox" v-model="groupApply.enabled" />
           <span class="track"></span>
         </label>
-        <button class="primary" @click="applyGroup" :disabled="!groupApplyValid()">Create rules</button>
+        <button class="primary" @click="applyGroup" :disabled="!groupApplyValid() || isBusy('group-apply')">
+          <span v-if="isBusy('group-apply')" class="spinner"></span>{{ isBusy('group-apply') ? 'Creating…' : 'Create rules' }}
+        </button>
         <button @click="closeGroupForm">Cancel</button>
       </div>
       <div v-if="groupApply.action === 'route'" class="col" style="gap: 10px; margin-top: 10px">
@@ -1251,7 +1307,9 @@ onUnmounted(() => stopLivePoll?.());
           <input type="checkbox" v-model="draft.enabled" />
           <span class="track"></span>
         </label>
-        <button class="primary" @click="add" :disabled="!draftIsValid()">Add</button>
+        <button class="primary" @click="add" :disabled="!draftIsValid() || isBusy('add')">
+          <span v-if="isBusy('add')" class="spinner"></span>{{ isBusy('add') ? 'Adding…' : 'Add' }}
+        </button>
       </div>
       <div v-if="draft.action === 'route'" class="col" style="gap: 10px; margin-top: 10px">
         <div class="row" style="gap: 8px; align-items: center">
@@ -1336,7 +1394,8 @@ onUnmounted(() => stopLivePoll?.());
         <div class="row" style="gap: 8px; align-items: center">
           <span class="muted" style="font-size: 11px; min-width: 60px">action:</span>
           <SearchSelect v-model="bulk.action" :options="ACTION_OPTIONS" style="width: 100px" />
-          <button class="primary" @click="applyBulk" :disabled="!bulkIsValid()">
+          <button class="primary" @click="applyBulk" :disabled="!bulkIsValid() || isBusy('bulk')">
+            <span v-if="isBusy('bulk')" class="spinner"></span>
             Apply to {{ selectedCount }} rule{{ selectedCount === 1 ? '' : 's' }}
           </button>
           <button @click="closeBulk">Cancel</button>
@@ -1426,7 +1485,10 @@ onUnmounted(() => stopLivePoll?.());
          style="text-align: center; padding: 24px">
       No rules match "<code>{{ search }}</code>".
     </div>
-    <div v-if="!rules.length" class="muted"
+    <div v-if="!loaded" class="skeleton-stack" style="margin-top: 8px">
+      <span v-for="i in 6" :key="i" class="skeleton" :style="{ height: i % 3 === 1 ? '30px' : '22px' }"></span>
+    </div>
+    <div v-else-if="!rules.length" class="muted"
          style="text-align: center; padding: 24px">
       No rules yet. Use the Quick add bar above for one-click groups, or
       the Add form for a single domain. Unmatched queries are allowed by
@@ -1477,19 +1539,21 @@ onUnmounted(() => stopLivePoll?.());
                   :title="`Add the ${missingCount(sec.group)} domain(s) this group gained, reusing this group's action and interface`">
             {{ syncing === sec.group.key ? 'Syncing…' : 'Sync' }}
           </button>
+          <span v-if="isBusy(`group:${sec.group.key}`)" class="spinner" title="Working…"></span>
           <button class="bulk-btn"
-                  :disabled="groupEnabledState(sec.rules) === 'on'"
+                  :disabled="groupEnabledState(sec.rules) === 'on' || isBusy(`group:${sec.group.key}`)"
                   @click="setGroupEnabledAll(sec.group, true)"
                   title="Turn every rule in this group on">
             Enable all
           </button>
           <button class="bulk-btn"
-                  :disabled="groupEnabledState(sec.rules) === 'off'"
+                  :disabled="groupEnabledState(sec.rules) === 'off' || isBusy(`group:${sec.group.key}`)"
                   @click="setGroupEnabledAll(sec.group, false)"
                   title="Turn every rule in this group off">
             Disable all
           </button>
           <button :class="pendingDeleteGroup === sec.group.key ? 'danger primary' : 'danger'"
+                  :disabled="isBusy(`group:${sec.group.key}`)"
                   @click="askDeleteGroup(sec.group)">
             {{ pendingDeleteGroup === sec.group.key ? 'Confirm delete?' : 'Delete all' }}
           </button>
@@ -1590,8 +1654,8 @@ onUnmounted(() => stopLivePoll?.());
                 </div>
               </td>
               <td>
-                <label class="toggle" @click.prevent="toggle(r)">
-                  <input type="checkbox" :checked="r.enabled" />
+                <label class="toggle" :class="{ stale: isBusy(`rule:${r.id}`) }" @click.prevent="toggle(r)">
+                  <input type="checkbox" :checked="r.enabled" :disabled="isBusy(`rule:${r.id}`)" />
                   <span class="track"></span>
                 </label>
               </td>
@@ -1599,8 +1663,10 @@ onUnmounted(() => stopLivePoll?.());
                 <button @click="beginEdit(r)" style="margin-right: 4px">Edit</button>
                 <button
                   :class="pendingDelete === r.id ? 'danger primary' : 'danger'"
+                  :disabled="isBusy(`rule:${r.id}`)"
                   @click="askDelete(r)"
                 >
+                  <span v-if="isBusy(`rule:${r.id}`)" class="spinner"></span>
                   {{ pendingDelete === r.id ? 'Confirm?' : 'Delete' }}
                 </button>
               </td>
@@ -1620,7 +1686,9 @@ onUnmounted(() => stopLivePoll?.());
                       <input type="checkbox" v-model="editing!.enabled" />
                       <span class="track"></span>
                     </label>
-                    <button class="primary" @click="saveEdit" :disabled="!editingIsValid()">Save</button>
+                    <button class="primary" @click="saveEdit" :disabled="!editingIsValid() || isBusy(`rule:${editing!.id}`)">
+                      {{ isBusy(`rule:${editing!.id}`) ? 'Saving…' : 'Save' }}
+                    </button>
                     <button @click="cancelEdit">Cancel</button>
                   </div>
                   <div v-if="editing!.action === 'route'" class="col" style="gap: 10px; margin-top: 10px">

@@ -264,8 +264,11 @@ type ParkedNodeDTO struct {
 // Param/result payloads. Plain structs, json-tagged.
 
 type StatusResult struct {
-	Version           string `json:"version"`
-	Uptime            string `json:"uptime"`
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
+	// UptimeSec is Uptime as whole seconds, so a UI polling every few
+	// seconds can tick the counter locally instead of jumping between polls.
+	UptimeSec         int64  `json:"uptimeSec"`
 	BlockEncryptedDNS bool   `json:"blockEncryptedDns"`
 	UpstreamDNS       string `json:"upstreamDns"`
 	ListenAddr        string `json:"listenAddr"`

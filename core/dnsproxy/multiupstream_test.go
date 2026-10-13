@@ -162,3 +162,97 @@ func TestMultiUpstream_AllNXDomainReturnsNXDomain(t *testing.T) {
 		t.Errorf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
 	}
 }
+
+// blackholeResolver reads queries and never answers — a dead or filtered
+// upstream (observed: a phone-hotspot resolver, DNS-intercepted 1.1.1.1).
+// hits counts queries it received.
+func blackholeResolver(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	var hits atomic.Int32
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			if _, _, err := pc.ReadFrom(buf); err != nil {
+				return
+			}
+			hits.Add(1)
+		}
+	}()
+	return pc.LocalAddr().String(), &hits
+}
+
+// Three dead upstreams ahead of the one that answers: the answer must come
+// back well inside the query's 5s budget. A serial walk spent 3 x 3s on
+// the dead ones and never reached it.
+func TestMultiUpstream_DeadUpstreamsDontStarveLiveOne(t *testing.T) {
+	d1, _ := blackholeResolver(t)
+	d2, _ := blackholeResolver(t)
+	d3, _ := blackholeResolver(t)
+	good, stop := startMockResolver(t, aHandler("192.0.2.7"))
+	defer stop()
+
+	mu := NewMultiUpstream([]string{d1, d2, d3, good}, 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	resp, err := mu.Forward(ctx, aQuery("ip-api.test"))
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if got := answerIP(resp); got != "192.0.2.7" {
+		t.Fatalf("answer = %q, want 192.0.2.7", got)
+	}
+	if el := time.Since(start); el > 1500*time.Millisecond {
+		t.Fatalf("took %v; dead upstreams were waited out", el)
+	}
+}
+
+// The upstream that answered is asked first next time, so a dead
+// first-listed resolver stops costing every query a hedge delay.
+func TestMultiUpstream_PrefersLastAnswerer(t *testing.T) {
+	dead, hits := blackholeResolver(t)
+	good, stop := startMockResolver(t, aHandler("192.0.2.8"))
+	defer stop()
+
+	mu := NewMultiUpstream([]string{dead, good}, 3*time.Second)
+	if _, err := mu.Forward(context.Background(), aQuery("a.test")); err != nil {
+		t.Fatal(err)
+	}
+	before := hits.Load()
+	start := time.Now()
+	if _, err := mu.Forward(context.Background(), aQuery("b.test")); err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el >= upstreamHedgeDelay {
+		t.Fatalf("second query took %v — preferred upstream not asked first", el)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.Load() != before {
+		t.Fatal("dead upstream asked although the preferred one answered at once")
+	}
+}
+
+// A definitive negative must not wait out a dead upstream's full timeout.
+func TestMultiUpstream_NegativeDoesNotWaitForDeadUpstream(t *testing.T) {
+	dead, _ := blackholeResolver(t)
+	nx, stop := startMockResolver(t, nxdomainHandler)
+	defer stop()
+
+	mu := NewMultiUpstream([]string{dead, nx}, 3*time.Second)
+	start := time.Now()
+	resp, err := mu.Forward(context.Background(), aQuery("nope.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	if el := time.Since(start); el > upstreamHedgeDelay+upstreamNegativeGrace+500*time.Millisecond {
+		t.Fatalf("took %v; waited out the dead upstream", el)
+	}
+}
