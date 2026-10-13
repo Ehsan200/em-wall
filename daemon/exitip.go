@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -24,19 +25,124 @@ import (
 // them.
 type dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
-// exitProbeURL is plaintext HTTP on purpose — it must work through a
-// raw SOCKS5/HTTP-CONNECT dialer without a TLS layer of our own. The
-// daemon-side cache (resolveExitIP) keeps us well under ip-api.com's
-// ~45 req/min free-tier limit.
-const exitProbeURL = "http://ip-api.com/json/?fields=query,countryCode,regionName,city"
+// exitProber is one public "what is my IP" service: a URL and a decoder
+// for its JSON. ok=false means the reply was unusable.
+type exitProber struct {
+	url    string
+	decode func(body []byte) (ip, country, region, city string, ok bool)
+}
 
-// probeExitIPVia fetches the public exit IP + geo seen by ip-api.com
-// when reached through dc. ok=false means the path was unreachable or
-// the response was unusable (timeout, no route, rate-limited, etc.).
+// exitProbers are tried in order, hedged (see probeExitIPVia). ip-api.com
+// is first and plaintext HTTP — cheapest, and the daemon-side cache
+// (resolveExitIP) keeps us well under its ~45 req/min free tier. The
+// others are HTTPS fallbacks (http.Transport does the TLS over whatever
+// dialer it's given, proxies included): some networks filter ip-api.com
+// outright — observed on a mobile hotspot, where a plain-HTTP request with
+// Host: ip-api.com connects and then never gets a byte back — and the
+// default-route egress then read "unknown" forever.
+var exitProbers = []exitProber{
+	{
+		url: "http://ip-api.com/json/?fields=query,countryCode,regionName,city",
+		decode: func(b []byte) (string, string, string, string, bool) {
+			var v struct {
+				Query       string `json:"query"`
+				CountryCode string `json:"countryCode"`
+				RegionName  string `json:"regionName"`
+				City        string `json:"city"`
+			}
+			if json.Unmarshal(b, &v) != nil || len(v.CountryCode) != 2 {
+				return "", "", "", "", false
+			}
+			return v.Query, v.CountryCode, v.RegionName, v.City, true
+		},
+	},
+	{
+		url: "https://ipwho.is/?fields=ip,success,country_code,region,city",
+		decode: func(b []byte) (string, string, string, string, bool) {
+			var v struct {
+				IP          string `json:"ip"`
+				Success     bool   `json:"success"`
+				CountryCode string `json:"country_code"`
+				Region      string `json:"region"`
+				City        string `json:"city"`
+			}
+			if json.Unmarshal(b, &v) != nil || !v.Success || len(v.CountryCode) != 2 {
+				return "", "", "", "", false
+			}
+			return v.IP, v.CountryCode, v.Region, v.City, true
+		},
+	},
+	{
+		url: "https://get.geojs.io/v1/ip/geo.json",
+		decode: func(b []byte) (string, string, string, string, bool) {
+			var v struct {
+				IP          string `json:"ip"`
+				CountryCode string `json:"country_code"`
+				Region      string `json:"region"`
+				City        string `json:"city"`
+			}
+			if json.Unmarshal(b, &v) != nil || len(v.CountryCode) != 2 {
+				return "", "", "", "", false
+			}
+			return v.IP, v.CountryCode, v.Region, v.City, true
+		},
+	},
+}
+
+// exitProbeHedge is how long a prober gets before the next one is started
+// alongside it. A prober that fails brings the next one in at once.
+const exitProbeHedge = 1500 * time.Millisecond
+
+// probeExitIPVia fetches the public exit IP + geo seen when reached
+// through dc, from the first exitProbers entry that answers. ok=false
+// means every prober failed (timeout, no route, rate-limited, etc.).
 func probeExitIPVia(ctx context.Context, dc dialContext) (exitIP, country, region, city string, ok bool) {
-	pctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(pctx, http.MethodGet, exitProbeURL, nil)
+	pctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel() // abandons probers still running once one answers
+	type result struct {
+		ip, country, region, city string
+		ok                        bool
+	}
+	results := make(chan result, len(exitProbers))
+	next, inFlight := 0, 0
+	launch := func() {
+		pr := exitProbers[next]
+		next++
+		inFlight++
+		go func() {
+			var r result
+			r.ip, r.country, r.region, r.city, r.ok = probeOne(pctx, dc, pr)
+			results <- r
+		}()
+	}
+	hedge := time.NewTimer(exitProbeHedge)
+	defer hedge.Stop()
+	launch()
+	for inFlight > 0 {
+		select {
+		case r := <-results:
+			inFlight--
+			if r.ok {
+				return r.ip, r.country, r.region, r.city, true
+			}
+			if next < len(exitProbers) {
+				launch()
+				hedge.Reset(exitProbeHedge)
+			}
+		case <-hedge.C:
+			if next < len(exitProbers) {
+				launch()
+				hedge.Reset(exitProbeHedge)
+			}
+		case <-pctx.Done():
+			return "", "", "", "", false
+		}
+	}
+	return "", "", "", "", false
+}
+
+func probeOne(ctx context.Context, dc dialContext, pr exitProber) (ip, country, region, city string, ok bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pr.url, nil)
 	if err != nil {
 		return "", "", "", "", false
 	}
@@ -44,22 +150,29 @@ func probeExitIPVia(ctx context.Context, dc dialContext) (exitIP, country, regio
 	// the connection is parked in its idle pool, and a zero-value Transport
 	// has no IdleConnTimeout — so every probe would hold a SOCKS stream
 	// through xray (and xray's upstream connection) open indefinitely.
-	client := &http.Client{Transport: &http.Transport{DialContext: dc, DisableKeepAlives: true}}
+	// IPv4 only: ip-api.com is v4-only, so the fallbacks must not report an
+	// IPv6 address for the same exit (exitKeys compares them; the status bar
+	// would flip families). Proxy dialers ignore the network argument.
+	dc4 := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if network == "tcp" {
+			network = "tcp4"
+		}
+		return dc(ctx, network, addr)
+	}
+	client := &http.Client{Transport: &http.Transport{DialContext: dc4, DisableKeepAlives: true}}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", "", "", false
 	}
 	defer resp.Body.Close()
-	var body struct {
-		Query       string `json:"query"`
-		CountryCode string `json:"countryCode"`
-		RegionName  string `json:"regionName"`
-		City        string `json:"city"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || len(body.CountryCode) != 2 {
+	if resp.StatusCode != http.StatusOK {
 		return "", "", "", "", false
 	}
-	return body.Query, body.CountryCode, body.RegionName, body.City, true
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return "", "", "", "", false
+	}
+	return pr.decode(body)
 }
 
 // proxyDialContext adapts a proxy.Dialer (SOCKS5 / HTTP CONNECT, the
@@ -312,7 +425,7 @@ func (d *handlerDeps) resolveExitIP(ctx context.Context, iface string) ipc.ExitI
 		return res
 	}
 
-	res.Message = "couldn't reach ip-api.com through this path (timeout or unreachable)"
+	res.Message = "couldn't reach any public-IP service through this path (timeout or unreachable)"
 	cacheExitPut(iface, res, exitFailTTL)
 	return res
 }

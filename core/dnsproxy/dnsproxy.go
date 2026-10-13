@@ -11,7 +11,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -648,40 +647,15 @@ func parentDomain(name string) string {
 	return name
 }
 
-// MultiUpstream forwards to a list of upstream resolvers, hedged: see
-// Forward. Each upstream is "host:port".
+// MultiUpstream forwards to a list of upstream resolvers in order until
+// one answers. Each upstream is "host:port".
 type MultiUpstream struct {
 	Servers []string
 	Timeout time.Duration
 
 	udpClient *dns.Client
 	tcpClient *dns.Client
-
-	// preferred is the index of the upstream that last gave a positive
-	// answer; it is asked first. On a network where the first-listed
-	// resolver is dead or filtered this stops every query paying for it.
-	// preferredAt (unix nanos) expires it after upstreamPreferFor, so list
-	// order — local resolvers before public ones — gets another chance.
-	preferred   atomic.Int32
-	preferredAt atomic.Int64
 }
-
-// upstreamHedgeDelay is how long Forward waits on the upstreams already
-// asked before asking the next one too. An upstream that fails (error or
-// non-positive reply) brings the next one in at once.
-const upstreamHedgeDelay = 250 * time.Millisecond
-
-// upstreamNegativeGrace bounds how long a definitive negative (NXDOMAIN /
-// NODATA) waits on upstreams still in flight once every upstream has been
-// asked. Long enough for a local split-DNS resolver to beat a public
-// NXDOMAIN, short enough that one dead upstream doesn't stall every
-// lookup of a name that really doesn't exist.
-const upstreamNegativeGrace = 750 * time.Millisecond
-
-// upstreamPreferFor is how long the last answering upstream keeps being
-// asked first. Without an expiry, a public resolver that answered once
-// while the local ones were briefly down would lead for good.
-const upstreamPreferFor = 30 * time.Second
 
 func NewMultiUpstream(servers []string, timeout time.Duration) *MultiUpstream {
 	if timeout == 0 {
@@ -695,44 +669,58 @@ func NewMultiUpstream(servers []string, timeout time.Duration) *MultiUpstream {
 	}
 }
 
-// Forward returns the BEST answer across upstreams by outcome rank — not
-// the first reply. A NOERROR-with-answers from any upstream beats an
-// NXDOMAIN/NODATA from another, which beats SERVFAIL/REFUSED/transport
-// errors.
+// Forward sends msg to each upstream and returns the BEST answer by
+// outcome rank — not the first reply. A NOERROR-with-answers from any
+// upstream beats an NXDOMAIN/NODATA from another, which beats
+// SERVFAIL/REFUSED/transport errors.
 //
 // Ranking (rather than first-reply-wins) is what makes split / tampered
 // DNS resolve correctly. A foreign public resolver returns NXDOMAIN for a
 // geo-split or country-code name — e.g. an .ir host whose authoritative
 // servers only answer in-country, or an on-path box that injects NXDOMAIN —
-// while the ISP/local resolver (also in our upstream list) resolves it.
-// Ranking lets that resolver win regardless of upstream order.
+// while the ISP/local resolver (also in our upstream list) resolves it. The
+// old code treated the first NXDOMAIN as definitive and stopped, so the
+// client got "no answer" even though a resolver that knew the name was one
+// entry away. Ranking lets that resolver win regardless of upstream order.
 //
-// Upstreams are hedged, not walked: one is asked, and the next joins after
-// upstreamHedgeDelay or as soon as one in flight fails. A serial walk gave
-// each dead upstream its full timeout, so on a network where the first
-// three were dead or filtered (observed: a phone hotspot resolver plus a
-// DNS-intercepted 1.1.1.1/8.8.8.8) the resolver that knew the answer was
-// never reached inside the query's 5s budget.
-//
-// We stop the moment any upstream gives a positive reply. SERVFAIL/REFUSED
-// and transport errors are SOFT: if we never get better than a soft
-// failure we retry once (cold recursive cache or a slow path to distant
-// authoritative servers — usually transient). A definitive negative is
-// returned without a second pass.
+// We stop the moment any upstream gives a positive (has-answers) reply.
+// SERVFAIL/REFUSED and transport errors are SOFT: if we never get better
+// than a soft failure we retry the whole list once (cold recursive cache or
+// a slow path to distant authoritative servers — usually transient). A
+// definitive negative (NXDOMAIN/NODATA) is returned without a second pass.
 func (m *MultiUpstream) Forward(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	best, rank, lastErr := m.round(ctx, msg)
-	if rank == rankPositive {
+	var best *dns.Msg
+	bestRank := rankNone
+	var lastErr error
+
+	attempt := func() (gotPositive bool) {
+		for _, srv := range m.Servers {
+			resp, err := m.exchange(ctx, srv, msg)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp == nil {
+				continue
+			}
+			if r := rankResponse(resp); r > bestRank {
+				best, bestRank = resp, r
+				if r == rankPositive {
+					return true // a real answer — nothing outranks it
+				}
+			}
+		}
+		return false
+	}
+
+	if attempt() {
 		return best, nil
 	}
 	// Retry only when we have nothing better than a soft failure; a
 	// definitive NXDOMAIN/NODATA won't improve by asking again.
-	if rank <= rankSoftFail && ctx.Err() == nil {
-		b2, r2, e2 := m.round(ctx, msg)
-		if r2 > rank {
-			best, rank = b2, r2
-		}
-		if e2 != nil {
-			lastErr = e2
+	if bestRank <= rankSoftFail {
+		if attempt() {
+			return best, nil
 		}
 	}
 	if best != nil {
@@ -742,100 +730,6 @@ func (m *MultiUpstream) Forward(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		lastErr = fmt.Errorf("dnsproxy: no upstream answered")
 	}
 	return nil, lastErr
-}
-
-// order returns server indexes, the preferred one first.
-func (m *MultiUpstream) order() []int {
-	n := len(m.Servers)
-	out := make([]int, 0, n)
-	p := int(m.preferred.Load())
-	if p < 0 || p >= n || time.Since(time.Unix(0, m.preferredAt.Load())) > upstreamPreferFor {
-		p = 0
-	}
-	out = append(out, p)
-	for i := 0; i < n; i++ {
-		if i != p {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-// round asks every upstream at most once, hedged, and returns the best
-// reply seen.
-func (m *MultiUpstream) round(ctx context.Context, msg *dns.Msg) (*dns.Msg, int, error) {
-	if len(m.Servers) == 0 {
-		return nil, rankNone, fmt.Errorf("dnsproxy: no upstreams configured")
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // abandons stragglers once we have our answer
-
-	type result struct {
-		idx  int
-		resp *dns.Msg
-		err  error
-	}
-	order := m.order()
-	results := make(chan result, len(order))
-	launched, inFlight := 0, 0
-	launch := func() {
-		idx := order[launched]
-		launched++
-		inFlight++
-		// Each exchange gets its own copy: miekg/dns may write the ID.
-		q := msg.Copy()
-		go func() {
-			resp, err := m.exchange(ctx, m.Servers[idx], q)
-			results <- result{idx, resp, err}
-		}()
-	}
-
-	var best *dns.Msg
-	bestRank := rankNone
-	var lastErr error
-	hedge := time.NewTimer(upstreamHedgeDelay)
-	defer hedge.Stop()
-	var grace <-chan time.Time
-
-	launch()
-	for inFlight > 0 {
-		select {
-		case r := <-results:
-			inFlight--
-			if r.err != nil {
-				lastErr = r.err
-			} else if r.resp != nil {
-				if rk := rankResponse(r.resp); rk > bestRank {
-					best, bestRank = r.resp, rk
-					if rk == rankPositive {
-						m.preferred.Store(int32(r.idx))
-						m.preferredAt.Store(time.Now().UnixNano())
-						return best, bestRank, nil
-					}
-				}
-			}
-			// A failed or non-positive upstream: bring the next one in now.
-			if launched < len(order) {
-				launch()
-				hedge.Reset(upstreamHedgeDelay)
-			}
-		case <-hedge.C:
-			if launched < len(order) {
-				launch()
-				hedge.Reset(upstreamHedgeDelay)
-			}
-		case <-grace:
-			return best, bestRank, lastErr
-		case <-ctx.Done():
-			return best, bestRank, ctx.Err()
-		}
-		// Everyone has been asked and we hold a definitive negative: give
-		// the stragglers a short grace, not their full timeout.
-		if grace == nil && launched == len(order) && bestRank >= rankNXDomain {
-			grace = time.After(upstreamNegativeGrace)
-		}
-	}
-	return best, bestRank, lastErr
 }
 
 // Response outcome ranks, worst to best, used by Forward to choose the most

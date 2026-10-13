@@ -22,8 +22,8 @@ import (
 // as a second diversity key (diverseOrder) and as a second avoidance key
 // (siteAvoid).
 //
-// Measuring an exit means one plain-HTTP request to ip-api.com through the
-// member (probeExitIPVia). The free tier allows ~45 requests a minute, and
+// Measuring an exit means one plain-HTTP request to ip-api.com (or a
+// fallback prober, see exitProbers) through the member (probeExitIPVia). The free tier allows ~45 requests a minute, and
 // the UI's own exit lookups share it, so probes are sequential, spaced by
 // exitKeyProbeSpacing, and a full pass runs only every exitKeyProbeInterval.
 // Exit IPs rarely move; a stale one only costs diversity, never
