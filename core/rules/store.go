@@ -65,7 +65,18 @@ const TrafficBucketSeconds = int64(TrafficBucket / time.Second)
 
 // TrafficRetention is how long usage history is kept before SweepTraffic
 // prunes it.
-const TrafficRetention = 7 * 24 * time.Hour
+const TrafficRetention = 90 * 24 * time.Hour
+
+// TrafficRollupAge is how long rows stay at the stored 1-minute
+// granularity. CompactTraffic folds anything older into TrafficRollup
+// buckets, so 90 days of history costs ~1/60th of what it would at full
+// resolution. Queries reaching past it should ask for buckets of at least
+// TrafficRollup, or older data shows up as hourly spikes.
+const TrafficRollupAge = 48 * time.Hour
+
+// TrafficRollup is the bucket width rows older than TrafficRollupAge are
+// compacted into.
+const TrafficRollup = time.Hour
 
 // FloorBucket rounds a time down to the start of its TrafficBucket and
 // returns the unix-seconds bucket key.
@@ -93,7 +104,7 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", path)
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger:                                   logger.Default.LogMode(logger.Silent),
 		DisableForeignKeyConstraintWhenMigrating: false,
@@ -384,7 +395,7 @@ func (s *Store) RecentLogs(ctx context.Context, limit int, filter string) ([]Log
 	if limit <= 0 {
 		limit = 200
 	}
-	q := s.db.WithContext(ctx).Order("ts DESC").Limit(limit)
+	q := s.db.WithContext(ctx).Order("ts DESC, id DESC").Limit(limit)
 	switch filter {
 	case "":
 		// no filter
@@ -412,18 +423,36 @@ func (s *Store) ClearLogs(ctx context.Context) error {
 // a late-resolved group attribution still lands. Zero-byte deltas are a
 // no-op.
 func (s *Store) AddTraffic(ctx context.Context, bucketTS int64, domain, proxy, groupKey string, sent, recv int64) error {
-	if sent == 0 && recv == 0 {
-		return nil
-	}
-	row := TrafficStat{
+	return addTraffic(s.db.WithContext(ctx), TrafficStat{
 		BucketTS:  bucketTS,
 		Domain:    domain,
 		Proxy:     proxy,
 		GroupKey:  groupKey,
 		BytesSent: sent,
 		BytesRecv: recv,
+	})
+}
+
+// AddTrafficBatch applies AddTraffic for every row in one transaction: one
+// WAL commit per drain instead of one per (domain, proxy) pair, so the
+// store's single connection is held for a moment rather than per row.
+func (s *Store) AddTrafficBatch(ctx context.Context, rows []TrafficStat) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, r := range rows {
+			if err := addTraffic(tx, r); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func addTraffic(db *gorm.DB, row TrafficStat) error {
+	if row.BytesSent == 0 && row.BytesRecv == 0 {
+		return nil
 	}
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+	sent, recv, groupKey := row.BytesSent, row.BytesRecv, row.GroupKey
+	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "bucket_ts"}, {Name: "domain"}, {Name: "proxy"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"bytes_sent": gorm.Expr("bytes_sent + ?", sent),
@@ -483,6 +512,34 @@ func (s *Store) SweepTraffic(ctx context.Context, before time.Time) error {
 	return s.db.WithContext(ctx).
 		Where("bucket_ts < ?", before.UTC().Unix()).
 		Delete(&TrafficStat{}).Error
+}
+
+// CompactTraffic folds every 1-minute row that starts before the given
+// time into the row for its TrafficRollup bucket (the one whose bucket_ts
+// is hour-aligned), then deletes the folded rows. Hour-aligned rows are
+// never selected as a source, so running it again is a no-op and a row
+// that already holds a rollup is only ever added to.
+func (s *Store) CompactTraffic(ctx context.Context, before time.Time) error {
+	w := int64(TrafficRollup / time.Second)
+	cutoff := before.UTC().Unix() / w * w
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// w is a constant we control, so inlining it is injection-safe.
+		if err := tx.Exec(fmt.Sprintf(`
+			INSERT INTO traffic_stats (bucket_ts, domain, proxy, group_key, bytes_sent, bytes_recv)
+			SELECT (bucket_ts / %[1]d) * %[1]d, domain, proxy, MAX(group_key), SUM(bytes_sent), SUM(bytes_recv)
+			FROM traffic_stats
+			WHERE bucket_ts < ? AND bucket_ts %% %[1]d != 0
+			GROUP BY (bucket_ts / %[1]d) * %[1]d, domain, proxy
+			ON CONFLICT(bucket_ts, domain, proxy) DO UPDATE SET
+				bytes_sent = bytes_sent + excluded.bytes_sent,
+				bytes_recv = bytes_recv + excluded.bytes_recv,
+				group_key  = CASE WHEN excluded.group_key != '' THEN excluded.group_key ELSE group_key END`, w),
+			cutoff).Error; err != nil {
+			return fmt.Errorf("roll up traffic: %w", err)
+		}
+		return tx.Exec(fmt.Sprintf(`DELETE FROM traffic_stats WHERE bucket_ts < ? AND bucket_ts %% %d != 0`, w),
+			cutoff).Error
+	})
 }
 
 // normalizeAction validates the action + interface combination and

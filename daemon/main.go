@@ -50,8 +50,12 @@ func main() {
 		xrayRuntimeDir = flag.String("xray-runtime-dir", "/usr/local/var/em-wall/xray", "directory where the supervisor writes the generated xray config")
 		xrayLogDir     = flag.String("xray-log-dir", "/usr/local/var/log", "directory where xray writes its access/error logs; empty disables xray logging")
 		logFile        = flag.String("log-file", "/usr/local/var/log/em-wall.log", "file launchd redirects our stdout/stderr to, trimmed when it outgrows the cap; empty disables trimming")
+		pprofAddr      = flag.String("pprof", "", "serve Go profiling on this loopback address (e.g. 127.0.0.1:6060); off when empty")
 	)
 	flag.Parse()
+	if *pprofAddr != "" {
+		startPprof(*pprofAddr)
+	}
 
 	// Parse the proxy reachability probe target once. An invalid value
 	// falls back to the default rather than failing startup — the test
@@ -182,7 +186,7 @@ func main() {
 	pf := pfctl.New(nil)
 	sysDNS := NewSystemDNS(nil)
 
-	logSink := &storeLogSink{store: store}
+	logSink := newStoreLogSink(store)
 
 	// Pick upstream: stored setting > flag default. The setting is
 	// populated when the user clicks "Activate" in the UI, capturing
@@ -265,6 +269,11 @@ func main() {
 	// initial fetch) should cancel on daemon shutdown.
 	deps.bgCtx = ctx
 	go liveConns.run(ctx)
+	logSinkDone := make(chan struct{})
+	go func() { defer close(logSinkDone); logSink.run(ctx) }()
+	// Land the last batch before store.Close. Deferred calls run LIFO, so
+	// cancel here too or this would wait on a ctx not yet cancelled.
+	defer func() { cancel(); <-logSinkDone }()
 
 	var wg sync.WaitGroup
 	wg.Add(6)
@@ -291,6 +300,10 @@ func main() {
 		defer wg.Done()
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
+		// Usage rollup runs far less often than the sweep: each pass scans
+		// every row past TrafficRollupAge, and only an hour's worth is new.
+		const trafficCompactInterval = 10 * time.Minute
+		var lastCompact time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -300,6 +313,12 @@ func main() {
 				proxyTable.SweepExpired()
 				if err := store.SweepTraffic(ctx, time.Now().Add(-rules.TrafficRetention)); err != nil {
 					log.Printf("em-walld: traffic stat sweep failed: %v", err)
+				}
+				if time.Since(lastCompact) >= trafficCompactInterval {
+					lastCompact = time.Now()
+					if err := store.CompactTraffic(ctx, time.Now().Add(-rules.TrafficRollupAge)); err != nil {
+						log.Printf("em-walld: traffic stat rollup failed: %v", err)
+					}
 				}
 			}
 		}
@@ -661,22 +680,6 @@ func main() {
 		log.Printf("em-walld: shutdown timeout")
 	}
 	log.Printf("em-walld: bye")
-}
-
-type storeLogSink struct {
-	store *rules.Store
-}
-
-func (s *storeLogSink) Log(name, action, iface string, ruleID int64, clientIP string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	_ = s.store.Log(ctx, rules.LogEntry{
-		QueryName: name,
-		Action:    action,
-		RuleID:    ruleID,
-		Interface: iface,
-		ClientIP:  clientIP,
-	})
 }
 
 // ---------- IPC handler wiring ----------

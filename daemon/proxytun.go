@@ -70,6 +70,13 @@ const proxyUDPMaxReassoc = 1
 // nothing in practice, so it's collision-free.
 const proxyUTUNAddr = "192.0.2.1"
 
+// proxyTunMTU is the proxy utun's MTU. The utun never touches a wire: the
+// netstack terminates every TCP connection locally, so the MSS clients
+// negotiate here doesn't reach the far side. A jumbo MTU means ~6x fewer
+// packets per byte through the utun syscalls and netstack than 1500 for
+// bulk transfers (video, downloads). sing-box uses the same default.
+const proxyTunMTU = 9000
+
 // Proxy dial retry tuning. One dial can fail transiently (handshake
 // timeout, mid-handshake EOF, briefly overloaded relay) even when the
 // proxy is healthy; without retry a single flake drops the connection,
@@ -1536,7 +1543,7 @@ func (pf *proxyForwarder) associateUDP(ctx context.Context, entry proxy.Entry, t
 // unsupported (logged "block-proxy-unsupported") whenever ProxyTun is
 // empty.
 func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Manager, decider ipRouteDecider, latency *netprobe.LatencyTracker, traffic *trafficAggregator, stats *connStats, routes *routeKeys, exits *exitKeys, logger *log.Logger) (*proxytun.Tunnel, string, *proxyForwarder) {
-	tun, err := proxytun.Open(proxyUTUNAddr, 1500)
+	tun, err := proxytun.Open(proxyUTUNAddr, proxyTunMTU)
 	if err != nil {
 		logger.Printf("em-walld: proxy utun open failed (proxy routing disabled): %v", err)
 		return nil, "", nil
@@ -1560,7 +1567,7 @@ func startProxyTunnel(store *proxy.Store, table *proxy.Table, router *routing.Ma
 		avoid:   newSiteAvoid(),
 		logger:  logger,
 	}
-	tunnel, err := proxytun.NewTunnel(tun, 1500, fwd.handle, fwd.handleUDP, logger)
+	tunnel, err := proxytun.NewTunnel(tun, proxyTunMTU, fwd.handle, fwd.handleUDP, logger)
 	if err != nil {
 		logger.Printf("em-walld: proxy tunnel init failed (proxy routing disabled): %v", err)
 		_ = tun.Close()

@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+import { startPoll } from '../poll';
 import { fmtTime as fmtZoned } from '../timezone';
 import { Interfaces, SystemRoutes, ActiveRoutes } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -12,7 +13,7 @@ const sysRoutes = ref<ipc.SystemRouteDTO[]>([]);
 const ourRoutes = ref<ipc.ActiveRouteDTO[]>([]);
 const lastRefresh = ref<Date | null>(null);
 const error = ref<string>('');
-let timer: number | undefined;
+let stopPoll: (() => void) | undefined;
 
 async function refresh() {
   try {
@@ -41,9 +42,9 @@ function isTunnel(name: string): boolean {
 
 onMounted(() => {
   refresh();
-  timer = window.setInterval(refresh, 5000);
+  stopPoll = startPoll(refresh, 5000);
 });
-onUnmounted(() => { if (timer) window.clearInterval(timer); });
+onUnmounted(() => stopPoll?.());
 </script>
 
 <template>

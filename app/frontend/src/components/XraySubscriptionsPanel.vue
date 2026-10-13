@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+import { startPoll } from '../poll';
 import { fmtDateTime, fmtDate } from '../timezone';
 import {
   ListXraySubs, AddXraySub, UpdateXraySub, DeleteXraySub,
@@ -48,7 +49,7 @@ let pendingDeleteTimer: number | undefined;
 // column shows any stored probe value.
 type NodePing = { latencyMs: number; down: boolean; parked: boolean };
 const obs = ref<{ winners: Set<string>; nodes: Record<string, NodePing> }>({ winners: new Set(), nodes: {} });
-let obsTimer: number | undefined;
+let stopObsPoll: (() => void) | undefined;
 
 function hoursToSec(h: string): number {
   const n = parseFloat(h);
@@ -368,10 +369,10 @@ function isWinner(n: Node): boolean {
 onMounted(() => {
   refresh();
   pollObs();
-  obsTimer = window.setInterval(pollObs, 5000);
+  stopObsPoll = startPoll(pollObs, 5000);
 });
 onUnmounted(() => {
-  if (obsTimer) window.clearInterval(obsTimer);
+  stopObsPoll?.();
 });
 
 defineExpose({ refresh });

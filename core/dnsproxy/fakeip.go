@@ -73,6 +73,17 @@ type fakeIPPool struct {
 
 	store  FakeIPStore // nil → memory-only
 	logger *log.Logger
+
+	// Store writes are write-behind: a DNS answer must not wait on SQLite,
+	// which has a single connection shared with the query log, traffic
+	// stats and every IPC read. pending holds the latest wanted state per
+	// host (nil = delete); since a lease row is keyed by host and
+	// PutFakeIPLease evicts any other holder of its IP, applying only the
+	// final state per host in any order lands the same table.
+	wmu     sync.Mutex
+	pending map[string]*FakeIPLease
+	kick    chan struct{}
+	flushMu sync.Mutex // serialises flushes so a host's writes stay ordered
 }
 
 type fakeLease struct {
@@ -105,7 +116,7 @@ func newFakeIPPool(cidr string, ttl time.Duration, store FakeIPStore, logger *lo
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &fakeIPPool{
+	p := &fakeIPPool{
 		base:   binary.BigEndian.Uint32(v4),
 		size:   size,
 		ttl:    ttl,
@@ -113,7 +124,63 @@ func newFakeIPPool(cidr string, ttl time.Duration, store FakeIPStore, logger *lo
 		byIP:   make(map[uint32]*fakeLease),
 		store:  store,
 		logger: logger,
-	}, nil
+	}
+	if store != nil {
+		p.pending = make(map[string]*FakeIPLease)
+		p.kick = make(chan struct{}, 1)
+		go p.writeLoop()
+	}
+	return p, nil
+}
+
+// queue records the wanted store state for host (nil lease = delete) and
+// wakes the writer. Never blocks on the store.
+func (p *fakeIPPool) queue(host string, lease *FakeIPLease) {
+	p.wmu.Lock()
+	p.pending[host] = lease
+	p.wmu.Unlock()
+	select {
+	case p.kick <- struct{}{}:
+	default:
+	}
+}
+
+// writeLoop lives as long as the pool (the daemon process).
+func (p *fakeIPPool) writeLoop() {
+	for range p.kick {
+		p.flush()
+	}
+}
+
+// flush writes every pending change to the store.
+func (p *fakeIPPool) flush() {
+	if p.store == nil {
+		return
+	}
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	p.wmu.Lock()
+	batch := p.pending
+	p.pending = make(map[string]*FakeIPLease, len(batch))
+	p.wmu.Unlock()
+
+	ctx := context.Background()
+	// Deletes first: a put evicts any other host at its IP anyway, but a
+	// stale delete must never run after a put that re-created the row.
+	for host, l := range batch {
+		if l == nil {
+			if err := p.store.DeleteFakeIPLease(ctx, host); err != nil {
+				p.logger.Printf("dnsproxy: fake-ip delete %s: %v", host, err)
+			}
+		}
+	}
+	for host, l := range batch {
+		if l != nil {
+			if err := p.store.PutFakeIPLease(ctx, *l); err != nil {
+				p.logger.Printf("dnsproxy: fake-ip persist %s: %v", host, err)
+			}
+		}
+	}
 }
 
 // restore repopulates the pool from the store. Leases whose IP falls
@@ -182,19 +249,12 @@ func (p *fakeIPPool) Allocate(host string) (net.IP, bool) {
 	if !ok {
 		return nil, false
 	}
-	// Store writes happen outside the lock: SQLite is local but a DNS
-	// query shouldn't serialize behind a disk write.
 	if p.store != nil {
-		ctx := context.Background()
 		if evicted != "" {
-			if err := p.store.DeleteFakeIPLease(ctx, evicted); err != nil {
-				p.logger.Printf("dnsproxy: fake-ip evict %s: %v", evicted, err)
-			}
+			p.queue(evicted, nil)
 		}
 		if persist != nil {
-			if err := p.store.PutFakeIPLease(ctx, *persist); err != nil {
-				p.logger.Printf("dnsproxy: fake-ip persist %s: %v", host, err)
-			}
+			p.queue(host, persist)
 		}
 	}
 	return ip, true
@@ -258,9 +318,7 @@ func (p *fakeIPPool) Release(host string) {
 	p.mu.Unlock()
 
 	if found && p.store != nil {
-		if err := p.store.DeleteFakeIPLease(context.Background(), host); err != nil {
-			p.logger.Printf("dnsproxy: fake-ip release %s: %v", host, err)
-		}
+		p.queue(host, nil)
 	}
 }
 

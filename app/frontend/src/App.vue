@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { startPoll } from './poll';
 import StatusBar from './components/StatusBar.vue';
 import RulesPanel from './components/RulesPanel.vue';
 import LogsPanel from './components/LogsPanel.vue';
@@ -114,7 +115,7 @@ let egressTimer: number | undefined;
 // view and flash it — a counter (not a boolean) so repeated clicks
 // re-trigger without needing a reset handshake.
 const focusReinstallSeq = ref<number>(0);
-let timer: number | undefined;
+let stopPoll: (() => void) | undefined;
 
 // The "dev" sentinel is what an unversioned build reports (core/version
 // default, used by `wails dev` / `make run-*`). Never flag compatibility
@@ -193,7 +194,7 @@ onMounted(async () => {
   try { packaged.value = await IsPackaged(); } catch { packaged.value = false; }
   try { appVersion.value = await AppVersion(); } catch { appVersion.value = ''; }
   await refresh();
-  timer = window.setInterval(refresh, 2000);
+  stopPoll = startPoll(refresh, 2000);
   refreshEgress(); // self-schedules its own next run
   // Check for updates on startup, then keep re-checking on a slow cadence
   // so a release published while the app is open surfaces on the fly — no
@@ -206,7 +207,7 @@ onMounted(async () => {
   EventsOn('update:retry', (r: UpdateRetry) => { updateRetry.value = r; });
 });
 onUnmounted(() => {
-  if (timer) window.clearInterval(timer);
+  stopPoll?.();
   if (egressTimer) window.clearTimeout(egressTimer);
   if (updateTimer) window.clearInterval(updateTimer);
   EventsOff('update:progress');

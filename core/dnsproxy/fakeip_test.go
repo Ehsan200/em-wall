@@ -196,6 +196,8 @@ func TestFakeIPPool_SurvivesRestart(t *testing.T) {
 		}
 	}
 
+	first.flush()
+
 	// "Restart": brand-new pool over the same store.
 	second := mustPoolStore(t, "198.18.0.0/15", time.Hour, store)
 	second.restore(context.Background())
@@ -242,6 +244,7 @@ func TestFakeIPPool_EvictionClearsStore(t *testing.T) {
 			t.Fatalf("allocate new%d failed", i)
 		}
 	}
+	p.flush()
 	if h := store.hostFor(first.String()); h == "old.example" {
 		t.Fatalf("evicted host still owns %s in the store", first)
 	}
@@ -259,12 +262,14 @@ func TestFakeIPPool_RefreshWritesAreThrottled(t *testing.T) {
 	if _, ok := p.Allocate("hot.example"); !ok {
 		t.Fatal("allocate failed")
 	}
+	p.flush()
 	if got := store.putCount(); got != 1 {
 		t.Fatalf("first allocate wrote %d times, want 1", got)
 	}
 	for i := 0; i < 20; i++ {
 		p.Allocate("hot.example")
 	}
+	p.flush()
 	if got := store.putCount(); got != 1 {
 		t.Fatalf("refreshes wrote %d times, want 1 (throttle not applied)", got)
 	}
@@ -280,6 +285,7 @@ func TestFakeIPPool_ReleaseClearsStore(t *testing.T) {
 		t.Fatal("allocate failed")
 	}
 	p.Release("doomed.example")
+	p.flush()
 	if h := store.hostFor(ip.String()); h != "" {
 		t.Fatalf("released IP still mapped to %q", h)
 	}
@@ -287,6 +293,7 @@ func TestFakeIPPool_ReleaseClearsStore(t *testing.T) {
 	if !ok {
 		t.Fatal("allocate after release failed")
 	}
+	p.flush()
 	if next.Equal(ip) && store.hostFor(ip.String()) != "other.example" {
 		t.Fatal("store not updated after slot reuse")
 	}
@@ -310,5 +317,41 @@ func TestFakeIPPool_RestoreDropsOutOfRange(t *testing.T) {
 	}
 	if got, _ := p.Allocate("out.example"); got.String() == "10.0.0.5" {
 		t.Fatal("out-of-range lease was restored")
+	}
+}
+
+// blockingFakeIPStore stalls every write until released, standing in for
+// a SQLite connection held by another writer.
+type blockingFakeIPStore struct {
+	*memFakeIPStore
+	gate chan struct{}
+}
+
+func (b *blockingFakeIPStore) PutFakeIPLease(ctx context.Context, l FakeIPLease) error {
+	<-b.gate
+	return b.memFakeIPStore.PutFakeIPLease(ctx, l)
+}
+
+// A DNS answer must not wait for the lease write: Allocate returns while
+// the store is stalled, and the write still lands once it frees up.
+func TestFakeIPPool_AllocateDoesNotWaitOnStore(t *testing.T) {
+	store := &blockingFakeIPStore{memFakeIPStore: newMemFakeIPStore(), gate: make(chan struct{})}
+	p := mustPoolStore(t, "198.18.0.0/15", time.Hour, store)
+
+	done := make(chan net.IP, 1)
+	go func() {
+		ip, _ := p.Allocate("slow.example")
+		done <- ip
+	}()
+	var ip net.IP
+	select {
+	case ip = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Allocate blocked on a stalled store")
+	}
+	close(store.gate)
+	p.flush()
+	if h := store.hostFor(ip.String()); h != "slow.example" {
+		t.Fatalf("lease not persisted after store freed: got %q", h)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -113,7 +114,9 @@ func (s *UDPSession) WriteTo(payload []byte, host string, port int) error {
 	if len(host) > 255 {
 		return fmt.Errorf("socks5 udp: destination host too long (%d bytes)", len(host))
 	}
-	buf := make([]byte, 0, 3+1+1+len(host)+2+len(payload))
+	bp := udpBufs.Get().(*[]byte)
+	defer udpBufs.Put(bp)
+	buf := (*bp)[:0]
 	buf = append(buf, 0x00, 0x00, 0x00) // RSV(2) + FRAG(1)
 	if ip := net.ParseIP(host); ip != nil {
 		buf = appendSOCKSAddr(buf, ip, "", port)
@@ -125,12 +128,28 @@ func (s *UDPSession) WriteTo(payload []byte, host string, port int) error {
 	return err
 }
 
+// udpHeaderRoom covers the largest SOCKS5 UDP header (a 255-byte domain).
+const udpHeaderRoom = 512
+
+// udpBufs recycles datagram buffers: every relayed packet used to allocate
+// one sized for the largest possible datagram, so a QUIC video stream at
+// thousands of packets a second was mostly allocation and GC work.
+var udpBufs = sync.Pool{New: func() any {
+	b := make([]byte, 64*1024+udpHeaderRoom)
+	return &b
+}}
+
 // Read reads one relayed datagram, strips the SOCKS5 UDP header, and
 // copies the payload into b. Returns the payload length. The datagram's
 // embedded source address is discarded — in our connected-flow model
 // every datagram in a session shares one (src, dst) pair.
 func (s *UDPSession) Read(b []byte) (int, error) {
-	buf := make([]byte, len(b)+512) // headroom for the header
+	bp := udpBufs.Get().(*[]byte)
+	defer udpBufs.Put(bp)
+	buf := *bp
+	if need := len(b) + udpHeaderRoom; len(buf) < need {
+		buf = make([]byte, need)
+	}
 	n, err := s.relay.Read(buf)
 	if err != nil {
 		return 0, err

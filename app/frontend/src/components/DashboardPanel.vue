@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { startPoll } from '../poll';
 import { fmtDateTime, fmtTime } from '../timezone';
 import { Line } from 'vue-chartjs';
 import {
@@ -9,20 +10,30 @@ import {
 } from 'chart.js';
 import { UsageStats, Groups } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
+import RangePicker from './RangePicker.vue';
+import { type RangeSel, RELATIVE_PRESETS, resolveRange, bucketFor } from '../usageRange';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
 
 type Dimension = 'group' | 'domain' | 'proxy';
 type Metric = 'total' | 'sent' | 'recv';
-type Range = '1h' | '24h' | '7d';
 
-// Fixed display bucket width (seconds). Stored data is 1-min granularity;
-// the dashboard always rolls it up to 5-minute buckets.
-const BUCKET_SECS = 300;
+// Remembered between visits — only rolling "last N" windows, since a
+// calendar or custom window is stale by the next launch.
+const RANGE_KEY = 'em-wall.usageRange';
+function loadRange(): RangeSel {
+  try {
+    const secs = Number(localStorage.getItem(RANGE_KEY));
+    if (RELATIVE_PRESETS.some((p) => p.secs === secs)) return { kind: 'last', secs };
+  } catch { /* storage unavailable */ }
+  return { kind: 'last', secs: 24 * 3600 };
+}
 
 const dimension = ref<Dimension>('group');
 const metric = ref<Metric>('total');
-const range = ref<Range>('24h');
+const range = ref<RangeSel>(loadRange());
+// Display bucket width of the last query, for the chart's time labels.
+const bucketSecs = ref<number>(300);
 const showTotal = ref<boolean>(true);
 const points = ref<ipc.UsagePointDTO[]>([]);
 // Group registry (key, brand color, patterns) — fetched once, used to
@@ -30,17 +41,11 @@ const points = ref<ipc.UsagePointDTO[]>([]);
 const groupMeta = ref<ipc.GroupDTO[]>([]);
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
-let timer: number | undefined;
+let stopPoll: (() => void) | undefined;
 
 // Show at most this many series; the rest collapse into "other" so a
 // long-tail of domains doesn't drown the chart.
 const TOP_N = 8;
-
-const RANGE_SECONDS: Record<Range, number> = {
-  '1h': 60 * 60,
-  '24h': 24 * 60 * 60,
-  '7d': 7 * 24 * 60 * 60,
-};
 
 function humanBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -57,11 +62,19 @@ function valueOf(p: ipc.UsagePointDTO): number {
   return p.bytesSent + p.bytesRecv;
 }
 
+// Bumped per query so a slow reply for an old window can't overwrite a
+// newer one.
+let querySeq = 0;
+
 async function refresh() {
-  const now = Math.floor(Date.now() / 1000);
-  const from = now - RANGE_SECONDS[range.value];
+  const r = resolveRange(range.value);
+  const bucket = bucketFor(r);
+  const seq = ++querySeq;
   try {
-    points.value = (await UsageStats(from, now, dimension.value, BUCKET_SECS)) || [];
+    const pts = (await UsageStats(r.from, r.to, dimension.value, bucket)) || [];
+    if (seq !== querySeq) return;
+    points.value = pts;
+    bucketSecs.value = bucket;
     error.value = '';
     lastRefresh.value = new Date();
   } catch (e: any) {
@@ -170,9 +183,21 @@ function colorFor(key: string): string {
   return paletteFor(key);
 }
 
+const bucketLabel = computed(() => {
+  const b = bucketSecs.value;
+  if (b % 86400 === 0) return `${b / 86400}-day`;
+  if (b % 3600 === 0) return `${b / 3600}-hour`;
+  return `${b / 60}-min`;
+});
+
+// Dots crowd a long series into a smear; hide them past ~60 points.
+const pointRadius = computed(() => (buckets.value.length > 60 ? 0 : 3));
+
 const chartData = computed(() => {
-  const labels = buckets.value.map(b =>
-    fmtDateTime(b * 1000, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+  const labelOpts: Intl.DateTimeFormatOptions = bucketSecs.value >= 86400
+    ? { month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+  const labels = buckets.value.map(b => fmtDateTime(b * 1000, labelOpts));
   const bucketIndex = new Map(buckets.value.map((b, i) => [b, i]));
   const keys = chartKeys.value;
   const keySet = new Set(keys);
@@ -204,7 +229,7 @@ const chartData = computed(() => {
       backgroundColor: c,
       fill: false,
       tension: 0,
-      pointRadius: 3,
+      pointRadius: pointRadius.value,
       pointHoverRadius: 5,
       borderWidth: 2,
     };
@@ -217,7 +242,7 @@ const chartData = computed(() => {
       backgroundColor: colorFor('other'),
       fill: false,
       tension: 0,
-      pointRadius: 3,
+      pointRadius: pointRadius.value,
       pointHoverRadius: 5,
       borderWidth: 2,
     });
@@ -238,7 +263,7 @@ const chartData = computed(() => {
       backgroundColor: '#ffffff',
       fill: false,
       tension: 0,
-      pointRadius: 3,
+      pointRadius: pointRadius.value,
       pointHoverRadius: 5,
       borderWidth: 2.5,
       borderDash: [6, 3],
@@ -261,7 +286,7 @@ const legendItems = computed(() =>
 // in-place reactive update can miss when only data values (not identity)
 // shift on the 5s poll.
 const chartKey = computed(() =>
-  `${dimension.value}:${metric.value}:${showTotal.value}:` +
+  `${dimension.value}:${metric.value}:${showTotal.value}:${bucketSecs.value}:` +
   `${groupMeta.value.length}:${buckets.value.length}:${buckets.value[buckets.value.length - 1] ?? 0}:${points.value.length}`);
 
 const chartOptions = computed(() => ({
@@ -302,14 +327,21 @@ const grandTotal = computed(() =>
 // Dimension / range change the server query → refetch.
 // Metric is a pure client-side recompute, no refetch needed.
 watch([dimension, range], refresh);
+watch(range, (r) => {
+  if (r.kind !== 'last') return;
+  try { localStorage.setItem(RANGE_KEY, String(r.secs)); } catch { /* storage unavailable */ }
+});
+
+const live = computed(() => range.value.kind !== 'between');
 
 onMounted(async () => {
   // Group registry is static; fetch once for brand colors + domain matching.
   try { groupMeta.value = (await Groups()) || []; } catch { /* fall back to palette */ }
   refresh();
-  timer = window.setInterval(refresh, 5000);
+  // A fixed past window doesn't change; only live windows poll.
+  stopPoll = startPoll(() => { if (live.value) refresh(); }, 5000);
 });
-onUnmounted(() => { if (timer) window.clearInterval(timer); });
+onUnmounted(() => stopPoll?.());
 </script>
 
 <template>
@@ -341,11 +373,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
       </div>
       <div class="ctl">
         <span class="ctl-label">Range</span>
-        <div class="row" style="gap: 0">
-          <button :class="{active: range==='1h'}"  class="seg" @click="range='1h'">1h</button>
-          <button :class="{active: range==='24h'}" class="seg" @click="range='24h'">24h</button>
-          <button :class="{active: range==='7d'}"  class="seg" @click="range='7d'">7d</button>
-        </div>
+        <RangePicker v-model="range" />
       </div>
       <div class="ctl">
         <span class="ctl-label">Total line</span>
@@ -355,7 +383,9 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
     </div>
 
     <div class="muted" style="font-size: 11px; margin-bottom: 8px">
-      live · 5s refresh · {{ lastRefresh ? fmtTime(lastRefresh) : '—' }} ·
+      <template v-if="live">live · 5s refresh · {{ lastRefresh ? fmtTime(lastRefresh) : '—' }} ·</template>
+      <template v-else>fixed window ·</template>
+      {{ bucketLabel }} buckets ·
       total ↑ {{ humanBytes(grandTotal.sent) }} · ↓ {{ humanBytes(grandTotal.recv) }}
     </div>
 

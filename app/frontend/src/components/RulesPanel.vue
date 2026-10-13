@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { startPoll } from '../poll';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
   Groups, ApplyGroup, SyncGroup, DeleteGroupRules, SetGroupEnabled,
@@ -76,7 +77,7 @@ const exitLoading = ref<Record<number, boolean>>({});
 const revealedExitIPs = ref<Record<number, boolean>>({});
 let pendingDeleteTimer: number | undefined;
 let pendingDeleteGroupTimer: number | undefined;
-let ifaceTimer: number | undefined;
+let stopLivePoll: (() => void) | undefined;
 
 function normalizePattern(p: string): string {
   return p.toLowerCase().trim().replace(/\.$/, '');
@@ -1084,9 +1085,9 @@ function bindingDown(field: string): boolean {
 
 onMounted(() => {
   refresh();
-  ifaceTimer = window.setInterval(refreshLive, 2000);
+  stopLivePoll = startPoll(refreshLive, 2000);
 });
-onUnmounted(() => { if (ifaceTimer) window.clearInterval(ifaceTimer); });
+onUnmounted(() => stopLivePoll?.());
 </script>
 
 <template>

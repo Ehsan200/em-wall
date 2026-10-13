@@ -99,11 +99,19 @@ func (a *trafficAggregator) drain(ctx context.Context) {
 		custom = nil
 	}
 
+	rows := make([]rules.TrafficStat, 0, len(pending))
 	for k, s := range pending {
-		groupKey := a.groupForKey(k.domain, custom)
-		if err := a.store.AddTraffic(ctx, k.bucketTS, k.domain, k.proxy, groupKey, s.sent, s.recv); err != nil {
-			a.logger.Printf("em-walld: traffic stat write failed: %v", err)
-		}
+		rows = append(rows, rules.TrafficStat{
+			BucketTS:  k.bucketTS,
+			Domain:    k.domain,
+			Proxy:     k.proxy,
+			GroupKey:  a.groupForKey(k.domain, custom),
+			BytesSent: s.sent,
+			BytesRecv: s.recv,
+		})
+	}
+	if err := a.store.AddTrafficBatch(ctx, rows); err != nil {
+		a.logger.Printf("em-walld: traffic stat write failed (%d rows): %v", len(rows), err)
 	}
 }
 

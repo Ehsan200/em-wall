@@ -28,7 +28,7 @@ APP_RES_CLI     := $(APP_RES_DIR)/em-wall
 APP_RES_PLIST   := $(APP_RES_DIR)/com.em-wall.daemon.plist
 APP_RES_ANCHOR  := $(APP_RES_DIR)/em-wall.pf.anchor
 
-.PHONY: all daemon cli app app-bundle app-resources app-icon test test-core test-app lint \
+.PHONY: all daemon cli app app-bundle app-resources app-icon test test-core test-app bench lint \
         run-daemon run-daemon-root run-app clean tidy
 
 all: daemon cli app
@@ -83,6 +83,11 @@ test: test-core test-app
 test-core:
 	$(GO) test ./core/... ./cli/...
 
+# Hot-path benchmarks (data plane through netstack + splice, rule index).
+# No root: the tunnel bench stands a socketpair in for the utun.
+bench:
+	$(GO) test -run '^$$' -bench . -benchmem ./core/proxytun/ ./core/rules/
+
 # The app module is a separate go.mod, so `go test` from the root never
 # reaches it — the installer's generated shell scripts run as root and
 # are worth parsing in CI.
@@ -108,6 +113,7 @@ run-daemon: daemon
 		-db ./tmp/dev.db \
 		-socket ./tmp/em-wall.sock \
 		-listen 127.0.0.1:5353 \
+		-pprof 127.0.0.1:6060 \
 		-no-auto-activate
 
 # `run-daemon-root` runs the built daemon under sudo so it can open the
@@ -130,6 +136,7 @@ run-daemon-root: daemon
 		-db ./tmp/dev.db \
 		-socket /var/run/em-wall.sock \
 		-listen 127.0.0.1:5353 \
+		-pprof 127.0.0.1:6060 \
 		-no-auto-activate
 
 # `wails dev` builds the app from source. Stage resources first so the

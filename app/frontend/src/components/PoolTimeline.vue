@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { startPoll } from '../poll';
 import { fmtTime } from '../timezone';
 import { HealthPools } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -18,7 +19,7 @@ const WINDOWS = [
 const pools = ref<ipc.PoolTimelineDTO[]>([]);
 const windowSec = ref(600);
 const error = ref('');
-let timer: number | undefined;
+let stopPoll: (() => void) | undefined;
 
 async function refresh() {
   try {
@@ -120,9 +121,9 @@ const visible = computed(() => pools.value.filter(p => p.nodes.length > 0));
 
 onMounted(() => {
   refresh();
-  timer = window.setInterval(refresh, 10000);
+  stopPoll = startPoll(refresh, 10000);
 });
-onUnmounted(() => { if (timer) window.clearInterval(timer); });
+onUnmounted(() => stopPoll?.());
 </script>
 
 <template>

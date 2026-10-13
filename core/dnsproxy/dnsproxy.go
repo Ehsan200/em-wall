@@ -227,6 +227,11 @@ func (s *Server) Shutdown() {
 	if s.tcp != nil {
 		_ = s.tcp.Shutdown()
 	}
+	// Lease writes are write-behind; land them before the process exits.
+	// The writer keeps running in case the server is started again.
+	if s.fakeIP != nil {
+		s.fakeIP.flush()
+	}
 }
 
 // handle is the hot path. Keep it small; do real work in helpers.

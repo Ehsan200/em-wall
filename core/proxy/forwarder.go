@@ -157,13 +157,23 @@ func copyAndCloseWrite(dst, src net.Conn, counter *atomic.Int64) (int64, error) 
 	return n, err
 }
 
+// spliceBufs recycles copy buffers. Every proxied connection needs two;
+// allocating them fresh made a connection burst (thousands of short-lived
+// dials) mostly garbage-collector work.
+var spliceBufs = sync.Pool{New: func() any {
+	b := make([]byte, 32*1024)
+	return &b
+}}
+
 // idleCopy copies src -> dst, resetting a SpliceTimeout read deadline on
 // src before each read so a stalled or half-open connection can't block
 // the goroutine forever. A clean EOF returns nil; an idle expiry returns
 // the timeout error.
 func idleCopy(dst, src net.Conn, counter *atomic.Int64) (int64, error) {
 	var total int64
-	buf := make([]byte, 32*1024)
+	bp := spliceBufs.Get().(*[]byte)
+	defer spliceBufs.Put(bp)
+	buf := *bp
 	for {
 		_ = src.SetReadDeadline(time.Now().Add(SpliceTimeout))
 		n, rerr := src.Read(buf)

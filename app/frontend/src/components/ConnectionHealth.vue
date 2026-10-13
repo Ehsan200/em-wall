@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { startPoll } from '../poll';
 import { fmtTime } from '../timezone';
 import { HealthStats } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -11,7 +12,7 @@ import type { ipc } from '../../wailsjs/go/models';
 
 const stats = ref<ipc.HealthStatsDTO | null>(null);
 const error = ref('');
-let timer: number | undefined;
+let stopPoll: (() => void) | undefined;
 
 async function refresh() {
   try {
@@ -75,9 +76,9 @@ function until(iso: string): string {
 
 onMounted(() => {
   refresh();
-  timer = window.setInterval(refresh, 5000);
+  stopPoll = startPoll(refresh, 5000);
 });
-onUnmounted(() => { if (timer) window.clearInterval(timer); });
+onUnmounted(() => stopPoll?.());
 </script>
 
 <template>

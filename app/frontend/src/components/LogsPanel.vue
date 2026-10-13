@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { startPoll } from '../poll';
 import { fmtTime as fmtZoned } from '../timezone';
 import { RecentLogs, ClearLogs } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -13,7 +14,7 @@ const search = ref<string>('');
 const error = ref<string>('');
 const lastRefresh = ref<Date | null>(null);
 const clearing = ref(false);
-let timer: number | undefined;
+let stopPoll: (() => void) | undefined;
 
 // Map UI filter chip → daemon-side filter string. The daemon filters
 // at the DB level so a busy run of "block-app-down" entries can't
@@ -111,9 +112,9 @@ watch(filter, () => { refresh(); });
 
 onMounted(() => {
   refresh();
-  timer = window.setInterval(refresh, 1000);
+  stopPoll = startPoll(refresh, 1000);
 });
-onUnmounted(() => { if (timer) window.clearInterval(timer); });
+onUnmounted(() => stopPoll?.());
 </script>
 
 <template>

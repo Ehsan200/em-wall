@@ -86,3 +86,29 @@ export function fmtTime(v: DateInput, opts: Intl.DateTimeFormatOptions = {}): st
 export function fmtDate(v: DateInput, opts: Intl.DateTimeFormatOptions = {}): string {
   return toDate(v).toLocaleDateString([], { ...opts, timeZone: effectiveTimezone.value });
 }
+
+// Wall-clock parts of an instant in the display zone.
+export interface ZonedParts { y: number; mo: number; d: number; h: number; mi: number; dow: number }
+
+export function zonedParts(v: DateInput): ZonedParts {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: effectiveTimezone.value, hourCycle: 'h23',
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', weekday: 'short',
+  }).formatToParts(toDate(v));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || '0';
+  const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(get('weekday'));
+  return { y: +get('year'), mo: +get('month'), d: +get('day'), h: +get('hour') % 24, mi: +get('minute'), dow };
+}
+
+// Epoch ms of a wall-clock time in the display zone. Out-of-range fields
+// roll over like Date.UTC (day 0 = last day of the previous month). Two
+// passes settle the zone offset, DST edges included.
+export function zonedEpoch(y: number, mo: number, d = 1, h = 0, mi = 0): number {
+  const want = Date.UTC(y, mo - 1, d, h, mi);
+  let t = want;
+  for (let i = 0; i < 2; i++) {
+    const p = zonedParts(t);
+    t += want - Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi);
+  }
+  return t;
+}

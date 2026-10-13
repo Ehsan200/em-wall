@@ -193,6 +193,45 @@ func (u *UTUN) Read(buf []byte) (int, error) {
 	return n - 4, nil
 }
 
+// ReadFramed reads one packet into buf, AF prefix included, and returns
+// the IP packet as a subslice of buf — no allocation or copy. buf needs
+// 4 bytes of room beyond the largest packet. The hot-path twin of Read.
+func (u *UTUN) ReadFramed(buf []byte) ([]byte, error) {
+	n, err := u.f.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	if n < 4 {
+		return nil, fmt.Errorf("utun: short read (%d bytes)", n)
+	}
+	return buf[4:n], nil
+}
+
+// WriteFramed sends the IP packet in framed[4:], filling the AF prefix
+// into framed[:4] from the packet's version nibble. The hot-path twin of
+// Write: the caller assembles the packet behind 4 bytes of headroom, so
+// nothing is allocated or copied here.
+func (u *UTUN) WriteFramed(framed []byte) error {
+	if len(framed) < 5 {
+		return nil
+	}
+	var af uint32
+	switch framed[4] >> 4 {
+	case 4:
+		af = unix.AF_INET
+	case 6:
+		af = unix.AF_INET6
+	default:
+		return fmt.Errorf("utun: unknown IP version 0x%x", framed[4]>>4)
+	}
+	framed[0] = byte(af >> 24)
+	framed[1] = byte(af >> 16)
+	framed[2] = byte(af >> 8)
+	framed[3] = byte(af)
+	_, err := u.f.Write(framed)
+	return err
+}
+
 // Write sends one IP packet to the utun. The first byte of pkt
 // determines AF (4 = IPv4, 6 = IPv6) and we prepend the BSD prefix.
 func (u *UTUN) Write(pkt []byte) (int, error) {

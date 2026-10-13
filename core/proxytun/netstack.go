@@ -104,6 +104,13 @@ func NewTunnel(tun *UTUN, mtu int, tcpHandler ConnHandler, udpHandler PacketHand
 		HandleLocal:        false,
 	})
 
+	// SACK: one lost segment no longer stalls the window behind it. Off
+	// by default in gvisor.
+	sack := tcpip.TCPSACKEnabled(true)
+	if tcpErr := stk.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); tcpErr != nil {
+		return nil, fmt.Errorf("proxytun: enable SACK: %v", tcpErr)
+	}
+
 	linkAddr, _ := tcpip.ParseMACAddress("00:00:00:00:00:01")
 	ep := channel.New(channelSize, uint32(mtu), linkAddr)
 
@@ -186,24 +193,24 @@ func (t *Tunnel) IfaceName() string { return t.tun.Name() }
 // the stack. One read = one packet (utun is packet-mode). On read
 // error we exit — the most common reason is Stop closing the fd.
 func (t *Tunnel) tunReadLoop(ctx context.Context) {
-	buf := make([]byte, t.mtu+128)
+	buf := make([]byte, 4+t.mtu+128)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		n, err := t.tun.Read(buf)
+		ip, err := t.tun.ReadFramed(buf)
 		if err != nil {
 			t.logger.Printf("proxytun: utun read: %v", err)
 			return
 		}
-		if n == 0 {
+		if len(ip) == 0 {
 			continue
 		}
 		// Determine network protocol from the IP version nibble.
 		var netProto tcpip.NetworkProtocolNumber
-		switch buf[0] >> 4 {
+		switch ip[0] >> 4 {
 		case 4:
 			netProto = header.IPv4ProtocolNumber
 		case 6:
@@ -212,7 +219,8 @@ func (t *Tunnel) tunReadLoop(ctx context.Context) {
 			continue
 		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buffer.MakeWithData(append([]byte(nil), buf[:n]...)),
+			// MakeWithData copies into a pooled chunk, so buf is free to reuse.
+			Payload: buffer.MakeWithData(ip),
 		})
 		t.ep.InjectInbound(netProto, pkt)
 		pkt.DecRef()
@@ -223,6 +231,9 @@ func (t *Tunnel) tunReadLoop(ctx context.Context) {
 // to the utun. Blocks on ReadContext so we exit cleanly when ctx is
 // cancelled.
 func (t *Tunnel) tunWriteLoop(ctx context.Context) {
+	// One scratch buffer for the loop's life: the packet's slices are
+	// copied once, straight behind the 4-byte AF prefix.
+	scratch := make([]byte, 4+t.mtu+128)
 	for {
 		pkt := t.ep.ReadContext(ctx)
 		if pkt == nil {
@@ -230,17 +241,20 @@ func (t *Tunnel) tunWriteLoop(ctx context.Context) {
 			// ep.Close() — same exit semantics either way.
 			return
 		}
-		// A packet is split across multiple buffer slices; flatten.
-		view := pkt.ToView()
-		data := view.AsSlice()
-		if _, err := t.tun.Write(data); err != nil {
+		n := 4
+		for _, sl := range pkt.AsSlices() {
+			if n+len(sl) > len(scratch) { // never at the stack's MTU; be safe
+				grown := make([]byte, n+len(sl))
+				copy(grown, scratch[:n])
+				scratch = grown
+			}
+			n += copy(scratch[n:], sl)
+		}
+		pkt.DecRef()
+		if err := t.tun.WriteFramed(scratch[:n]); err != nil {
 			t.logger.Printf("proxytun: utun write: %v", err)
-			view.Release()
-			pkt.DecRef()
 			return
 		}
-		view.Release()
-		pkt.DecRef()
 	}
 }
 
