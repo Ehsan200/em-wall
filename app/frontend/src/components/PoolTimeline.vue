@@ -159,13 +159,15 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
           <span v-for="(down, i) in p.uplinkDown" :key="i" class="cell uplink" :class="{ lost: down }"
                 :title="down ? `${clock(p.times[i])} · no node answered — local uplink` : clock(p.times[i])" />
         </div>
+        <span class="fill" />
         <span class="name muted">swap</span>
         <div class="strip">
           <span v-for="(sw, i) in p.swaps" :key="i" class="cell swap" :class="{ on: sw }"
                 :title="sw ? `${clock(p.times[i])} · shortlist changed` : clock(p.times[i])" />
         </div>
-        <span /><span /><span /><span /><span />
+        <span class="fill" />
 
+        <span /><span />
         <span class="num muted">up</span>
         <span class="num muted">flips</span>
         <span class="num muted">rtt</span>
@@ -281,6 +283,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
   align-items: center;
   font-size: 11px;
 }
+.fill { grid-column: span 5; }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .role { white-space: nowrap; }
