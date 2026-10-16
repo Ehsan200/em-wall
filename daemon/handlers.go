@@ -315,6 +315,12 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		return map[string]any{"ok": true}, d.store.ClearLogs(ctx)
 	})
 
+	s.Handle(ipc.MethodLogsTail, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.LogsTailParams
+		_ = json.Unmarshal(raw, &p)
+		return d.tailLog(p)
+	})
+
 	s.Handle(ipc.MethodUsageQuery, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p ipc.UsageQueryParams
 		_ = json.Unmarshal(raw, &p)

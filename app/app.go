@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -202,6 +204,23 @@ func (a *App) RecentLogs(limit int, filter string) ([]ipc.LogDTO, error) {
 
 func (a *App) ClearLogs() error {
 	return a.call(ipc.MethodLogsClear, nil, nil)
+}
+
+// TailLog returns the last lines of a daemon-side text log (source is
+// "daemon", "xray-error" or "xray-access"), optionally filtered by grep.
+func (a *App) TailLog(source string, lines int, grep string) (ipc.LogsTailDTO, error) {
+	var out ipc.LogsTailDTO
+	err := a.call(ipc.MethodLogsTail, ipc.LogsTailParams{Source: source, Lines: lines, Grep: grep}, &out)
+	return out, err
+}
+
+// RevealLog shows a log file in Finder. Local to the UI process; the
+// files are world-readable so no daemon round trip is needed.
+func (a *App) RevealLog(path string) error {
+	if !filepath.IsAbs(path) || !strings.HasSuffix(path, ".log") {
+		return fmt.Errorf("not a log path: %s", path)
+	}
+	return exec.Command("open", "-R", path).Run()
 }
 
 // UsageStats returns per-bucket proxied-traffic byte totals between two

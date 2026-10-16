@@ -38,6 +38,7 @@ const (
 	MethodSettingsSet            = "settings.set"
 	MethodLogsRecent             = "logs.recent"
 	MethodLogsClear              = "logs.clear"
+	MethodLogsTail               = "logs.tail" // tail of a text log file (daemon / xray)
 	MethodRoutesActive           = "routes.active"
 	MethodInterfacesList         = "interfaces.list"
 	MethodReload                 = "reload"
@@ -327,6 +328,31 @@ type SettingsSetParams struct {
 type LogsRecentParams struct {
 	Limit  int    `json:"limit"`
 	Filter string `json:"filter"` // "", "route", "block", "unavailable", or exact action
+}
+
+// Text-log sources for logs.tail.
+const (
+	LogSourceDaemon     = "daemon"
+	LogSourceXrayError  = "xray-error"
+	LogSourceXrayAccess = "xray-access"
+)
+
+type LogsTailParams struct {
+	Source string `json:"source"` // LogSource*; "" = daemon
+	Lines  int    `json:"lines"`  // max lines returned; 0 = default, capped daemon-side
+	Grep   string `json:"grep"`   // case-insensitive substring filter; "" = none
+}
+
+// LogsTailDTO is the end of one text log. Missing means the file doesn't
+// exist or the source isn't configured; Truncated means only the file's
+// tail was read, so older lines exist that weren't returned or searched.
+type LogsTailDTO struct {
+	Source    string   `json:"source"`
+	Path      string   `json:"path"`
+	Size      int64    `json:"size"`
+	Missing   bool     `json:"missing"`
+	Truncated bool     `json:"truncated"`
+	Lines     []string `json:"lines"`
 }
 
 type LogDTO struct {

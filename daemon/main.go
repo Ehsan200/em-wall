@@ -232,6 +232,8 @@ func main() {
 		startedAt:     time.Now(),
 		proxyTestHost: proxyTestHost,
 		proxyTestPort: proxyTestPort,
+		daemonLogPath: *logFile,
+		xrayLogDir:    *xrayLogDir,
 	}
 	registerHandlers(ipcSrv, deps)
 
@@ -707,6 +709,10 @@ type handlerDeps struct {
 	// -proxy-test-target flag. host may be an IP literal or a DNS name.
 	proxyTestHost string
 	proxyTestPort int
+
+	// Text logs served by logs.tail; "" when not configured.
+	daemonLogPath string
+	xrayLogDir    string
 
 	// bgCtx is the daemon-lifetime context for detached background work
 	// spawned from handlers (e.g. a subscription's initial fetch), set once
