@@ -1,6 +1,8 @@
 <script lang="ts" setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { startPoll } from '../poll';
+import { useXrayActive, pickText, PICK_NOTE } from '../xrayActive';
+import type { ipc } from '../../wailsjs/go/models';
 import { fmtDateTime, fmtDate } from '../timezone';
 import {
   ListXraySubs, AddXraySub, UpdateXraySub, DeleteXraySub,
@@ -401,6 +403,34 @@ function isWinner(n: Node): boolean {
   return obs.value.winners.has(n.fingerprint);
 }
 
+// Live picks from xray's access log: which nodes the masters' balancers
+// handed connections to in the last minute. A node in several pools shows
+// its busiest one.
+const { active: xrayActive } = useXrayActive(3000);
+type NodePick = { m: ipc.XrayActiveMemberDTO; masters: string[] };
+const nodePicks = computed<Record<string, NodePick>>(() => {
+  const out: Record<string, NodePick> = {};
+  for (const p of xrayActive.value?.pools ?? []) {
+    for (const m of p.members) {
+      const cur = out[m.key];
+      if (!cur || m.recent > cur.m.recent || (m.recent === cur.m.recent && m.picks > cur.m.picks)) {
+        out[m.key] = { m, masters: p.masters };
+      }
+    }
+  }
+  return out;
+});
+function nodePickText(n: Node): string {
+  const p = nodePicks.value[n.fingerprint];
+  return p ? pickText(p.m, xrayActive.value?.recentSec ?? 30) : '';
+}
+function nodePickTitle(n: Node): string {
+  const p = nodePicks.value[n.fingerprint];
+  if (!p) return '';
+  const r = xrayActive.value;
+  return `Picked for ${p.masters.join(', ')}: ${p.m.picks} connection${p.m.picks === 1 ? '' : 's'} in the last ${r?.windowSec ?? 60}s (${p.m.sharePct}% of the pool's).\n${PICK_NOTE}`;
+}
+
 onMounted(() => {
   refresh();
   pollObs();
@@ -548,6 +578,9 @@ defineExpose({ refresh });
           <div class="row" style="gap: 8px; align-items: center; min-width: 0; flex-wrap: wrap">
             <span v-if="isWinner(n)" title="Carrying master traffic now — one of the nodes the balancer spreads connections over" style="color: var(--success)">★</span>
             <span style="font-size: 12px">{{ n.name }}</span>
+            <span v-if="nodePicks[n.fingerprint]" class="tag live-pick" :title="nodePickTitle(n)">
+              <i class="live-dot" :class="{ dim: !nodePicks[n.fingerprint].m.active }"></i>{{ nodePickText(n) }}
+            </span>
             <span v-if="n.pinned" class="tag tag-route" style="font-size: 10px"
                   :title="s.strategy === 'manual' ? 'Pinned: this pool routes only through pinned nodes' : 'Pinned — takes effect when the strategy is Manual'">pinned</span>
             <span v-if="n.disabled" class="tag tag-off" style="font-size: 10px">disabled</span>
@@ -579,6 +612,24 @@ defineExpose({ refresh });
 </template>
 
 <style scoped>
+.live-pick {
+  font-size: 10px;
+  background: var(--panel);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 2px rgba(95, 208, 122, 0.2);
+  flex: none;
+}
+.live-dot.dim { background: var(--text-dim); box-shadow: none; opacity: 0.6; }
 .seg {
   background: transparent;
   border: 1px solid var(--border);

@@ -4,6 +4,7 @@ import { startPoll } from '../poll';
 import { fmtTime } from '../timezone';
 import { HealthPools } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
+import { useXrayActive, pickText, PICK_NOTE } from '../xrayActive';
 
 // Per-node health history of each master's subscription pool, sampled by
 // the daemon every 10 s. Observation only: it shows whether a pool is
@@ -131,6 +132,36 @@ function roleText(r: string): string {
 
 const visible = computed(() => pools.value.filter(p => p.nodes.length > 0));
 
+// Balancer picks from xray's access log, per 10 s bucket: which nodes were
+// handed new connections in each cell. Fetched on the timeline's own cadence.
+const { active: xrayActive } = useXrayActive(10000, () => true, true);
+
+function pickMember(p: ipc.PoolTimelineDTO, n: ipc.PoolNodeTimelineDTO): ipc.XrayActiveMemberDTO | undefined {
+  return xrayActive.value?.pools.find(x => x.master === p.master)?.members.find(m => m.key === n.key);
+}
+
+// picksAt returns how many connections the node was picked for in sample
+// i. A sample summarises the 10 s before its time; the history buckets are
+// clock-aligned, so the bucket holding the sample's midpoint stands in.
+function picksAt(p: ipc.PoolTimelineDTO, n: ipc.PoolNodeTimelineDTO, i: number): number {
+  const pool = xrayActive.value?.pools.find(x => x.master === p.master);
+  const m = pool?.members.find(x => x.key === n.key);
+  if (!pool || !m?.history?.length || !pool.bucketSec || !pool.historyStart) return 0;
+  const idx = Math.floor((p.times[i] - p.intervalSec / 2 - pool.historyStart) / pool.bucketSec);
+  return idx >= 0 && idx < m.history.length ? m.history[idx] : 0;
+}
+
+function pickedCellTitle(p: ipc.PoolTimelineDTO, n: ipc.PoolNodeTimelineDTO, i: number): string {
+  const t = cellTitle(p, n, i);
+  const k = picksAt(p, n, i);
+  return k > 0 ? `${t} · picked for ${k} new connection${k === 1 ? '' : 's'}` : t;
+}
+
+function nodeNowTitle(p: ipc.PoolTimelineDTO, n: ipc.PoolNodeTimelineDTO): string {
+  const m = pickMember(p, n);
+  return m ? `${n.name}\n${pickText(m, xrayActive.value?.recentSec ?? 30)}\n${PICK_NOTE}` : n.name;
+}
+
 onMounted(() => {
   refresh();
   stopPoll = startPoll(refresh, 10000);
@@ -190,9 +221,10 @@ onUnmounted(() => stopPoll?.());
         <span class="muted">role</span>
 
         <template v-for="n in p.nodes" :key="n.key">
-          <span class="name" :title="n.name">{{ n.name }}</span>
+          <span class="name" :title="nodeNowTitle(p, n)"><i v-if="pickMember(p, n)?.active" class="live-dot" />{{ n.name }}</span>
           <div class="strip">
-            <span v-for="(s, i) in n.states" :key="i" :class="cellClass(s, n.roles[i])" :title="cellTitle(p, n, i)" />
+            <span v-for="(s, i) in n.states" :key="i" :class="[...cellClass(s, n.roles[i]), { picked: picksAt(p, n, i) > 0 }]"
+                  :title="pickedCellTitle(p, n, i)" />
           </div>
           <span class="num">{{ n.uptimePct.toFixed(0) }}%</span>
           <span class="num" :class="{ warn: n.flips >= 2 }">{{ n.flips }}</span>
@@ -231,6 +263,8 @@ onUnmounted(() => stopPoll?.());
       <span><i class="cell s-down carry" /> down</span>
       <span><i class="cell s-parked carry" /> parked</span>
       <span><i class="cell s-up idle" /> ranked out</span>
+      <span title="From xray's access log"><i class="cell s-up carry picked" /> picked for new connections</span>
+      <span><i class="live-dot" /> picked in the last 30 s</span>
       <span><i class="cell carry m-demoted" /> master demoted</span>
       <span><i class="cell carry m-down" /> master down</span>
     </div>
@@ -313,6 +347,16 @@ onUnmounted(() => stopPoll?.());
 .strip .cell { flex: 1 1 0; min-width: 1px; }
 .cell { display: inline-block; height: 14px; border-radius: 1px; background: transparent; }
 .cell.idle { height: 6px; }
+.cell.picked { box-shadow: inset 0 2px 0 var(--accent); }
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--success);
+  vertical-align: middle;
+}
 .s-up { background: var(--success); }
 .s-flaky { background: var(--warn); }
 .s-down { background: var(--danger); }

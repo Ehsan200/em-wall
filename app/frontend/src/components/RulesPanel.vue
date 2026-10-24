@@ -558,6 +558,13 @@ onMounted(handleOpenRequest);
 // Geosite-sourced custom groups: a newer geosite list may add domains
 // (tagNew, synced into the definition on request) or drop some (tagGone,
 // shown only — never removed for the user).
+// Groups covering hostnames em-wall itself resolves (geo updates, exit-IP
+// checks, …): routing the group also routes those lookups.
+function usedByTitle(g: ipc.GroupDTO | null): string {
+  const lines = (g?.usedBy || []).map((u) => `${u.host} — ${u.purpose}`);
+  return lines.length ? `em-wall itself uses:\n${lines.join('\n')}\n\nRouting this group also routes those lookups.` : '';
+}
+
 function tagNewCount(g: ipc.GroupDTO | null): number {
   return g?.tagNew?.length || 0;
 }
@@ -1245,6 +1252,7 @@ onUnmounted(() => stopLivePoll?.());
               <GroupIcon :group-key="g.key" :size="20" />
               <span class="group-name">{{ g.displayName }}</span>
               <span class="muted" style="font-size: 10px">{{ g.patterns.length }} domain{{ g.patterns.length === 1 ? '' : 's' }}</span>
+              <span v-if="g.usedBy?.length" class="self-pill" :title="usedByTitle(g)">used by em-wall</span>
             </button>
           </div>
         </div>
@@ -1267,6 +1275,7 @@ onUnmounted(() => stopLivePoll?.());
             <GroupIcon :group-key="g.key" :size="20" />
             <span class="group-name">{{ g.displayName }}</span>
             <span class="muted" style="font-size: 10px">{{ g.patterns.length }} pattern{{ g.patterns.length === 1 ? '' : 's' }}</span>
+            <span v-if="g.usedBy?.length" class="self-pill" :title="usedByTitle(g)">used by em-wall</span>
           </button>
           <button v-if="tagNewCount(g)" class="drift-pill tag-pill"
                   :disabled="syncingTag !== null"
@@ -1611,6 +1620,7 @@ onUnmounted(() => stopLivePoll?.());
                 :title="`geosite:${sec.group?.sourceTag?.toLowerCase()} no longer lists:\n${sec.group?.tagGone?.join('\n')}\n\nThey stay in this group until you remove them.`">
             {{ tagGoneCount(sec.group) }} no longer listed
           </span>
+          <span v-if="sec.group?.usedBy?.length" class="self-pill" :title="usedByTitle(sec.group)">used by em-wall</span>
         </div>
         <!-- Bulk actions: groups only. Ungrouped section is just a label. -->
         <div v-if="sec.group" class="row" style="gap: 6px; align-items: center">
@@ -2134,6 +2144,17 @@ tr.edit-row td {
 }
 
 /* Group drift: shipped domain list has grown past the applied rules. */
+.self-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: help;
+}
 .drift-pill {
   display: inline-flex;
   align-items: center;

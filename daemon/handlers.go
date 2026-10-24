@@ -410,6 +410,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 
 		registry := groups.KnownGroups()
 		out := make([]ipc.GroupDTO, 0, len(registry))
+		self := activeSuggester.Load().selfSet()
 		for _, g := range registry {
 			pats := d.effectiveGroupPatterns(ctx, g)
 			out = append(out, ipc.GroupDTO{
@@ -421,6 +422,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Category:        groups.Category(g.Key),
 				RuleCount:       countFor(pats),
 				MissingPatterns: missingGroupPatterns(pats, allRules),
+				UsedBy:          usedByOrNil(pats, self),
 			})
 		}
 		// Append user-created groups after the curated registry.
@@ -444,6 +446,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			// Geosite-sourced groups: report the tag's drift (see
 			// daemon/suggest_handlers.go). Report only — never applied here.
 			fillTagDrift(&dto, g, idx, allRules)
+			dto.UsedBy = usedByOrNil(g.Patterns, self)
 			out = append(out, dto)
 		}
 		return out, nil
@@ -1164,6 +1167,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	registerGeoHandlers(s, d)
 	registerSuggestHandlers(s, d)
 	registerMapHandlers(s, d)
+	registerXrayActiveHandlers(s, d)
 }
 
 // registerXraySubHandlers wires the subscription CRUD + node ops and the

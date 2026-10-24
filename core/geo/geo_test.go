@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +100,61 @@ func TestTagsForMostSpecificFirst(t *testing.T) {
 		if got := db.TagsFor(name); !reflect.DeepEqual(got, want) {
 			t.Errorf("TagsFor(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+func TestMatchesForSaysHow(t *testing.T) {
+	db := fixtureDB(t)
+	got := db.MatchesFor("open.spotify.com")
+	// Deepest first; order within one depth is unspecified.
+	sort.SliceStable(got, func(i, j int) bool {
+		if got[i].Suffix != got[j].Suffix {
+			return got[i].Suffix > got[j].Suffix
+		}
+		return got[i].Tag < got[j].Tag
+	})
+	want := []TagMatch{
+		{Tag: "SPOTIFY", Full: true, Suffix: 16, Size: 3},
+		{Tag: "SPOTIFY-OPEN", Full: true, Suffix: 16, Size: 1},
+		{Tag: "CATEGORY-MUSIC", Suffix: 11, Size: 4},
+		{Tag: "SPOTIFY", Suffix: 11, Size: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("MatchesFor = %+v\nwant %+v", got, want)
+	}
+	if got := db.MatchesFor("deezer.com"); len(got) != 1 || got[0].Full || got[0].Tag != "CATEGORY-MUSIC" {
+		t.Errorf("deezer = %+v", got)
+	}
+	if db.MatchesFor("nope.example") != nil {
+		t.Error("unlisted name matched")
+	}
+}
+
+func TestSuggestible(t *testing.T) {
+	for tag, want := range map[string]bool{
+		"SPOTIFY": true, "APPLE-CN": true, "CATEGORY-IR": false, "CDN-!CN": false,
+		"APPLE@CN": false, "AKAMAI": true, "CLOUDFLARE": true, "CN": false, "TLD-IR": false,
+		"GEOLOCATION-!CN": false, "": false,
+	} {
+		if got := Suggestible(tag); got != want {
+			t.Errorf("Suggestible(%q) = %v", tag, got)
+		}
+	}
+}
+
+func TestIsEdge(t *testing.T) {
+	for name, want := range map[string]bool{
+		"a1091.dscapi7.akamai.net": true, "e123.akamaiedge.net.": true,
+		"d1.cloudfront.net": true, "foo.workers.dev": true,
+		"dash.cloudflare.com": false, "cloudflare.com": false, "aws.amazon.com": false,
+		"portal.azure.com": false, "cdnjs.cloudflare.com": true, "notakamai.net": false,
+	} {
+		if got := IsEdge(name); got != want {
+			t.Errorf("IsEdge(%q) = %v", name, got)
+		}
+	}
+	if !IsEdgePattern("*.cloudfront.net") || IsEdgePattern("*.cloudflare.com") {
+		t.Error("IsEdgePattern")
 	}
 }
 

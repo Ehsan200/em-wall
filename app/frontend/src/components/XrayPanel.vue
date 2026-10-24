@@ -12,6 +12,7 @@ import DialerPicker from './DialerPicker.vue';
 import FragmentControl, { type FragmentValue } from './FragmentControl.vue';
 import XraySubscriptionsPanel from './XraySubscriptionsPanel.vue';
 import SearchSelect from './SearchSelect.vue';
+import { useXrayActive, pickText, poolOf, PICK_NOTE } from '../xrayActive';
 
 // Local mirrors of the DTOs so the file compiles even before
 // `make run-app` regenerates wailsjs/models.ts.
@@ -80,6 +81,46 @@ const testing = ref<boolean>(false);
 // of the whole table looking idle until everything finishes.
 const testingIds = ref<Set<number>>(new Set());
 const subTab = ref<SubTab>('outbounds');
+
+// Live picks from xray's access log: the pool node each master's balancer
+// is handing connections to, and where user routing rules divert an
+// entry's traffic. Polled only while the outbounds list is on screen.
+const { active: xrayActive } = useXrayActive(3000, () => subTab.value === 'outbounds');
+type PickBadge = { text: string; title: string; live: boolean };
+
+function masterPick(row: XrayRow): PickBadge | null {
+  const r = xrayActive.value;
+  const pool = row.dialer ? poolOf(r, row.name) : undefined;
+  if (!r || !pool || pool.members.length === 0) return null;
+  const top = pool.members[0];
+  const more = pool.members.filter(m => m.active).length - (top.active ? 1 : 0);
+  let text = `via ${top.name} · ${pickText(top, r.recentSec)}`;
+  if (more > 0) text += ` · +${more} more`;
+  const lines = pool.members.map(m => `${m.name}: ${m.recent} in ${r.recentSec}s, ${m.sharePct}% of the last ${r.windowSec}s`);
+  return { text, title: [PICK_NOTE, '', ...lines].join('\n'), live: top.active };
+}
+
+function routePick(row: XrayRow): PickBadge | null {
+  const r = xrayActive.value;
+  const route = r?.routes.find(x => x.entry === row.name && x.diverted);
+  if (!r || !route || route.members.length === 0) return null;
+  const top = route.members[0];
+  const lines = route.members.map(m => `→ ${m.name}: ${m.recent} in ${r.recentSec}s, ${m.sharePct}% of the last ${r.windowSec}s`);
+  return {
+    text: `→ ${top.name} · ${pickText(top, r.recentSec)}`,
+    title: ['Your routing rules send this entry’s traffic to another outbound. From xray’s access log.', '', ...lines].join('\n'),
+    live: top.active,
+  };
+}
+
+const pickBadges = computed<Record<number, PickBadge>>(() => {
+  const out: Record<number, PickBadge> = {};
+  for (const row of entries.value) {
+    const b = masterPick(row) ?? routePick(row);
+    if (b) out[row.id] = b;
+  }
+  return out;
+});
 
 const defaultOutbound = `{
   "protocol": "freedom",
@@ -911,6 +952,9 @@ defineExpose({ refresh });
               </span>
               <span v-if="row.dialer" class="tag" style="font-size: 11px; background: rgba(110,168,255,0.15); color: var(--accent)"
                     :title="'dialer: ' + row.dialer">master · {{ row.dialer }}</span>
+              <span v-if="pickBadges[row.id]" class="tag live-pick" :title="pickBadges[row.id].title">
+                <i class="live-dot" :class="{ dim: !pickBadges[row.id].live }"></i>{{ pickBadges[row.id].text }}
+              </span>
               <span v-if="row.subName && !row.sourceGone" class="tag"
                     style="font-size: 11px; background: var(--panel-2); color: var(--text-dim)"
                     :title="`Copied from a node in subscription “${row.subName}”. It is an independent entry — refreshing that subscription does not update it.`">
@@ -1293,6 +1337,24 @@ defineExpose({ refresh });
 </template>
 
 <style scoped>
+.live-pick {
+  font-size: 11px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 2px rgba(95, 208, 122, 0.2);
+  flex: none;
+}
+.live-dot.dim { background: var(--text-dim); box-shadow: none; opacity: 0.6; }
 .bulk-toolbar {
   position: sticky;
   top: 0;

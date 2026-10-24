@@ -144,6 +144,33 @@ func (x *siteIndex) tagsFor(name string) []string {
 	return out
 }
 
+// matchesFor is tagsFor with how each tag matched: every (tag, entry)
+// pair listing name, deepest first. A tag listing name under both a full
+// and a domain entry appears twice; callers pick.
+func (x *siteIndex) matchesFor(name string) []TagMatch {
+	name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+	if name == "" {
+		return nil
+	}
+	var out []TagMatch
+	var level []uint16
+	for _, t := range x.lookup(keyHash(kindFull, name), level) {
+		out = append(out, TagMatch{Tag: x.names[t], Full: true, Suffix: len(name), Size: x.sizes[t]})
+	}
+	for s := name; ; {
+		level = x.lookup(keyHash(kindDomain, s), level[:0])
+		for _, t := range level {
+			out = append(out, TagMatch{Tag: x.names[t], Suffix: len(s), Size: x.sizes[t]})
+		}
+		dot := strings.IndexByte(s, '.')
+		if dot < 0 {
+			break
+		}
+		s = s[dot+1:]
+	}
+	return out
+}
+
 // memBytes is the index's approximate heap size.
 func (x *siteIndex) memBytes() int {
 	return len(x.hashes)*8 + len(x.tags)*2 + len(x.names)*24 + len(x.sizes)*8

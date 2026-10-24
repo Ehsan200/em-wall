@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"math"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,16 +61,23 @@ type mapUpstream struct {
 	master     bool   // an xray entry with a Dialer (rides a pool)
 }
 
-// mapPoolNode is one pool member carrying a master.
-type mapPoolNode struct{ key, label, host string }
+// mapPoolNode is one pool member carrying a master. share and picks are
+// set when the list comes from xray's access log (xray_access.go): the
+// node's share of the slot's recent picks, and how many. Zero = ranked by
+// the pool timeline's byte counters instead.
+type mapPoolNode struct {
+	key, label, host string
+	share            float64
+	picks            int
+}
 
 // mapEnv is everything the map reads from the rest of the daemon. Every
 // method must answer from memory: it is called once per connection.
 type mapEnv interface {
 	rule(id int64) (mapRule, bool)
 	upstream(name string) mapUpstream
-	// poolCarriers returns name's pool nodes, busiest first; nil when name
-	// is not a master or its pool has no data.
+	// poolCarriers returns name's pool nodes, most picked (else busiest)
+	// first; nil when name is not a master or its pool has no data.
 	poolCarriers(name string) []mapPoolNode
 	exitIP(name string) string // measured exit IP, "" = unknown
 	publicIP() string          // "" = unknown
@@ -257,15 +266,22 @@ func upstreamHops(name string, carriers []mapPoolNode, env mapEnv, loc geo.Locat
 
 	if len(carriers) > 0 {
 		n := carriers[0]
-		pool := ipc.MapHopDTO{Role: ipc.MapHopPool, Label: n.label, Host: n.host, Uncertain: true}
+		// Certain only when the access log shows this node taking nearly
+		// every recent pick; bytes alone can't say who xray picks next.
+		sure := n.picks >= accessDominanceMin && n.share >= accessDominance
+		pool := ipc.MapHopDTO{Role: ipc.MapHopPool, Label: n.label, Host: n.host, Uncertain: !sure}
 		if a, ok := env.resolve(n.host); ok && n.host != "" {
 			placeHop(&pool, a, loc)
 		}
 		for _, alt := range carriers[1:] {
-			if len(pool.Alternatives) == mapAlternativesCap {
+			if sure || len(pool.Alternatives) == mapAlternativesCap {
 				break
 			}
-			pool.Alternatives = append(pool.Alternatives, alt.label)
+			label := alt.label
+			if alt.share > 0 {
+				label += " (" + strconv.Itoa(int(math.Round(alt.share*100))) + "%)"
+			}
+			pool.Alternatives = append(pool.Alternatives, label)
 		}
 		hops = append(hops, pool)
 	}

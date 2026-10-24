@@ -136,7 +136,7 @@ func (m *mapService) env(ctx context.Context, now time.Time) *mapCallEnv {
 	}
 	env := &mapCallEnv{
 		ctx: ctx, svc: m, rules: m.rules, entries: m.entries, names: m.names,
-		exits: mapExits.Load().snapshot(),
+		exits: mapExits.Load().snapshot(), access: activeXrayAccess.Load(),
 	}
 	if sup := m.d.xraySup; sup != nil {
 		sup.mu.Lock()
@@ -305,6 +305,7 @@ type mapCallEnv struct {
 	exits    map[string]string
 	slots    []xray.DialerSlot
 	timeline *poolTimeline
+	access   *xrayAccessLog // balancer picks from xray's access log; nil-safe
 	public   string
 }
 
@@ -336,26 +337,53 @@ func (e *mapCallEnv) poolCarriers(name string) []mapPoolNode {
 	if !ok || strings.TrimSpace(ent.Dialer) == "" {
 		return nil
 	}
-	keys, ok := e.timeline.carriers(ent.Name)
-	if !ok || len(keys) == 0 {
-		return nil
-	}
 	hosts := map[string]string{}
-	for _, sl := range e.slots {
+	var slot *xray.DialerSlot
+	for i, sl := range e.slots {
 		if !strings.EqualFold(sl.Master, ent.Name) && !containsFold(sl.Aliases, ent.Name) {
 			continue
 		}
+		slot = &e.slots[i]
 		for _, mb := range sl.Members {
 			hosts[mb.Key] = xray.OutboundServerHost(string(mb.Outbound))
 		}
 	}
+	label := func(k string) string {
+		if l := e.names[k]; l != "" {
+			return l
+		}
+		return memberDisplayName(k)
+	}
+	// The access log names the node each new connection was handed to;
+	// prefer it to bytes, which only say who moved data in the last sample.
+	if slot != nil {
+		if picks, _ := e.access.slotPicks(*slot, accessRecent, 0); len(picks) > 0 {
+			keyOf := slotTagKeys(*slot)
+			total := 0
+			for _, p := range picks {
+				total += p.recent
+			}
+			var out []mapPoolNode
+			for _, p := range picks {
+				if p.recent == 0 {
+					continue
+				}
+				k := keyOf[p.tag]
+				out = append(out, mapPoolNode{key: k, label: label(k), host: hosts[k],
+					share: float64(p.recent) / float64(total), picks: p.recent})
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+	keys, ok := e.timeline.carriers(ent.Name)
+	if !ok || len(keys) == 0 {
+		return nil
+	}
 	out := make([]mapPoolNode, 0, len(keys))
 	for _, k := range keys {
-		label := e.names[k]
-		if label == "" {
-			label = memberDisplayName(k)
-		}
-		out = append(out, mapPoolNode{key: k, label: label, host: hosts[k]})
+		out = append(out, mapPoolNode{key: k, label: label(k), host: hosts[k]})
 	}
 	return out
 }

@@ -102,8 +102,12 @@ Input: every DNS query name the daemon logs (`storeLogSink.Log`) is also
 offered, non-blocking, to the suggester. Never on the DNS hot path: a
 bounded channel, dropped on full, processed in a background goroutine.
 
-Per name: skip if a rule matches it; else `TagsFor(name)` → bump the
-tag's hits, last-seen and seen-names (cap 10). In memory, window 7 days.
+Per name: skip if a rule matches it or em-wall itself resolves exactly
+that name (`core/selfuse` + store-derived server/subscription hosts); else
+credit it to its one best suggestible tag (`MatchesFor`: `full:` match,
+then longest suffix, then a curated-group tag, then the smallest) → bump
+that tag's hits, first/last-seen and seen-names (cap 10). In memory,
+window 7 days. A tag is listed after 5 hits spread over 10 minutes.
 
 `suggest.list` returns tags with hits, minus:
 - tags in `Broad`;
@@ -129,10 +133,17 @@ the existing `MissingPatterns`/`groups.sync` flow then carries them to rules.
 
 Setting `suggest_enabled` (default `true`) turns the suggester off.
 
-UI: suggestion cards on the Rules tab (collapsible strip above the list):
-name, counts, seen names, collisions; buttons **Create group**, **Not now**,
-**Never**; collision rows offer **Use same set** / **Split overlap** (with a
-preview of exactly what moves, and Undo). Settings → Suggestions: on/off,
+Each suggestion also carries `Builtin` (a curated group to apply instead:
+named like the tag, or covering most seen names, and not fully applied) and
+`UsedBy` (em-wall's own hostnames its patterns cover). Collisions are only
+groups whose overlap existing rules route.
+
+UI: the Suggestions page, master–detail: a compact list (name, seen hosts,
+"built-in: X" / "+N domains") and the selected suggestion's seen names,
+domains (collapsed), em-wall-use note, collisions, and one primary action
+(**Apply X** or **Create group**), **Not now**, quiet **Never**; collision
+rows offer **Use same set** / **Split overlap** (with a preview of exactly
+what moves, and Undo). Settings → Suggestions: on/off,
 dismissed list with undo. Geosite groups show `+N from geosite` (Sync) and
 `N no longer listed` (info).
 

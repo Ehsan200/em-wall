@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/ehsan/em-wall/core/geo"
+	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/rules"
+	"github.com/ehsan/em-wall/core/selfuse"
 )
 
 // fakeSites is a geo.SiteIndex over a fixed tag table.
@@ -37,11 +39,55 @@ func (f fakeSites) Tag(name string) (geo.Tag, bool) {
 	return t, ok
 }
 
+func (f fakeSites) HasTag(_ bool, name string) bool {
+	_, ok := f[name]
+	return ok
+}
+
+// MatchesFor mirrors the real index: "x" is a full entry, "*.x" a domain
+// entry of length len(x).
+func (f fakeSites) MatchesFor(name string) []geo.TagMatch {
+	var out []geo.TagMatch
+	for n, t := range f {
+		if geo.Broad[n] {
+			continue
+		}
+		for _, p := range t.Patterns {
+			if !rules.MatchKey(p, name) {
+				continue
+			}
+			if d, ok := strings.CutPrefix(p, "*."); ok {
+				out = append(out, geo.TagMatch{Tag: n, Suffix: len(d), Size: len(t.Patterns)})
+			} else {
+				out = append(out, geo.TagMatch{Tag: n, Full: true, Suffix: len(p), Size: len(t.Patterns)})
+			}
+		}
+	}
+	return out
+}
+
 var testSites = fakeSites{
 	"SPOTIFY":  {Name: "SPOTIFY", Patterns: []string{"*.spotify.com", "*.scdn.co", "*.spotifycdn.com"}, Skipped: 1},
 	"TELEGRAM": {Name: "TELEGRAM", Patterns: []string{"*.telegram.org", "*.t.me"}, CIDRs: []string{"91.108.4.0/22", "149.154.160.0/20"}},
 	"CN":       {Name: "CN", Patterns: []string{"*.baidu.com"}},
 	"FOO":      {Name: "FOO", Patterns: []string{"*.foo.example"}},
+}
+
+// clockedSuggester returns a suggester whose clock moves 3 minutes on
+// every reading, so a handful of sightings spans suggestMinSpan.
+func clockedSuggester(idx geo.SiteIndex, settings settingsReader) *suggester {
+	sug := newSuggester(idx, settings)
+	t := time.Date(2026, 10, 1, 6, 0, 0, 0, time.UTC)
+	sug.now = func() time.Time {
+		t = t.Add(3 * time.Minute)
+		return t
+	}
+	return sug
+}
+
+// five repeats name n times (one tag's worth of sightings).
+func five(name string) []string {
+	return []string{name, name, name, name, name}
 }
 
 func newSuggestDeps(t *testing.T) *handlerDeps {
@@ -147,13 +193,11 @@ func TestSuggestListFilters(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	d := newSuggestDeps(t)
-	sug := newSuggester(testSites, d.store)
-	feed(sug,
-		"a.spotify.com", "b.spotify.com", "i.scdn.co",
-		"core.telegram.org", "core.telegram.org", "t.me",
-		"x.foo.example", "y.foo.example", "z.foo.example",
-		"www.baidu.com", "www.baidu.com", "www.baidu.com",
-	)
+	sug := clockedSuggester(testSites, d.store)
+	feed(sug, "a.spotify.com", "b.spotify.com", "i.scdn.co", "a.spotify.com", "b.spotify.com")
+	feed(sug, "core.telegram.org", "core.telegram.org", "t.me", "t.me", "t.me")
+	feed(sug, five("x.foo.example")...)
+	feed(sug, five("www.baidu.com")...)
 
 	list, err := d.suggestList(ctx, testSites, sug, now)
 	if err != nil {
@@ -169,12 +213,12 @@ func TestSuggestListFilters(t *testing.T) {
 	if len(tags) != 3 {
 		t.Fatalf("tags = %v", list)
 	}
-	if sp := tags["SPOTIFY"]; sp.DisplayName != "Spotify" || sp.Hits != 3 || len(sp.Missing) != 3 || sp.Skipped != 1 {
+	if sp := tags["SPOTIFY"]; sp.DisplayName != "Spotify" || sp.Hits != 5 || len(sp.Missing) != 3 || sp.Skipped != 1 {
 		t.Errorf("spotify = %+v", sp)
 	}
 
 	// A rule covering part of the tag: only the rest is Missing.
-	if _, err := d.store.Add(ctx, rules.Rule{Pattern: "*.spotify.com", Action: rules.ActionRoute, Interface: "xrayset:nj", Enabled: true}); err != nil {
+	if _, err := d.store.Add(ctx, rules.Rule{Pattern: "*.spotifycdn.com", Action: rules.ActionRoute, Interface: "xrayset:nj", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	// Fully covered by rules → dropped.
@@ -187,7 +231,7 @@ func TestSuggestListFilters(t *testing.T) {
 	if len(list) != 1 || list[0].Tag != "SPOTIFY" {
 		t.Fatalf("after rules+snooze: %+v", list)
 	}
-	if want := []string{"*.scdn.co", "*.spotifycdn.com"}; !reflect.DeepEqual(list[0].Missing, want) {
+	if want := []string{"*.spotify.com", "*.scdn.co"}; !reflect.DeepEqual(list[0].Missing, want) {
 		t.Errorf("missing = %v", list[0].Missing)
 	}
 
@@ -224,37 +268,198 @@ func TestSuggestCollisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	idle, err := d.store.AddCustomGroup(ctx, rules.CustomGroup{DisplayName: "Idle", Patterns: []string{"*.spotifycdn.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := d.store.Add(ctx, rules.Rule{Pattern: "*.scdn.co", Action: rules.ActionRoute, Interface: "xrayset:nj", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	sug := newSuggester(testSites, d.store)
-	feed(sug, "a.spotify.com", "a.spotify.com", "a.spotify.com")
+	sug := clockedSuggester(testSites, d.store)
+	feed(sug, five("a.spotify.com")...)
 	list, _ := d.suggestList(ctx, testSites, sug, time.Now())
 	if len(list) != 1 {
 		t.Fatalf("list = %+v", list)
 	}
-	var custom *ipc.SuggestCollisionDTO
-	for i, c := range list[0].Collisions {
-		if c.GroupKey == mine.Key {
-			custom = &list[0].Collisions[i]
-		}
-	}
-	if custom == nil {
-		t.Fatalf("no collision with custom group: %+v", list[0].Collisions)
-	}
-	if !custom.Custom || !reflect.DeepEqual(custom.Patterns, []string{"*.scdn.co", "open.spotify.com"}) ||
-		!reflect.DeepEqual(custom.Interfaces, []string{"xrayset:nj"}) || !reflect.DeepEqual(custom.Actions, []string{"route"}) {
-		t.Errorf("collision = %+v", *custom)
-	}
-	// The curated Spotify group overlaps too.
-	found := false
+	// Only groups whose overlap existing rules route collide: "Idle" has
+	// none, so it decides nothing yet. The curated Spotify group lists
+	// *.scdn.co, which a rule routes.
+	byKey := map[string]ipc.SuggestCollisionDTO{}
 	for _, c := range list[0].Collisions {
-		if c.GroupKey == "spotify" && !c.Custom {
-			found = true
+		byKey[c.GroupKey] = c
+	}
+	if _, ok := byKey[idle.Key]; ok || len(byKey) != 2 {
+		t.Fatalf("collisions = %+v", list[0].Collisions)
+	}
+	if sp, ok := byKey["spotify"]; !ok || sp.Custom {
+		t.Errorf("curated spotify collision = %+v", sp)
+	}
+	c := byKey[mine.Key]
+	if !c.Custom || !reflect.DeepEqual(c.Patterns, []string{"*.scdn.co", "open.spotify.com"}) ||
+		!reflect.DeepEqual(c.Interfaces, []string{"xrayset:nj"}) || !reflect.DeepEqual(c.Actions, []string{"route"}) {
+		t.Errorf("collision = %+v", c)
+	}
+}
+
+func TestSuggestPrefersBuiltin(t *testing.T) {
+	ctx := context.Background()
+	d := newSuggestDeps(t)
+	sites := fakeSites{
+		"SPOTIFY":     testSites["SPOTIFY"],
+		"MUSICSTREAM": {Name: "MUSICSTREAM", Patterns: []string{"*.musicstream.example", "open.spotify.com", "play.spotify.com"}},
+	}
+	sug := clockedSuggester(sites, d.store)
+	feed(sug, five("a.spotify.com")...)
+	// Not named like a curated group, but its seen names are mostly in
+	// the curated Spotify group.
+	feed(sug, "open.spotify.com", "play.spotify.com", "open.spotify.com", "play.spotify.com", "x.musicstream.example")
+	list, _ := d.suggestList(ctx, sites, sug, time.Now())
+	got := map[string]ipc.SuggestionDTO{}
+	for _, s := range list {
+		got[s.Tag] = s
+	}
+	if sp := got["SPOTIFY"]; sp.Builtin != "spotify" || sp.BuiltinName != "Spotify" {
+		t.Errorf("SPOTIFY builtin = %q %q", sp.Builtin, sp.BuiltinName)
+	}
+	if ms := got["MUSICSTREAM"]; ms.Builtin != "spotify" {
+		t.Errorf("MUSICSTREAM builtin = %q (seen %v)", ms.Builtin, ms.SeenNames)
+	}
+
+	// Once the built-in is applied, the names it took over stop arguing
+	// for the tag; nothing left to apply → no built-in either.
+	for _, p := range groups.FindByKey("spotify").Patterns {
+		_, _ = d.store.Add(ctx, rules.Rule{Pattern: p, Action: rules.ActionBlock, Enabled: true})
+	}
+	list, _ = d.suggestList(ctx, sites, sug, time.Now())
+	for _, s := range list {
+		if s.Tag == "SPOTIFY" {
+			t.Errorf("SPOTIFY still suggested: %+v", s)
+		}
+		if s.Tag == "MUSICSTREAM" && (s.Builtin != "" || !reflect.DeepEqual(s.SeenNames, []string{"x.musicstream.example"})) {
+			t.Errorf("MUSICSTREAM after apply = %+v", s)
 		}
 	}
-	if !found {
-		t.Error("curated spotify collision missing")
+}
+
+func TestSuggesterCreditsOneBestTag(t *testing.T) {
+	sites := fakeSites{
+		"SPOTIFY":        {Name: "SPOTIFY", Patterns: []string{"*.spotify.com", "*.scdn.co"}},
+		"SPOTIFY-ADS":    {Name: "SPOTIFY-ADS", Patterns: []string{"ads.spotify.com"}},
+		"CATEGORY-MUSIC": {Name: "CATEGORY-MUSIC", Patterns: []string{"*.spotify.com", "*.deezer.com"}},
+		"MUSICWIDE":      {Name: "MUSICWIDE", Patterns: []string{"*.spotify.com", "*.deezer.com", "*.tidal.com"}},
+		"APPLE":          {Name: "APPLE", Patterns: []string{"*.apple.com"}},
+		"APPLE-CN":       {Name: "APPLE-CN", Patterns: []string{"*.apple.com", "*.apple.com.cn"}},
+		"ONLY-CN":        {Name: "ONLY-CN", Patterns: []string{"*.only.example"}},
+		"AKAMAI":         {Name: "AKAMAI", Patterns: []string{"*.akamaized.net"}},
+		"CDN-!CN":        {Name: "CDN-!CN", Patterns: []string{"*.cdn.example"}},
+		"GITHUB":         {Name: "GITHUB", Patterns: []string{"*.github.com", "*.githubassets.com"}},
+	}
+	sug := newSuggester(sites, nil)
+	feed(sug,
+		"open.spotify.com",                    // same depth as MUSICWIDE: the curated SPOTIFY wins
+		"ads.spotify.com",                     // full entry beats every domain entry
+		"www.deezer.com",                      // category skipped → MUSICWIDE
+		"www.apple.com", "store.apple.com.cn", // APPLE-CN has a base tag: never credited
+		"x.only.example",                   // a regional-looking tag without a base is fine
+		"a.akamaized.net", "a.cdn.example", // infra / "!" tags: nothing
+		"github.com", "avatars.githubassets.com", // em-wall's own github.com isn't counted, the rest of GitHub is
+		"ip-api.com",
+	)
+	got := map[string][]string{}
+	for _, st := range sug.snapshot() {
+		got[st.Tag] = st.Names
+	}
+	want := map[string][]string{
+		"SPOTIFY":     {"open.spotify.com"},
+		"SPOTIFY-ADS": {"ads.spotify.com"},
+		"MUSICWIDE":   {"www.deezer.com"},
+		"APPLE":       {"www.apple.com"},
+		"ONLY-CN":     {"x.only.example"},
+		"GITHUB":      {"avatars.githubassets.com"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("credited = %v\nwant %v", got, want)
+	}
+}
+
+func TestSuggesterSkipsSelfHosts(t *testing.T) {
+	ctx := context.Background()
+	d := newSuggestDeps(t)
+	sites := fakeSites{
+		"GITHUB":    {Name: "GITHUB", Patterns: []string{"*.github.com", "*.githubusercontent.com", "*.githubassets.com"}},
+		"IPAPI":     {Name: "IPAPI", Patterns: []string{"ip-api.com", "*.ipwho.is"}},
+		"MYPROVIDE": {Name: "MYPROVIDE", Patterns: []string{"*.myvpn.example"}},
+	}
+	sug := clockedSuggester(sites, d.store)
+	sug.selfLoad = func(context.Context) selfuse.Set {
+		s := selfuse.NewSet(selfuse.Static())
+		s.Add("node1.myvpn.example", selfuse.PurposeProxyServer)
+		return s
+	}
+	sug.refreshSelf(ctx)
+	feed(sug, five("github.com")...)
+	feed(sug, five("raw.githubusercontent.com")...)
+	feed(sug, five("ip-api.com")...)
+	feed(sug, five("ipwho.is")...)
+	feed(sug, five("node1.myvpn.example")...)
+	if snap := sug.snapshot(); len(snap) != 0 {
+		t.Fatalf("self names counted: %+v", snap)
+	}
+	// Browsing GitHub still suggests GitHub, flagged as covering em-wall's
+	// own lookups.
+	feed(sug, five("avatars.githubusercontent.com")...)
+	list, err := d.suggestList(ctx, sites, sug, time.Now())
+	if err != nil || len(list) != 1 || list[0].Tag != "GITHUB" {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	used := map[string]bool{}
+	for _, u := range list[0].UsedBy {
+		used[u.Host+" — "+u.Purpose] = true
+	}
+	for _, w := range []string{"github.com — geo data updates", "api.github.com — app updates", "raw.githubusercontent.com — geo data updates"} {
+		if !used[w] {
+			t.Errorf("UsedBy missing %q: %v", w, list[0].UsedBy)
+		}
+	}
+	if used["ip-api.com — exit IP check"] {
+		t.Error("UsedBy lists a host the tag doesn't cover")
+	}
+}
+
+func TestSuggestNeedsSpreadOutHits(t *testing.T) {
+	ctx := context.Background()
+	d := newSuggestDeps(t)
+	sug := newSuggester(testSites, d.store)
+	at := time.Now()
+	sug.now = func() time.Time { return at }
+	// A page load: many lookups within a second.
+	feed(sug, "a.spotify.com", "b.spotify.com", "i.scdn.co", "a.spotify.com", "b.spotify.com", "c.spotify.com")
+	if list, _ := d.suggestList(ctx, testSites, sug, time.Now()); len(list) != 0 {
+		t.Fatalf("one burst made a suggestion: %+v", list)
+	}
+	at = at.Add(suggestMinSpan)
+	feed(sug, "a.spotify.com")
+	if list, _ := d.suggestList(ctx, testSites, sug, time.Now()); len(list) != 1 {
+		t.Fatalf("spread-out use not suggested: %+v", list)
+	}
+}
+
+func TestExitProbersAreSelfHosts(t *testing.T) {
+	self := selfuse.NewSet(selfuse.Static())
+	for _, p := range exitProbers {
+		if h := selfuse.HostOf(p.url); !reflect.DeepEqual(self.Purposes(h), []string{selfuse.PurposeExitIP}) {
+			t.Errorf("exit prober %s (%s) missing from selfuse.ExitIPHosts", h, p.url)
+		}
+	}
+}
+
+func TestLoadSelfHostsFromStores(t *testing.T) {
+	ctx := context.Background()
+	d := newSuggestDeps(t)
+	_ = d.store.SetSetting(ctx, settingGeoCustomURL, "https://geo.mirror.example/dat")
+	s := d.loadSelfHosts(ctx) // no proxy / xray stores: static + settings only
+	if !reflect.DeepEqual(s.Purposes("geo.mirror.example"), []string{selfuse.PurposeGeoData}) || !s.Has("ip-api.com") {
+		t.Errorf("self hosts = %v", s)
 	}
 }
 
@@ -301,8 +506,8 @@ func TestSuggestAcceptCreatesGroupOnly(t *testing.T) {
 	}
 
 	// The accepted tag stops being suggested.
-	sug := newSuggester(testSites, d.store)
-	feed(sug, "t.me", "t.me", "t.me")
+	sug := clockedSuggester(testSites, d.store)
+	feed(sug, five("t.me")...)
 	if list, _ := d.suggestList(ctx, testSites, sug, time.Now()); len(list) != 0 {
 		t.Errorf("accepted tag still suggested: %+v", list)
 	}

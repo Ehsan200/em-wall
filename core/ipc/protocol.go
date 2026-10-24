@@ -425,6 +425,9 @@ type GroupDTO struct {
 	SourceTag string   `json:"sourceTag,omitempty"`
 	TagNew    []string `json:"tagNew,omitempty"`
 	TagGone   []string `json:"tagGone,omitempty"`
+	// UsedBy lists hostnames em-wall itself resolves that the group's
+	// patterns cover (routing the group also routes those lookups).
+	UsedBy []SelfUseDTO `json:"usedBy,omitempty"`
 }
 
 // DynamicGroupDTO reports one dynamic group's refresh outcome: how many
@@ -1081,8 +1084,24 @@ type SuggestionDTO struct {
 	LastSeen    string   `json:"lastSeen"` // RFC 3339
 	// Missing are Patterns no stored rule covers yet; a tag only partly
 	// covered by existing groups is suggested as just this part.
-	Missing    []string              `json:"missing"`
+	Missing []string `json:"missing"`
+	// Collisions are existing groups whose rules already route part of
+	// the tag. A group with no rules over the overlap isn't one.
 	Collisions []SuggestCollisionDTO `json:"collisions"`
+	// Builtin is a curated group to apply instead of creating a custom
+	// one: its key matches the tag, or it covers most of SeenNames.
+	// "" = none.
+	Builtin     string `json:"builtin"`
+	BuiltinName string `json:"builtinName"`
+	// UsedBy lists hostnames em-wall itself resolves that the tag's
+	// patterns cover: routing the group also routes those lookups.
+	UsedBy []SelfUseDTO `json:"usedBy"`
+}
+
+// SelfUseDTO is one hostname em-wall resolves for its own work.
+type SelfUseDTO struct {
+	Host    string `json:"host"`    // "github.com"
+	Purpose string `json:"purpose"` // "geo data updates"
 }
 
 // SuggestCollisionDTO: an existing group already covering some of the tag.
@@ -1160,9 +1179,10 @@ type MapHopDTO struct {
 	ASN         uint32  `json:"asn"`
 	Org         string  `json:"org"`
 	Anycast     bool    `json:"anycast"`
-	// Uncertain: the hop is a best guess (e.g. a pool node — xray's
-	// balancer picks per connection; this is the node carrying the most
-	// bytes for the slot right now). Alternatives lists the other carriers.
+	// Uncertain: the hop is a best guess. For a pool node: xray's balancer
+	// picks per connection, and no single node took ≥80% of the slot's
+	// picks in the last 30 s (xray access log; byte counters when nothing
+	// was logged). Alternatives lists the other nodes, by share.
 	Uncertain    bool     `json:"uncertain"`
 	Alternatives []string `json:"alternatives,omitempty"`
 }

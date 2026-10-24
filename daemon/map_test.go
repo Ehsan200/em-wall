@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/ehsan/em-wall/core/geo"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/rules"
+	"github.com/ehsan/em-wall/core/xray"
 	"github.com/miekg/dns"
 )
 
@@ -448,6 +450,59 @@ func TestTimelineCarriers(t *testing.T) {
 	var nilTL *poolTimeline
 	if _, ok := nilTL.carriers("m"); ok {
 		t.Error("nil timeline")
+	}
+}
+
+// The access log's picks decide the pool hop when it has them: one node
+// taking nearly every recent pick is certain, a split lists the others by
+// share; with no picks the byte-ranked timeline carriers are the guess.
+func TestMapPoolHopFromPicks(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a := newXrayAccessLog("")
+	a.now = func() time.Time { return now }
+	slot := xray.DialerSlot{Master: "m", Aliases: []string{"m2"}, Index: 0, PoolKey: "xraysub:p", Members: []xray.DialerMember{
+		{Key: "n1", Outbound: json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"node1.example"}]}}`)},
+		{Key: "n2"}, {Key: "n3"},
+	}}
+	tl := newPoolTimeline()
+	tl.pools["m"] = &poolHistory{masters: []string{"m", "m2"}, samples: []poolSample{
+		{nodes: map[string]nodeCell{"n3": {role: ipc.PoolRoleActive, down: 900}}},
+	}}
+	env := &mapCallEnv{
+		entries:  map[string]xray.Config{"_xray_m2": {Name: "m2", Dialer: "xraysub:p"}},
+		names:    map[string]string{"n1": "sub/Istanbul", "n2": "sub/Berlin", "n3": "sub/Paris"},
+		slots:    []xray.DialerSlot{slot},
+		timeline: tl,
+		access:   a,
+	}
+
+	// No picks: the timeline's carriers, no shares.
+	got := env.poolCarriers("_xray_m2")
+	if len(got) != 1 || got[0].key != "n3" || got[0].picks != 0 {
+		t.Fatalf("fallback carriers = %+v", got)
+	}
+
+	pick := func(key string, n int) {
+		for i := 0; i < n; i++ {
+			a.observe([]byte(accessLine("slot0-in", xray.SlotMemberTag(0, key))), now.Add(-time.Duration(i)*time.Second))
+		}
+	}
+	pick("n1", 9)
+	pick("n2", 1)
+	got = env.poolCarriers("_xray_m2")
+	if len(got) != 2 || got[0].key != "n1" || got[0].host != "node1.example" || got[0].share != 0.9 || got[0].picks != 9 {
+		t.Fatalf("picked carriers = %+v", got)
+	}
+	hops := upstreamHops("_xray_m2", got, mapFixture(), testLocator())
+	if pool := hops[1]; pool.Uncertain || pool.Label != "sub/Istanbul" || len(pool.Alternatives) != 0 {
+		t.Errorf("dominant pool hop = %+v", pool)
+	}
+
+	pick("n2", 5) // now 9 : 6
+	got = env.poolCarriers("_xray_m2")
+	hops = upstreamHops("_xray_m2", got, mapFixture(), testLocator())
+	if pool := hops[1]; !pool.Uncertain || !slices.Equal(pool.Alternatives, []string{"sub/Berlin (40%)"}) {
+		t.Errorf("split pool hop = %+v", pool)
 	}
 }
 

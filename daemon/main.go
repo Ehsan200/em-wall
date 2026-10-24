@@ -282,6 +282,7 @@ func main() {
 	// Detached handler-spawned background work (e.g. a new subscription's
 	// initial fetch) should cancel on daemon shutdown.
 	deps.bgCtx = ctx
+	go runXrayAccessLog(ctx)
 	go liveConns.run(ctx)
 	logSinkDone := make(chan struct{})
 	go func() { defer close(logSinkDone); logSink.run(ctx) }()

@@ -14,6 +14,7 @@ import (
 	"github.com/ehsan/em-wall/core/groups"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/rules"
+	"github.com/ehsan/em-wall/core/selfuse"
 )
 
 // Group suggestions over IPC. Contract: docs/geo-map-suggest.md §2.
@@ -33,6 +34,12 @@ const (
 var suggestPrefsMu sync.Mutex
 
 func registerSuggestHandlers(s *ipc.Server, d *handlerDeps) {
+	// main installs the suggester before registering handlers and starts
+	// its run loop after, so this is the place to hand it the stores for
+	// em-wall's own hostnames without more wiring there.
+	if sug := activeSuggester.Load(); sug != nil && sug.selfLoad == nil {
+		sug.selfLoad = d.loadSelfHosts
+	}
 	s.Handle(ipc.MethodSuggestList, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return d.suggestList(ctx, d.siteIndex(), activeSuggester.Load(), time.Now())
 	})
@@ -232,13 +239,15 @@ func (d *handlerDeps) suggestList(ctx context.Context, idx geo.SiteIndex, sug *s
 	if err != nil {
 		return nil, err
 	}
-	return buildSuggestions(stats, idx, stored, grps, loadSuggestPrefs(ctx, d.store), now), nil
+	return buildSuggestions(stats, idx, stored, grps, loadSuggestPrefs(ctx, d.store), sug.selfSet(), now), nil
 }
 
-// buildSuggestions turns the seen-tag window into cards: drops what is
-// broad, dismissed, snoozed, too rare, already a group, or fully covered by
-// rules, and works out each card's Missing part and collisions.
-func buildSuggestions(stats []tagStat, idx geo.SiteIndex, stored []rules.Rule, grps []suggestGroup, prefs suggestPrefs, now time.Time) []ipc.SuggestionDTO {
+// buildSuggestions turns the seen-tag window into suggestions: drops what
+// is not suggestible, dismissed, snoozed, too rare, already a group, fully
+// covered by rules, or seen only under names a rule now covers, and works
+// out each one's Missing part, built-in alternative, collisions and the
+// em-wall hostnames it covers.
+func buildSuggestions(stats []tagStat, idx geo.SiteIndex, stored []rules.Rule, grps []suggestGroup, prefs suggestPrefs, self selfuse.Set, now time.Time) []ipc.SuggestionDTO {
 	owned := map[string]bool{}
 	for _, g := range grps {
 		if g.sourceTag != "" {
@@ -248,7 +257,8 @@ func buildSuggestions(stats []tagStat, idx geo.SiteIndex, stored []rules.Rule, g
 	out := []ipc.SuggestionDTO{}
 	for _, st := range stats {
 		tag := st.Tag
-		if geo.Broad[tag] || prefs.dismissed[tag] || owned[tag] || st.Hits < suggestMinHits {
+		if !geo.Suggestible(tag) || prefs.dismissed[tag] || owned[tag] ||
+			st.Hits < suggestMinHits || st.LastSeen.Sub(st.FirstSeen) < suggestMinSpan {
 			continue
 		}
 		if until, ok := prefs.snoozed[tag]; ok && until.After(now) {
@@ -271,20 +281,147 @@ func buildSuggestions(stats []tagStat, idx geo.SiteIndex, stored []rules.Rule, g
 		if len(missing) == 0 {
 			continue
 		}
-		out = append(out, ipc.SuggestionDTO{
+		// Names counted before a rule (or an applied built-in) took them
+		// over no longer argue for the tag.
+		seen := uncoveredNames(st.Names, stored)
+		if len(seen) == 0 {
+			continue
+		}
+		builtin := builtinFor(tag, seen, grps, stored)
+		dto := ipc.SuggestionDTO{
 			Tag:         tag,
 			DisplayName: tagDisplayName(tag),
 			Patterns:    pats,
 			CIDRs:       nonNil(t.CIDRs),
 			Skipped:     t.Skipped,
-			SeenNames:   st.Names,
+			SeenNames:   seen,
 			Hits:        st.Hits,
 			LastSeen:    st.LastSeen.UTC().Format(time.RFC3339),
 			Missing:     missing,
 			Collisions:  tagCollisions(pats, stored, grps),
-		})
+			UsedBy:      selfUsesIn(pats, self),
+		}
+		if builtin != nil {
+			dto.Builtin, dto.BuiltinName = builtin.key, builtin.name
+		}
+		out = append(out, dto)
 		if len(out) == suggestMaxListed {
 			break
+		}
+	}
+	return out
+}
+
+// uncoveredNames keeps the names no enabled rule matches.
+func uncoveredNames(names []string, stored []rules.Rule) []string {
+	out := []string{}
+	for _, n := range names {
+		covered := false
+		for _, r := range stored {
+			if r.Enabled && rules.MatchKey(r.Pattern, n) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// builtinFor picks the curated group to apply instead of creating a custom
+// one: the one named like the tag, else the one covering most (over half)
+// of the seen names. A curated group whose every pattern already has rules
+// has nothing left to apply.
+func builtinFor(tag string, seen []string, grps []suggestGroup, stored []rules.Rule) *suggestGroup {
+	named := curatedKeyForTag(tag)
+	var best *suggestGroup
+	bestN := 0
+	for i := range grps {
+		g := &grps[i]
+		if g.custom || len(g.patterns) == 0 {
+			continue
+		}
+		n := 0
+		for _, name := range seen {
+			for _, p := range g.patterns {
+				if rules.MatchKey(p, name) {
+					n++
+					break
+				}
+			}
+		}
+		isNamed := g.key == named
+		if !isNamed && n*2 <= len(seen) {
+			continue
+		}
+		if !groupHasUnapplied(g.patterns, stored) {
+			continue
+		}
+		if isNamed {
+			return g
+		}
+		if n > bestN {
+			best, bestN = g, n
+		}
+	}
+	return best
+}
+
+func groupHasUnapplied(pats []string, stored []rules.Rule) bool {
+	for _, p := range pats {
+		if !groupPatternApplied(p, stored) {
+			return true
+		}
+	}
+	return false
+}
+
+// selfUsesIn lists em-wall's own hostnames the patterns cover, by host.
+// Patterns go in a set so each host costs one lookup per label rather
+// than a match against every pattern (big tags list thousands).
+// usedByOrNil is selfUsesIn for groups.list: nil when nothing matches, so
+// the field drops out of the JSON for the common case.
+func usedByOrNil(pats []string, self selfuse.Set) []ipc.SelfUseDTO {
+	if u := selfUsesIn(pats, self); len(u) > 0 {
+		return u
+	}
+	return nil
+}
+
+func selfUsesIn(pats []string, self selfuse.Set) []ipc.SelfUseDTO {
+	out := []ipc.SelfUseDTO{}
+	if len(self) == 0 {
+		return out
+	}
+	set := make(map[string]bool, len(pats))
+	for _, p := range pats {
+		set[p] = true
+	}
+	hosts := make([]string, 0, len(self))
+	for h := range self {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	for _, h := range hosts {
+		hit := set[h]
+		for s := h; !hit; {
+			if set["*."+s] {
+				hit = true
+				break
+			}
+			dot := strings.IndexByte(s, '.')
+			if dot < 0 {
+				break
+			}
+			s = s[dot+1:]
+		}
+		if !hit {
+			continue
+		}
+		for _, purpose := range self.Purposes(h) {
+			out = append(out, ipc.SelfUseDTO{Host: h, Purpose: purpose})
 		}
 	}
 	return out
@@ -296,7 +433,9 @@ func tagPatterns(t geo.Tag) []string {
 	seen := map[string]bool{}
 	for _, p := range t.Patterns {
 		p = normalizeGroupPattern(p)
-		if p == "" || seen[p] || rules.Validate(p) != nil {
+		// Never take a CDN/cloud edge domain into a group: it would route
+		// every other site that network serves (geo.EdgeDomains).
+		if p == "" || seen[p] || rules.Validate(p) != nil || geo.IsEdgePattern(p) {
 			continue
 		}
 		seen[p] = true
@@ -316,8 +455,8 @@ func insideTag(groupPat string, tagPats []string) bool {
 	return false
 }
 
-// tagCollisions lists existing groups with patterns inside the tag, and
-// the action/interface of the rules made from that overlap.
+// tagCollisions lists existing groups with patterns inside the tag whose
+// rules route that overlap, and those rules' actions/interfaces.
 func tagCollisions(tagPats []string, stored []rules.Rule, grps []suggestGroup) []ipc.SuggestCollisionDTO {
 	out := []ipc.SuggestCollisionDTO{}
 	for _, g := range grps {
@@ -336,6 +475,11 @@ func tagCollisions(tagPats []string, stored []rules.Rule, grps []suggestGroup) [
 				ifaces[r.Interface] = true
 				actions[string(r.Action)] = true
 			}
+		}
+		// Only overlap that existing rules route is a collision: a group
+		// that was never applied decides nothing yet.
+		if len(actions) == 0 {
+			continue
 		}
 		out = append(out, ipc.SuggestCollisionDTO{
 			GroupKey:   g.key,

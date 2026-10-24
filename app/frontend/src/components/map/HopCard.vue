@@ -49,8 +49,8 @@ function flowsText(keys: string[]): string {
         Country precision: placed at the centre of {{ ch.hop.countryName || ch.hop.country }}.
       </div>
       <div v-if="ch.hop.uncertain" class="note warn">
-        Best guess. xray picks a pool node per connection; this is the one carrying the most bytes right now.
-        <template v-if="ch.hop.alternatives?.length">Also carrying: {{ ch.hop.alternatives.join(', ') }}.</template>
+        Best guess. xray picks a pool node per connection; this is the one picked most for new connections in the last 30 s (or, when xray logged no picks, the one carrying the most bytes).
+        <template v-if="ch.hop.alternatives?.length">Also picked: {{ ch.hop.alternatives.join(', ') }}.</template>
       </div>
       <div v-if="ch.hop.anycast" class="note">
         Anycast, nearest edge. The location is where the address is registered; you reach whichever edge is closest to the exit.

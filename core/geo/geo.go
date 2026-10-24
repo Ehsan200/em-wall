@@ -69,6 +69,96 @@ type SiteIndex interface {
 	Tag(name string) (Tag, bool)
 }
 
+// TagMatch is one tag listing a hostname, and how: Full is a geosite
+// "full:" (exact) entry, Suffix the length of the matched entry's domain
+// (longer = more specific), Size the tag's indexed entry count.
+type TagMatch struct {
+	Tag    string
+	Full   bool
+	Suffix int
+	Size   int
+}
+
+// SiteMatcher is a SiteIndex that can also say how each tag matched. The
+// suggester uses it to credit a name to its most specific tag; a SiteIndex
+// without it is read through TagsFor's order.
+type SiteMatcher interface {
+	MatchesFor(name string) []TagMatch
+}
+
+// EdgeDomains are domains a CDN or cloud platform serves OTHER sites
+// from. A lookup of one says which network carries a site, not which site
+// it is, so it never counts toward a suggestion; and a group built from a
+// tag never takes them, or routing "Cloudflare" would route every site
+// behind Cloudflare's CDN. The companies themselves stay suggestible:
+// dash.cloudflare.com, the AWS console and the Azure portal are not here.
+var EdgeDomains = []string{
+	// Akamai
+	"akamaiedge.net", "akamaized.net", "akamaihd.net", "akamai.net",
+	"akadns.net", "edgekey.net", "edgesuite.net", "akamaistream.net", "srip.net",
+	// Cloudflare
+	"cloudflare.net", "cdnjs.cloudflare.com", "cloudflareinsights.com",
+	"workers.dev", "pages.dev", "r2.dev", "trycloudflare.com",
+	// Fastly
+	"fastly.net", "fastlylb.net", "fastly-edge.com",
+	// AWS
+	"cloudfront.net", "amazonaws.com", "awsglobalaccelerator.com",
+	// Azure
+	"azureedge.net", "azurefd.net", "azurewebsites.net", "cloudapp.net",
+	"cloudapp.azure.com", "trafficmanager.net", "windows.net",
+	// Google Cloud / Firebase hosting
+	"appspot.com", "run.app", "cloudfunctions.net", "web.app", "firebaseapp.com",
+	"storage.googleapis.com",
+	// Other CDNs and app hosts
+	"edgecastcdn.net", "llnwd.net", "cdn77.org", "b-cdn.net", "jsdelivr.net",
+	"aliyuncs.com", "alikunlun.com", "myqcloud.com", "tencent-cloud.net",
+	"vercel.app", "netlify.app", "herokuapp.com",
+}
+
+var edgeSet = func() map[string]bool {
+	m := make(map[string]bool, len(EdgeDomains))
+	for _, d := range EdgeDomains {
+		m[d] = true
+	}
+	return m
+}()
+
+// IsEdge reports whether name is, or is under, an EdgeDomains entry.
+func IsEdge(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	for {
+		if edgeSet[name] {
+			return true
+		}
+		dot := strings.IndexByte(name, '.')
+		if dot < 0 {
+			return false
+		}
+		name = name[dot+1:]
+	}
+}
+
+// IsEdgePattern is IsEdge for an em-wall pattern ("*.x" or "x").
+func IsEdgePattern(p string) bool { return IsEdge(strings.TrimPrefix(p, "*.")) }
+
+// Suggestible reports whether tag can be offered as a group on its own:
+// not Broad, not a category ("CATEGORY-*", "TLD-*",
+// "GEOLOCATION-*"), and not an attribute/negation variant ("!" or "@").
+// Regional "-CN" variants are the caller's call — they are fine when no
+// base tag exists.
+func Suggestible(tag string) bool {
+	tag = strings.ToUpper(tag)
+	if tag == "" || Broad[tag] || strings.ContainsAny(tag, "!@") {
+		return false
+	}
+	for _, p := range []string{"CATEGORY-", "TLD-", "GEOLOCATION-"} {
+		if strings.HasPrefix(tag, p) {
+			return false
+		}
+	}
+	return true
+}
+
 // Broad lists tags too wide to be "a site" — never suggested, never used
 // for collision labels.
 var Broad = map[string]bool{
@@ -218,6 +308,16 @@ func (db *DB) Locate(ip netip.Addr) (Location, bool) {
 // TagsFor returns the non-Broad tags listing name, most specific first.
 // The first call per snapshot builds the reverse index.
 func (db *DB) TagsFor(name string) []string {
+	idx := db.siteIdx()
+	if idx == nil {
+		return nil
+	}
+	return idx.tagsFor(name)
+}
+
+// siteIdx returns the snapshot's reverse index, building it on first use;
+// nil without geosite data.
+func (db *DB) siteIdx() *siteIndex {
 	d := db.snap()
 	if d == nil || d.site == nil {
 		return nil
@@ -229,11 +329,17 @@ func (db *DB) TagsFor(name string) []string {
 			d.idx.Store(idx)
 		}
 	})
-	idx := d.idx.Load()
+	return d.idx.Load()
+}
+
+// MatchesFor returns every non-Broad tag listing name and how it matched
+// (see SiteMatcher), deepest match first.
+func (db *DB) MatchesFor(name string) []TagMatch {
+	idx := db.siteIdx()
 	if idx == nil {
 		return nil
 	}
-	return idx.tagsFor(name)
+	return idx.matchesFor(name)
 }
 
 // Tag returns one tag's translated patterns, plus the same-named geoip
