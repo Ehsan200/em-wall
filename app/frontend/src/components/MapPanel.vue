@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { startPoll } from '../poll';
 import { MapPaths } from '../../wailsjs/go/main/App';
 import GroupIcon from './GroupIcon.vue';
+import SearchSelect from './SearchSelect.vue';
 import WorldMap from './map/WorldMap.vue';
 import { flowKey, flowRate, fmtRate, fmtBytes, groupColor, hopShortPlace, placed } from './map/types';
 import type { MapResult, ViewFlow } from './map/types';
@@ -162,14 +163,12 @@ onUnmounted(() => {
       <h2>Map</h2>
       <span v-if="mock" class="mock-pill" title="Dev build showing sample data (map/mock.ts)">sample data</span>
       <div class="filters">
-        <select v-model="groupFilter" aria-label="Group" @change="ifaceFilter = ''">
-          <option value="">All groups</option>
-          <option v-for="[g, name] in groupOptions" :key="g" :value="g">{{ name }}</option>
-        </select>
-        <select v-model="ifaceFilter" aria-label="Set">
-          <option value="">All sets</option>
-          <option v-for="i in ifaceOptions" :key="i" :value="i">{{ i }}</option>
-        </select>
+        <SearchSelect v-model="groupFilter" aria-label="Group" @change="ifaceFilter = ''"
+                      :options="[{ value: '', label: 'All groups' }, ...groupOptions.map(([g, name]) => ({ value: g, label: name }))]"
+                      search-placeholder="search groups…" style="min-width: 160px" />
+        <SearchSelect v-model="ifaceFilter" aria-label="Set"
+                      :options="[{ value: '', label: 'All sets' }, ...ifaceOptions]"
+                      search-placeholder="search sets…" style="min-width: 160px" />
         <div class="seg-group" role="group" aria-label="View">
           <button class="seg" :class="{ active: fit }" @click="fit = true">Fit paths</button>
           <button class="seg" :class="{ active: !fit }" @click="fit = false">World</button>

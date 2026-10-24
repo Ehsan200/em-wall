@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { startPoll } from '../poll';
+import SearchSelect from './SearchSelect.vue';
 import { fmtTime as fmtZoned } from '../timezone';
 import { TailLog, RevealLog } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
@@ -105,9 +106,9 @@ onUnmounted(() => { stopPoll?.(); window.clearTimeout(grepTimer); });
     <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px">
       <div class="row" style="gap: 8px; align-items: center">
         <input v-model="grep" placeholder="search…" style="width: 220px" />
-        <select v-model.number="lines">
-          <option v-for="n in LINE_CHOICES" :key="n" :value="n">last {{ n }} lines</option>
-        </select>
+        <SearchSelect :modelValue="String(lines)" @update:modelValue="(v) => (lines = Number(v))"
+                      :options="LINE_CHOICES.map((n) => ({ value: String(n), label: `last ${n} lines` }))"
+                      style="width: 140px" />
         <label class="row" style="gap: 4px; align-items: center; font-size: 12px">
           <input type="checkbox" v-model="live" /> live
         </label>

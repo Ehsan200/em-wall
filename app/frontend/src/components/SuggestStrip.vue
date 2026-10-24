@@ -8,11 +8,12 @@ import {
 import type { ipc } from '../../wailsjs/go/models';
 import GroupIcon from './GroupIcon.vue';
 
-// Suggestion cards on the Rules tab: geosite tags seen in recent DNS
-// traffic that no rule covers. Creating a group here never creates rules —
-// the parent opens the normal apply form (with a binding preselected for
-// "Use same set").
-const props = defineProps<{ groups: ipc.GroupDTO[] }>();
+// Suggestion cards: geosite tags seen in recent DNS traffic that no rule
+// covers. Creating a group here never creates rules — the parent opens the
+// normal apply form (with a binding preselected for "Use same set").
+// `page`: shown as the Suggestions page (no collapse header, empty state)
+// rather than as a collapsible strip.
+const props = defineProps<{ groups: ipc.GroupDTO[]; page?: boolean }>();
 const emit = defineEmits<{
   // A group was created: open the apply form for it, optionally preset.
   (e: 'created', key: string, preset: { action: 'block' | 'route'; iface: string } | null): void;
@@ -20,6 +21,8 @@ const emit = defineEmits<{
   (e: 'apply', key: string): void;
   // Group definitions changed (split / undo): reload groups.
   (e: 'changed'): void;
+  // Number of suggestions after each load (sidebar badge).
+  (e: 'count', n: number): void;
 }>();
 
 const items = ref<ipc.SuggestionDTO[]>([]);
@@ -40,16 +43,18 @@ const COLLAPSE_KEY = 'em-wall.suggest.collapsed';
 function readCollapsed(): boolean {
   try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
 }
-const collapsed = ref(readCollapsed());
+const collapsedPref = ref(readCollapsed());
+const collapsed = computed(() => !props.page && collapsedPref.value);
 function toggleCollapsed() {
-  collapsed.value = !collapsed.value;
-  try { localStorage.setItem(COLLAPSE_KEY, collapsed.value ? '1' : '0'); } catch { /* ignore */ }
+  collapsedPref.value = !collapsedPref.value;
+  try { localStorage.setItem(COLLAPSE_KEY, collapsedPref.value ? '1' : '0'); } catch { /* ignore */ }
 }
 
 async function load() {
   try {
     items.value = (await SuggestList()) || [];
     error.value = '';
+    emit('count', items.value.length);
   } catch (e: any) {
     // The daemon may predate suggestions; stay quiet rather than shout.
     items.value = [];
@@ -194,8 +199,15 @@ const visible = computed(() => items.value.length > 0 || lastSplit.value !== nul
 </script>
 
 <template>
-  <div v-if="visible" class="suggest-strip">
-    <button class="strip-header" @click="toggleCollapsed"
+  <div v-if="page && !visible" class="empty-page">
+    <strong>No suggestions right now</strong>
+    <span class="muted">
+      When you visit a site or use an app that a geosite list knows and no rule covers yet,
+      it shows up here as a ready-made group.
+    </span>
+  </div>
+  <div v-else-if="visible" class="suggest-strip" :class="{ page }">
+    <button v-if="!page" class="strip-header" @click="toggleCollapsed"
             :title="collapsed ? 'Show suggestions' : 'Hide suggestions'">
       <span class="caret">{{ collapsed ? '▸' : '▾' }}</span>
       <strong>Suggested groups</strong>
@@ -359,4 +371,14 @@ button.small { padding: 3px 9px; font-size: 11px; }
   background: rgba(95, 208, 122, 0.08); border: 1px solid rgba(95, 208, 122, 0.4);
 }
 .icon-btn { border: none; background: transparent; padding: 2px 6px; cursor: pointer; color: var(--text-dim); }
+.empty-page {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 460px;
+  margin: 48px auto;
+  text-align: center;
+  line-height: 1.5;
+}
+.suggest-strip.page { border: none; background: transparent; padding: 0; margin: 0; }
 </style>

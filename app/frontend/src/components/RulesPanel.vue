@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { startPoll } from '../poll';
 import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
@@ -13,7 +13,6 @@ import SearchSelect from './SearchSelect.vue';
 import CustomGroupForm from './CustomGroupForm.vue';
 import ExportDialog from './ExportDialog.vue';
 import MoveToGroupDialog from './MoveToGroupDialog.vue';
-import SuggestStrip from './SuggestStrip.vue';
 
 // Local shape for a proxy row — same fields as ipc.ProxyDTO; using a
 // local type means the component still type-checks while wailsjs/models
@@ -56,7 +55,12 @@ type XraySetRow = {
   interface: string;
 };
 
-const emit = defineEmits<{ (e: 'changed'): void }>();
+const emit = defineEmits<{ (e: 'changed'): void; (e: 'request-handled'): void }>();
+// Set by the Suggestions page: open this group's apply form (optionally
+// preset). seq changes on every request so the same group can be reopened.
+const props = defineProps<{
+  openRequest?: { seq: number; key: string; preset: { action: 'block' | 'route'; iface: string } | null } | null;
+}>();
 
 const rules = ref<ipc.RuleDTO[]>([]);
 const interfaces = ref<ipc.InterfaceDTO[]>([]);
@@ -261,8 +265,6 @@ function closeGroupEditor() { customGroupForm.value = null; }
 // custom groups are dynamic, so mutations must reload explicitly).
 async function reloadGroups() {
   knownGroups.value = (await Groups()) || [];
-  // Group changes can cover (or uncover) a suggested tag.
-  suggestStrip.value?.reload();
 }
 
 async function onGroupSaved() {
@@ -537,28 +539,21 @@ function groupByKey(key: string): ipc.GroupDTO | undefined {
 }
 
 // ---- Group suggestions ----
-// The strip creates custom group definitions only; applying one goes
-// through the same inline form as every other group.
-const suggestStrip = ref<InstanceType<typeof SuggestStrip> | null>(null);
-
-async function onSuggestCreated(key: string, preset: { action: 'block' | 'route'; iface: string } | null) {
+// The Suggestions page creates custom group definitions only; applying one
+// goes through the same inline form as every other group, opened here.
+// Runs on mount too: switching pages remounts this panel with the request
+// already set.
+async function handleOpenRequest() {
+  const r = props.openRequest;
+  if (!r) return;
+  emit('request-handled'); // once only: a later remount must not reopen it
   await reloadGroups();
   await refresh();
-  const g = groupByKey(key);
-  if (g) openGroupForm(g, preset);
-  emit('changed');
+  const g = groupByKey(r.key);
+  if (g) openGroupForm(g, r.preset);
 }
-
-function onSuggestApply(key: string) {
-  const g = groupByKey(key);
-  if (g) openGroupForm(g);
-}
-
-async function onSuggestChanged() {
-  await reloadGroups();
-  await refresh();
-  emit('changed');
-}
+watch(() => props.openRequest?.seq, handleOpenRequest);
+onMounted(handleOpenRequest);
 
 // Geosite-sourced custom groups: a newer geosite list may add domains
 // (tagNew, synced into the definition on request) or drop some (tagGone,
@@ -1228,10 +1223,6 @@ onUnmounted(() => stopLivePoll?.());
         <span v-else class="skeleton inline" style="width: 10em"></span>
       </span>
     </div>
-
-    <!-- Geosite tags seen in traffic that no rule covers -->
-    <SuggestStrip ref="suggestStrip" :groups="knownGroups"
-                  @created="onSuggestCreated" @apply="onSuggestApply" @changed="onSuggestChanged" />
 
     <!-- Quick add from a known service group -->
     <div class="groups-bar">

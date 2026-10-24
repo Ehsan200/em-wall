@@ -53,12 +53,97 @@ function boxShape(b: [number, number, number, number]): GeoPermissibleObjects {
   return { type: 'MultiPoint', coordinates: pts };
 }
 
+// ---- pan / zoom ----
+// The user's view on top of the fitted projection: screen = k·base + (x, y),
+// where base is where the fitted projection puts a point. Applied to the
+// projection itself (not a CSS transform) so strokes, dots and icons stay
+// their real size at every zoom.
+const MIN_K = 1, MAX_K = 16;
+const view = ref({ k: 1, x: 0, y: 0 });
+function clampView(v: { k: number; x: number; y: number }) {
+  const { w, h } = size.value;
+  const k = Math.min(MAX_K, Math.max(MIN_K, v.k));
+  // Keep at least half a screen of map in view.
+  const x = Math.min(w / 2, Math.max((1 - k) * w - w / 2, v.x));
+  const y = Math.min(h / 2, Math.max((1 - k) * h - h / 2, v.y));
+  return { k, x, y };
+}
+function zoomAt(mx: number, my: number, f: number) {
+  const v = view.value;
+  const k = Math.min(MAX_K, Math.max(MIN_K, v.k * f));
+  const r = k / v.k;
+  view.value = clampView({ k, x: mx - r * (mx - v.x), y: my - r * (my - v.y) });
+}
+function zoomBy(f: number) {
+  zoomAt(size.value.w / 2, size.value.h / 2, f);
+}
+function resetView() {
+  view.value = { k: 1, x: 0, y: 0 };
+}
+// A new fit target (Fit/World toggle, hop extent moved) starts from its own
+// framing again.
+watch(box, resetView);
+
+function onWheel(ev: WheelEvent) {
+  ev.preventDefault();
+  const { x, y } = localXY(ev);
+  if (ev.ctrlKey) {
+    // Trackpad pinch (and ctrl + wheel) arrive as ctrlKey wheel events.
+    zoomAt(x, y, Math.exp(-ev.deltaY * 0.01));
+  } else {
+    const v = view.value;
+    view.value = clampView({ k: v.k, x: v.x - ev.deltaX, y: v.y - ev.deltaY });
+  }
+}
+
+let drag: { id: number; sx: number; sy: number; vx: number; vy: number; moved: boolean } | null = null;
+let suppressClick = false;
+const dragging = ref(false);
+function onPointerDown(ev: PointerEvent) {
+  if (ev.button !== 0) return;
+  drag = { id: ev.pointerId, sx: ev.clientX, sy: ev.clientY, vx: view.value.x, vy: view.value.y, moved: false };
+}
+function onPointerMove(ev: PointerEvent) {
+  if (!drag || ev.pointerId !== drag.id) return;
+  const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy;
+  if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+  if (!drag.moved) {
+    drag.moved = true;
+    dragging.value = true;
+    root.value?.setPointerCapture(ev.pointerId);
+  }
+  view.value = clampView({ k: view.value.k, x: drag.vx + dx, y: drag.vy + dy });
+}
+function onPointerUp(ev: PointerEvent) {
+  if (!drag || ev.pointerId !== drag.id) return;
+  // A drag must not also count as a click on whatever it ended over.
+  suppressClick = drag.moved;
+  drag = null;
+  dragging.value = false;
+}
+function onClickCapture(ev: MouseEvent) {
+  if (suppressClick) {
+    suppressClick = false;
+    ev.stopPropagation();
+    ev.preventDefault();
+  }
+}
+function onDblClick(ev: MouseEvent) {
+  const { x, y } = localXY(ev);
+  zoomAt(x, y, ev.shiftKey ? 0.5 : 2);
+}
+
 const projection = computed<GeoProjection | null>(() => {
   const { w, h } = size.value;
   if (w < 50 || h < 50) return null;
   const p = geoNaturalEarth1();
   if (box.value) p.fitExtent([[28, 28], [w - 28, h - 28]], boxShape(box.value));
   else p.fitExtent([[8, 8], [w - 8, h - 8]], { type: 'Sphere' });
+  const { k, x, y } = view.value;
+  if (k !== 1 || x !== 0 || y !== 0) {
+    const [tx, ty] = p.translate();
+    p.scale(p.scale() * k).translate([tx * k + x, ty * k + y]);
+  }
   return p.clipExtent([[-2, -2], [w + 2, h + 2]]);
 });
 
@@ -265,11 +350,14 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="root" class="map" :class="{ 'has-active': active.length > 0 }">
+  <div ref="root" class="map" :class="{ 'has-active': active.length > 0, dragging }"
+       @wheel="onWheel" @pointerdown="onPointerDown" @pointermove="onPointerMove"
+       @pointerup="onPointerUp" @pointercancel="onPointerUp" @click.capture="onClickCapture"
+       @dblclick.self="onDblClick">
     <svg v-if="projection" :width="size.w" :height="size.h" :viewBox="`0 0 ${size.w} ${size.h}`"
-         @click.self="clickBackground">
-      <path class="sphere" :class="{ outline: !box }" :d="base.sphere" @click="clickBackground" />
-      <path class="land" :d="base.land" @click="clickBackground" />
+         @click.self="clickBackground" @dblclick.self="onDblClick">
+      <path class="sphere" :class="{ outline: !box }" :d="base.sphere" @click="clickBackground" @dblclick="onDblClick" />
+      <path class="land" :d="base.land" @click="clickBackground" @dblclick="onDblClick" />
       <path class="borders" :d="base.borders" />
 
       <g class="arcs">
@@ -318,6 +406,12 @@ onUnmounted(() => {
       </template>
     </div>
 
+    <div class="zoom" @pointerdown.stop @dblclick.stop>
+      <button title="Zoom in" aria-label="Zoom in" @click="zoomBy(1.6)">+</button>
+      <button title="Zoom out" aria-label="Zoom out" :disabled="view.k <= MIN_K" @click="zoomBy(1 / 1.6)">−</button>
+      <button title="Reset view" aria-label="Reset view" :disabled="view.k === 1 && view.x === 0 && view.y === 0" @click="resetView">⟲</button>
+    </div>
+
     <div v-if="tipFlow && !cardCluster" class="tip" :style="tipStyle">
       <strong>{{ tipFlow.label }}</strong>
       <span class="muted">{{ tipFlow.flow.iface }}<template v-if="tipFlow.flow.upstream"> · {{ tipFlow.flow.upstream }}</template></span>
@@ -344,7 +438,35 @@ onUnmounted(() => {
   border: 1px solid var(--border);
   border-radius: 8px;
   user-select: none;
+  cursor: grab;
+  touch-action: none;
 }
+.map.dragging, .map.dragging * { cursor: grabbing !important; }
+.zoom {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.zoom button {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.zoom button + button { border-top: 1px solid var(--border); }
+.zoom button:disabled { opacity: 0.35; cursor: default; }
 svg { display: block; position: absolute; inset: 0; }
 .sphere { fill: var(--map-ocean); stroke: none; }
 .sphere.outline { stroke: var(--border); stroke-width: 1; }

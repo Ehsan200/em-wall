@@ -61,6 +61,11 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
+// domReady runs once the window and its webview exist.
+func (a *App) domReady(ctx context.Context) {
+	enableFullScreenButton()
+}
+
 // rpc takes a client from the pool or dials a fresh connection.
 func (a *App) rpc() (*ipc.Client, error) {
 	select {

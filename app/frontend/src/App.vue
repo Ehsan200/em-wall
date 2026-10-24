@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref, computed, onMounted, onUnmounted, defineAsyncComponent } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue';
 import { startPoll } from './poll';
 import StatusBar from './components/StatusBar.vue';
 import RulesPanel from './components/RulesPanel.vue';
@@ -10,16 +10,54 @@ import NetworkPanel from './components/NetworkPanel.vue';
 // Lazy: d3-geo and the bundled world atlas load only when the Map tab opens.
 const MapPanel = defineAsyncComponent(() => import('./components/MapPanel.vue'));
 import ProxiesPanel from './components/ProxiesPanel.vue';
+import SuggestionsPanel from './components/SuggestionsPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
-import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, CancelUpdate, PublicIP } from '../wailsjs/go/main/App';
+import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, CancelUpdate, PublicIP, SuggestList } from '../wailsjs/go/main/App';
 import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
 import { loadDisplayTimezone } from './timezone';
 
-type Tab = 'rules' | 'logs' | 'usage' | 'health' | 'map' | 'network' | 'proxies' | 'xray' | 'settings';
-const tab = ref<Tab>('rules');
+type Tab = 'rules' | 'suggest' | 'logs' | 'usage' | 'health' | 'map' | 'network' | 'proxies' | 'xray' | 'settings';
+
+// Sidebar, grouped by job. Order here is the order on screen.
+const NAV: { title: string; items: { tab: Tab; label: string }[] }[] = [
+  { title: 'Routing', items: [{ tab: 'rules', label: 'Rules' }, { tab: 'suggest', label: 'Suggestions' }] },
+  { title: 'Outbounds', items: [{ tab: 'xray', label: 'Xray' }, { tab: 'proxies', label: 'Proxies' }] },
+  { title: 'Monitor', items: [
+    { tab: 'map', label: 'Map' }, { tab: 'usage', label: 'Usage' },
+    { tab: 'health', label: 'Health' }, { tab: 'logs', label: 'Logs' },
+  ] },
+  { title: 'System', items: [{ tab: 'network', label: 'Network' }, { tab: 'settings', label: 'Settings' }] },
+];
+const TAB_KEY = 'em-wall.tab';
+function readTab(): Tab {
+  try {
+    const t = localStorage.getItem(TAB_KEY) as Tab | null;
+    if (t && NAV.some((g) => g.items.some((i) => i.tab === t))) return t;
+  } catch { /* storage unavailable */ }
+  return 'rules';
+}
+const tab = ref<Tab>(readTab());
+watch(tab, (t) => { try { localStorage.setItem(TAB_KEY, t); } catch { /* ignore */ } });
+
+// Suggestions badge. The page reports its own count while open; otherwise
+// a slow poll keeps the badge roughly current.
+const suggestCount = ref(0);
+async function refreshSuggestCount() {
+  try { suggestCount.value = ((await SuggestList()) || []).length; } catch { /* daemon may predate it */ }
+}
+let suggestTimer: number | undefined;
+
+// Suggestions → Rules hand-off: open a group's apply form on the Rules page.
+type OpenRequest = { seq: number; key: string; preset: { action: 'block' | 'route'; iface: string } | null };
+const openRequest = ref<OpenRequest | null>(null);
+let openSeq = 0;
+function openGroup(key: string, preset: OpenRequest['preset']) {
+  openRequest.value = { seq: ++openSeq, key, preset };
+  tab.value = 'rules';
+}
 const status = ref<ipc.StatusResult | null>(null);
 const error = ref<string>('');
 const appVersion = ref<string>('');
@@ -215,6 +253,8 @@ onMounted(async () => {
   // close-and-reopen needed. The first call runs in the background so it
   // never delays the initial UI render.
   checkUpdate();
+  refreshSuggestCount();
+  suggestTimer = window.setInterval(refreshSuggestCount, 60_000);
   loadDisplayTimezone();
   updateTimer = window.setInterval(checkUpdate, UPDATE_POLL_MS);
   EventsOn('update:progress', (p: number) => { updateProgress.value = p; updateRetry.value = null; });
@@ -224,6 +264,7 @@ onUnmounted(() => {
   stopPoll?.();
   if (egressTimer) window.clearTimeout(egressTimer);
   if (updateTimer) window.clearInterval(updateTimer);
+  if (suggestTimer) window.clearInterval(suggestTimer);
   EventsOff('update:progress');
   EventsOff('update:retry');
 });
@@ -287,19 +328,23 @@ onUnmounted(() => {
     <InstallPanel :status="install" :packaged="packaged" @installed="onInstalled" />
   </template>
   <template v-else>
-    <div class="tabs">
-      <button :class="{active: tab==='rules'}"    @click="tab='rules'">Rules</button>
-      <button :class="{active: tab==='logs'}"     @click="tab='logs'">Logs</button>
-      <button :class="{active: tab==='usage'}"    @click="tab='usage'">Usage</button>
-      <button :class="{active: tab==='health'}"   @click="tab='health'">Health</button>
-      <button :class="{active: tab==='map'}"      @click="tab='map'">Map</button>
-      <button :class="{active: tab==='network'}"  @click="tab='network'">Network</button>
-      <button :class="{active: tab==='proxies'}"  @click="tab='proxies'">Proxies</button>
-      <button :class="{active: tab==='xray'}"     @click="tab='xray'">Xray</button>
-      <button :class="{active: tab==='settings'}" @click="tab='settings'">Settings</button>
-    </div>
+    <div class="shell">
+      <nav class="sidebar" aria-label="Sections">
+        <div v-for="g in NAV" :key="g.title" class="nav-group">
+          <div class="nav-title">{{ g.title }}</div>
+          <button v-for="i in g.items" :key="i.tab" class="nav-item" :class="{ active: tab === i.tab }"
+                  :aria-current="tab === i.tab ? 'page' : undefined" @click="tab = i.tab">
+            <span>{{ i.label }}</span>
+            <span v-if="i.tab === 'suggest' && suggestCount > 0" class="nav-badge">{{ suggestCount }}</span>
+          </button>
+        </div>
+      </nav>
 
-    <RulesPanel    v-if="tab==='rules'"    @changed="refresh" />
+      <main class="content">
+    <RulesPanel    v-if="tab==='rules'"    :openRequest="openRequest"
+                   @changed="refresh" @request-handled="openRequest = null" />
+    <SuggestionsPanel v-else-if="tab==='suggest'" @open-group="openGroup"
+                   @count="(n: number) => suggestCount = n" />
     <LogsPanel     v-else-if="tab==='logs'" />
     <DashboardPanel v-else-if="tab==='usage'" />
     <HealthPanel   v-else-if="tab==='health'" />
@@ -311,5 +356,7 @@ onUnmounted(() => {
                    :focusReinstallSeq="focusReinstallSeq"
                    @changed="refresh"
                    @reinstalling="(v: boolean) => reinstalling = v" />
+      </main>
+    </div>
   </template>
 </template>
