@@ -1,10 +1,15 @@
 package installer
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ehsan/em-wall/core/geo/meta"
 )
 
 // checkBash runs `bash -n` (parse, don't execute) over a generated
@@ -69,6 +74,63 @@ func TestUninstallScriptRemovesCLI(t *testing.T) {
 		if purge != strings.Contains(script, strconv.Quote(DBDir)) {
 			t.Errorf("purge=%v: DB removal block is wrong", purge)
 		}
+	}
+}
+
+// An empty geo path keeps the installed file; a set one installs it.
+func TestInstallScriptGeoFiles(t *testing.T) {
+	both := installScript("/tmp/em-walld", "/tmp/em-wall", "/tmp/plist", "/tmp/anchor",
+		"/tmp/xray", "/tmp/geoip.dat", "/tmp/geosite.dat")
+	checkBash(t, both)
+	for _, want := range []string{
+		"install -m 0644 " + strconv.Quote("/tmp/geoip.dat") + ` "$XRAY_GEOIP"`,
+		"install -m 0644 " + strconv.Quote("/tmp/geosite.dat") + ` "$XRAY_GEOSITE"`,
+	} {
+		if !strings.Contains(both, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	none := installScript("/tmp/em-walld", "/tmp/em-wall", "/tmp/plist", "/tmp/anchor",
+		"/tmp/xray", "", "")
+	checkBash(t, none)
+	if strings.Contains(none, `"$XRAY_GEOIP"`+"\n") || strings.Contains(none, `install -m 0644 "" `) ||
+		strings.Contains(none, ` "$XRAY_GEOSITE"`+"\n") {
+		t.Errorf("kept geo files still installed:\n%s", none)
+	}
+	if !strings.Contains(none, "launchctl bootstrap") {
+		t.Error("script truncated")
+	}
+}
+
+func TestKeepDownloadedGeo(t *testing.T) {
+	bundled := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	if s, i := keepDownloadedGeo(dir, bundled); s || i {
+		t.Error("no geo.meta: bundle must go in")
+	}
+	for _, f := range []string{"geosite.dat", "geoip.dat"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := meta.Write(dir, meta.Meta{
+		meta.GeoSite: {Source: "loyalsoldier", UpdatedAt: bundled.Add(48 * time.Hour)},  // newer download
+		meta.GeoIP:   {Source: "loyalsoldier", UpdatedAt: bundled.Add(-48 * time.Hour)}, // older than the bundle
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, i := keepDownloadedGeo(dir, bundled); !s || i {
+		t.Errorf("keep = %v,%v; want geosite kept, geoip replaced", s, i)
+	}
+	_ = meta.Write(dir, meta.Meta{meta.GeoSite: {Source: "bundled", UpdatedAt: bundled.Add(48 * time.Hour)}})
+	if s, _ := keepDownloadedGeo(dir, bundled); s {
+		t.Error("a bundled entry was kept over the bundle")
+	}
+	_ = meta.Write(dir, meta.Meta{meta.GeoSite: {Source: "loyalsoldier", UpdatedAt: bundled.Add(48 * time.Hour)}})
+	_ = os.Remove(filepath.Join(dir, "geosite.dat"))
+	if s, _ := keepDownloadedGeo(dir, bundled); s {
+		t.Error("kept a file that is not there")
 	}
 }
 

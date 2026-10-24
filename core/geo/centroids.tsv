@@ -1,0 +1,251 @@
+# ISO	name	lat	lon — a representative point per country: the main tz city
+# (IANA zone.tab), or the geographic centroid for countries spanning several zones.
+AD	Andorra	42.50	1.52
+AE	United Arab Emirates	25.30	55.30
+AF	Afghanistan	34.52	69.20
+AG	Antigua & Barbuda	17.05	-61.80
+AI	Anguilla	18.20	-63.07
+AL	Albania	41.33	19.83
+AM	Armenia	40.18	44.50
+AO	Angola	-8.80	13.23
+AQ	Antarctica	-75.00	0.00
+AR	Argentina	-38.42	-63.62
+AS	Samoa (American)	-14.27	-170.70
+AT	Austria	48.22	16.33
+AU	Australia	-25.27	133.78
+AW	Aruba	12.50	-69.97
+AX	Åland Islands	60.10	19.95
+AZ	Azerbaijan	40.38	49.85
+BA	Bosnia & Herzegovina	43.87	18.42
+BB	Barbados	13.10	-59.62
+BD	Bangladesh	23.72	90.42
+BE	Belgium	50.83	4.33
+BF	Burkina Faso	12.37	-1.52
+BG	Bulgaria	42.68	23.32
+BH	Bahrain	26.38	50.58
+BI	Burundi	-3.38	29.37
+BJ	Benin	6.48	2.62
+BL	St Barthelemy	17.88	-62.85
+BM	Bermuda	32.28	-64.77
+BN	Brunei	4.93	114.92
+BO	Bolivia	-16.50	-68.15
+BQ	Caribbean NL	12.15	-68.28
+BR	Brazil	-14.24	-51.93
+BS	Bahamas	25.08	-77.35
+BT	Bhutan	27.47	89.65
+BW	Botswana	-24.65	25.92
+BY	Belarus	53.90	27.57
+BZ	Belize	17.50	-88.20
+CA	Canada	56.13	-106.35
+CC	Cocos (Keeling) Islands	-12.17	96.92
+CD	DR Congo	-4.30	15.30
+CF	Central African Rep.	4.37	18.58
+CG	Congo	-4.27	15.28
+CH	Switzerland	47.38	8.53
+CI	Côte d’Ivoire	5.32	-4.03
+CK	Cook Islands	-21.23	-159.77
+CL	Chile	-35.68	-71.54
+CM	Cameroon	4.05	9.70
+CN	China	35.86	104.20
+CO	Colombia	4.60	-74.08
+CR	Costa Rica	9.93	-84.08
+CU	Cuba	23.13	-82.37
+CV	Cape Verde	14.92	-23.52
+CW	Curaçao	12.18	-69.00
+CX	Christmas Island	-10.42	105.72
+CY	Cyprus	35.17	33.37
+CZ	Czechia	50.08	14.43
+DE	Germany	52.50	13.37
+DJ	Djibouti	11.60	43.15
+DK	Denmark	55.67	12.58
+DM	Dominica	15.30	-61.40
+DO	Dominican Republic	18.47	-69.90
+DZ	Algeria	36.78	3.05
+EC	Ecuador	-2.17	-79.83
+EE	Estonia	59.42	24.75
+EG	Egypt	30.05	31.25
+EH	Western Sahara	27.15	-13.20
+ER	Eritrea	15.33	38.88
+ES	Spain	40.40	-3.68
+ET	Ethiopia	9.03	38.70
+FI	Finland	60.17	24.97
+FJ	Fiji	-18.13	178.42
+FK	Falkland Islands	-51.70	-57.85
+FM	Micronesia	6.92	158.16
+FO	Faroe Islands	62.02	-6.77
+FR	France	48.87	2.33
+GA	Gabon	0.38	9.45
+GB	United Kingdom	51.51	-0.13
+GD	Grenada	12.05	-61.75
+GE	Georgia	41.72	44.82
+GF	French Guiana	4.93	-52.33
+GG	Guernsey	49.45	-2.54
+GH	Ghana	5.55	-0.22
+GI	Gibraltar	36.13	-5.35
+GL	Greenland	71.71	-42.60
+GM	Gambia	13.47	-16.65
+GN	Guinea	9.52	-13.72
+GP	Guadeloupe	16.23	-61.53
+GQ	Equatorial Guinea	3.75	8.78
+GR	Greece	37.97	23.72
+GS	South Georgia & the South Sandwich Islands	-54.27	-36.53
+GT	Guatemala	14.63	-90.52
+GU	Guam	13.47	144.75
+GW	Guinea-Bissau	11.85	-15.58
+GY	Guyana	6.80	-58.17
+HK	Hong Kong	22.28	114.15
+HN	Honduras	14.10	-87.22
+HR	Croatia	45.80	15.97
+HT	Haiti	18.53	-72.33
+HU	Hungary	47.50	19.08
+ID	Indonesia	-0.79	113.92
+IE	Ireland	53.33	-6.25
+IL	Israel	31.78	35.22
+IM	Isle of Man	54.15	-4.47
+IN	India	20.59	78.96
+IO	British Indian Ocean Territory	-7.33	72.42
+IQ	Iraq	33.35	44.42
+IR	Iran	35.67	51.43
+IS	Iceland	64.15	-21.85
+IT	Italy	41.90	12.48
+JE	Jersey	49.18	-2.11
+JM	Jamaica	17.97	-76.79
+JO	Jordan	31.95	35.93
+JP	Japan	35.65	139.74
+KE	Kenya	-1.28	36.82
+KG	Kyrgyzstan	42.90	74.60
+KH	Cambodia	11.55	104.92
+KI	Kiribati	1.87	-157.36
+KM	Comoros	-11.68	43.27
+KN	St Kitts & Nevis	17.30	-62.72
+KP	North Korea	39.02	125.75
+KR	South Korea	37.55	126.97
+KW	Kuwait	29.33	47.98
+KY	Cayman Islands	19.30	-81.38
+KZ	Kazakhstan	48.02	66.92
+LA	Laos	17.97	102.60
+LB	Lebanon	33.88	35.50
+LC	St Lucia	14.02	-61.00
+LI	Liechtenstein	47.15	9.52
+LK	Sri Lanka	6.93	79.85
+LR	Liberia	6.30	-10.78
+LS	Lesotho	-29.47	27.50
+LT	Lithuania	54.68	25.32
+LU	Luxembourg	49.60	6.15
+LV	Latvia	56.95	24.10
+LY	Libya	32.90	13.18
+MA	Morocco	33.65	-7.58
+MC	Monaco	43.70	7.38
+MD	Moldova	47.00	28.83
+ME	Montenegro	42.43	19.27
+MF	St Martin (French)	18.07	-63.08
+MG	Madagascar	-18.92	47.52
+MH	Marshall Islands	7.15	171.20
+MK	North Macedonia	41.98	21.43
+ML	Mali	12.65	-8.00
+MM	Myanmar (Burma)	16.78	96.17
+MN	Mongolia	47.92	106.88
+MO	Macau	22.20	113.54
+MP	Northern Mariana Islands	15.20	145.75
+MQ	Martinique	14.60	-61.08
+MR	Mauritania	18.10	-15.95
+MS	Montserrat	16.72	-62.22
+MT	Malta	35.90	14.52
+MU	Mauritius	-20.17	57.50
+MV	Maldives	4.17	73.50
+MW	Malawi	-15.78	35.00
+MX	Mexico	23.63	-102.55
+MY	Malaysia	3.17	101.70
+MZ	Mozambique	-25.97	32.58
+NA	Namibia	-22.57	17.10
+NC	New Caledonia	-22.27	166.45
+NE	Niger	13.52	2.12
+NF	Norfolk Island	-29.05	167.97
+NG	Nigeria	6.45	3.40
+NI	Nicaragua	12.15	-86.28
+NL	Netherlands	52.37	4.90
+NO	Norway	59.92	10.75
+NP	Nepal	27.72	85.32
+NR	Nauru	-0.52	166.92
+NU	Niue	-19.02	-169.92
+NZ	New Zealand	-36.87	174.77
+OM	Oman	23.60	58.58
+PA	Panama	8.97	-79.53
+PE	Peru	-12.05	-77.05
+PF	French Polynesia	-17.68	-149.41
+PG	Papua New Guinea	-9.50	147.17
+PH	Philippines	14.59	120.97
+PK	Pakistan	24.87	67.05
+PL	Poland	52.25	21.00
+PM	St Pierre & Miquelon	47.05	-56.33
+PN	Pitcairn	-25.07	-130.08
+PR	Puerto Rico	18.47	-66.11
+PS	Palestine	31.50	34.47
+PT	Portugal	38.72	-9.13
+PW	Palau	7.33	134.48
+PY	Paraguay	-25.27	-57.67
+QA	Qatar	25.28	51.53
+RE	Réunion	-20.87	55.47
+RO	Romania	44.43	26.10
+RS	Serbia	44.83	20.50
+RU	Russia	61.52	105.32
+RW	Rwanda	-1.95	30.07
+SA	Saudi Arabia	24.63	46.72
+SB	Solomon Islands	-9.53	160.20
+SC	Seychelles	-4.67	55.47
+SD	Sudan	15.60	32.53
+SE	Sweden	59.33	18.05
+SG	Singapore	1.28	103.85
+SH	St Helena	-15.92	-5.70
+SI	Slovenia	46.05	14.52
+SJ	Svalbard & Jan Mayen	78.00	16.00
+SK	Slovakia	48.15	17.12
+SL	Sierra Leone	8.50	-13.25
+SM	San Marino	43.92	12.47
+SN	Senegal	14.67	-17.43
+SO	Somalia	2.07	45.37
+SR	Suriname	5.83	-55.17
+SS	South Sudan	4.85	31.62
+ST	Sao Tome & Principe	0.33	6.73
+SV	El Salvador	13.70	-89.20
+SX	St Maarten (Dutch)	18.05	-63.05
+SY	Syria	33.50	36.30
+SZ	Eswatini (Swaziland)	-26.30	31.10
+TC	Turks & Caicos Is	21.47	-71.13
+TD	Chad	12.12	15.05
+TF	French S. Terr.	-49.35	70.22
+TG	Togo	6.13	1.22
+TH	Thailand	13.75	100.52
+TJ	Tajikistan	38.58	68.80
+TK	Tokelau	-9.37	-171.23
+TL	East Timor	-8.55	125.58
+TM	Turkmenistan	37.95	58.38
+TN	Tunisia	36.80	10.18
+TO	Tonga	-21.13	-175.20
+TR	Turkey	41.02	28.97
+TT	Trinidad & Tobago	10.65	-61.52
+TV	Tuvalu	-8.52	179.22
+TW	Taiwan	25.05	121.50
+TZ	Tanzania	-6.80	39.28
+UA	Ukraine	44.95	34.10
+UG	Uganda	0.32	32.42
+UM	US minor outlying islands	19.28	166.65
+US	United States	39.83	-98.58
+UY	Uruguay	-34.91	-56.21
+UZ	Uzbekistan	39.67	66.80
+VA	Vatican City	41.90	12.45
+VC	St Vincent	13.15	-61.23
+VE	Venezuela	10.50	-66.93
+VG	Virgin Islands (UK)	18.45	-64.62
+VI	Virgin Islands (US)	18.35	-64.93
+VN	Vietnam	10.75	106.67
+VU	Vanuatu	-17.67	168.42
+WF	Wallis & Futuna	-13.30	-176.17
+WS	Samoa (western)	-13.83	-171.73
+YE	Yemen	12.75	45.20
+YT	Mayotte	-12.78	45.23
+ZA	South Africa	-26.25	28.00
+ZM	Zambia	-15.42	28.28
+ZW	Zimbabwe	-17.83	31.05
+BV	Bouvet Island	-54.42	3.36
+HM	Heard Island & McDonald Islands	-53.08	73.50

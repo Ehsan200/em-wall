@@ -428,8 +428,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err != nil {
 			return nil, err
 		}
+		idx := d.siteIndex()
 		for _, g := range custom {
-			out = append(out, ipc.GroupDTO{
+			dto := ipc.GroupDTO{
 				Key:             g.Key,
 				DisplayName:     g.DisplayName,
 				Description:     g.Description,
@@ -439,7 +440,11 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 				Custom:          true,
 				RuleCount:       countFor(g.Patterns),
 				MissingPatterns: missingGroupPatterns(g.Patterns, allRules),
-			})
+			}
+			// Geosite-sourced groups: report the tag's drift (see
+			// daemon/suggest_handlers.go). Report only — never applied here.
+			fillTagDrift(&dto, g, idx, allRules)
+			out = append(out, dto)
 		}
 		return out, nil
 	})
@@ -1156,6 +1161,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 	registerCustomGroupHandlers(s, d)
 	registerPortableHandlers(s, d)
 	registerHealthHandlers(s, d)
+	registerGeoHandlers(s, d)
+	registerSuggestHandlers(s, d)
+	registerMapHandlers(s, d)
 }
 
 // registerXraySubHandlers wires the subscription CRUD + node ops and the

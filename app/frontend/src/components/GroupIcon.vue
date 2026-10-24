@@ -1,3 +1,9 @@
+<script lang="ts">
+// Module scope: one fetch per group key across every icon instance (the
+// map draws one per flow).
+const cache = new Map<string, Promise<string>>();
+</script>
+
 <script lang="ts" setup>
 import { ref, watch, onMounted } from 'vue';
 import { GroupIcon as FetchGroupIcon } from '../../wailsjs/go/main/App';
@@ -8,8 +14,6 @@ const props = defineProps<{
 }>();
 
 const dataUrl = ref<string>('');
-
-const cache = new Map<string, Promise<string>>();
 
 async function load(key: string) {
   if (!key) return;

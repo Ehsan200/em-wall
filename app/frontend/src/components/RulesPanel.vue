@@ -5,7 +5,7 @@ import {
   ListRules, AddRule, UpdateRule, DeleteRule, Interfaces,
   Groups, ApplyGroup, SyncGroup, DeleteGroupRules, SetGroupEnabled,
   ListProxies, ListXray, ListXraySets, BulkUpdateRules, RuleExitIP,
-  DeleteCustomGroup,
+  DeleteCustomGroup, GroupsSyncTag,
 } from '../../wailsjs/go/main/App';
 import type { ipc } from '../../wailsjs/go/models';
 import GroupIcon from './GroupIcon.vue';
@@ -13,6 +13,7 @@ import SearchSelect from './SearchSelect.vue';
 import CustomGroupForm from './CustomGroupForm.vue';
 import ExportDialog from './ExportDialog.vue';
 import MoveToGroupDialog from './MoveToGroupDialog.vue';
+import SuggestStrip from './SuggestStrip.vue';
 
 // Local shape for a proxy row — same fields as ipc.ProxyDTO; using a
 // local type means the component still type-checks while wailsjs/models
@@ -260,6 +261,8 @@ function closeGroupEditor() { customGroupForm.value = null; }
 // custom groups are dynamic, so mutations must reload explicitly).
 async function reloadGroups() {
   knownGroups.value = (await Groups()) || [];
+  // Group changes can cover (or uncover) a suggested tag.
+  suggestStrip.value?.reload();
 }
 
 async function onGroupSaved() {
@@ -445,7 +448,9 @@ const groupApply = ref<{
   enabled: boolean;
 } | null>(null);
 
-function openGroupForm(g: ipc.GroupDTO) {
+// preset preselects the action and binding (a suggestion's "Use same
+// set" passes the interface the overlapping group's rules already use).
+function openGroupForm(g: ipc.GroupDTO, preset?: { action: 'block' | 'route'; iface: string } | null) {
   groupApply.value = {
     key: g.key,
     action: 'block',
@@ -456,6 +461,15 @@ function openGroupForm(g: ipc.GroupDTO) {
     set: '',
     enabled: true,
   };
+  if (!preset) return;
+  const a = groupApply.value;
+  a.action = preset.action;
+  const f = preset.iface;
+  if (preset.action !== 'route' || !f) return;
+  if (f.startsWith('xrayset:')) { a.binding = 'set'; a.set = f.slice('xrayset:'.length); }
+  else if (f.startsWith('xray:')) { a.binding = 'xray'; a.xrays = f.slice('xray:'.length).split(',').filter(Boolean); }
+  else if (f.startsWith('proxy:')) { a.binding = 'proxy'; a.proxies = f.slice('proxy:'.length).split(',').filter(Boolean); }
+  else { a.binding = 'iface'; a.iface = f; }
 }
 
 function closeGroupForm() { groupApply.value = null; }
@@ -520,6 +534,60 @@ async function applyGroupNow() {
 
 function groupByKey(key: string): ipc.GroupDTO | undefined {
   return knownGroups.value.find(g => g.key === key);
+}
+
+// ---- Group suggestions ----
+// The strip creates custom group definitions only; applying one goes
+// through the same inline form as every other group.
+const suggestStrip = ref<InstanceType<typeof SuggestStrip> | null>(null);
+
+async function onSuggestCreated(key: string, preset: { action: 'block' | 'route'; iface: string } | null) {
+  await reloadGroups();
+  await refresh();
+  const g = groupByKey(key);
+  if (g) openGroupForm(g, preset);
+  emit('changed');
+}
+
+function onSuggestApply(key: string) {
+  const g = groupByKey(key);
+  if (g) openGroupForm(g);
+}
+
+async function onSuggestChanged() {
+  await reloadGroups();
+  await refresh();
+  emit('changed');
+}
+
+// Geosite-sourced custom groups: a newer geosite list may add domains
+// (tagNew, synced into the definition on request) or drop some (tagGone,
+// shown only — never removed for the user).
+function tagNewCount(g: ipc.GroupDTO | null): number {
+  return g?.tagNew?.length || 0;
+}
+function tagGoneCount(g: ipc.GroupDTO | null): number {
+  return g?.tagGone?.length || 0;
+}
+
+const syncingTag = ref<string | null>(null);
+async function syncTag(g: ipc.GroupDTO) {
+  syncingTag.value = g.key;
+  try {
+    const n = tagNewCount(g);
+    await GroupsSyncTag(g.key);
+    await reloadGroups();
+    await refresh();
+    const after = groupByKey(g.key);
+    error.value = missingCount(after || null) > 0
+      ? `Added ${n} domain(s) to ${g.displayName}. Sync the group to create their rules.`
+      : `Added ${n} domain(s) to ${g.displayName}.`;
+    emit('changed');
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    syncingTag.value = null;
+  }
 }
 
 // ---- Group drift ----
@@ -1161,6 +1229,10 @@ onUnmounted(() => stopLivePoll?.());
       </span>
     </div>
 
+    <!-- Geosite tags seen in traffic that no rule covers -->
+    <SuggestStrip ref="suggestStrip" :groups="knownGroups"
+                  @created="onSuggestCreated" @apply="onSuggestApply" @changed="onSuggestChanged" />
+
     <!-- Quick add from a known service group -->
     <div class="groups-bar">
       <div class="muted" style="font-size: 11px; margin-bottom: 8px">
@@ -1205,6 +1277,16 @@ onUnmounted(() => stopLivePoll?.());
             <span class="group-name">{{ g.displayName }}</span>
             <span class="muted" style="font-size: 10px">{{ g.patterns.length }} pattern{{ g.patterns.length === 1 ? '' : 's' }}</span>
           </button>
+          <button v-if="tagNewCount(g)" class="drift-pill tag-pill"
+                  :disabled="syncingTag !== null"
+                  @click="syncTag(g)"
+                  :title="`geosite:${g.sourceTag?.toLowerCase()} now also lists:\n${g.tagNew?.join('\n')}\n\nClick to add them to this group. Rules are not changed.`">
+            {{ syncingTag === g.key ? 'Syncing…' : `+${tagNewCount(g)} from geosite` }}
+          </button>
+          <span v-if="tagGoneCount(g)" class="gone-pill"
+                :title="`geosite:${g.sourceTag?.toLowerCase()} no longer lists:\n${g.tagGone?.join('\n')}\n\nThey stay in this group until you remove them.`">
+            {{ tagGoneCount(g) }} no longer listed
+          </span>
           <button class="icon-btn" title="Edit group" @click="openEditGroup(g)">✎</button>
           <button class="icon-btn"
                   :class="{ danger: pendingDeleteCustom === g.key }"
@@ -1530,6 +1612,14 @@ onUnmounted(() => stopLivePoll?.());
                 :title="sec.group?.missingPatterns?.join('\n')">
             +{{ missingCount(sec.group) }} new
           </span>
+          <span v-if="tagNewCount(sec.group)" class="drift-pill"
+                :title="`geosite:${sec.group?.sourceTag?.toLowerCase()} now also lists:\n${sec.group?.tagNew?.join('\n')}`">
+            +{{ tagNewCount(sec.group) }} from geosite
+          </span>
+          <span v-if="tagGoneCount(sec.group)" class="gone-pill"
+                :title="`geosite:${sec.group?.sourceTag?.toLowerCase()} no longer lists:\n${sec.group?.tagGone?.join('\n')}\n\nThey stay in this group until you remove them.`">
+            {{ tagGoneCount(sec.group) }} no longer listed
+          </span>
         </div>
         <!-- Bulk actions: groups only. Ungrouped section is just a label. -->
         <div v-if="sec.group" class="row" style="gap: 6px; align-items: center">
@@ -1538,6 +1628,12 @@ onUnmounted(() => stopLivePoll?.());
                   @click="syncGroup(sec.group)"
                   :title="`Add the ${missingCount(sec.group)} domain(s) this group gained, reusing this group's action and interface`">
             {{ syncing === sec.group.key ? 'Syncing…' : 'Sync' }}
+          </button>
+          <button v-if="tagNewCount(sec.group)" class="bulk-btn"
+                  :disabled="syncingTag !== null"
+                  @click.stop="syncTag(sec.group)"
+                  :title="`Add the ${tagNewCount(sec.group)} domain(s) geosite now lists to this group's definition. Rules are not changed until you Sync.`">
+            {{ syncingTag === sec.group.key ? 'Updating…' : 'Update from geosite' }}
           </button>
           <span v-if="isBusy(`group:${sec.group.key}`)" class="spinner" title="Working…"></span>
           <button class="bulk-btn"
@@ -2057,6 +2153,18 @@ tr.edit-row td {
   letter-spacing: 0.5px;
   background: rgba(93, 160, 255, 0.16);
   color: var(--accent);
+}
+button.tag-pill { border: none; cursor: pointer; align-self: center; }
+button.tag-pill:hover { filter: brightness(1.2); }
+.gone-pill {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
 }
 .drift-banner {
   display: flex;

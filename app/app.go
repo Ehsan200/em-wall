@@ -931,3 +931,74 @@ func (a *App) WaitForDaemon(timeoutMs int) bool {
 	}
 	return false
 }
+
+// ---- Geo data ----
+
+func (a *App) GeoStatus() (ipc.GeoStatusResult, error) {
+	var out ipc.GeoStatusResult
+	err := a.call(ipc.MethodGeoStatus, nil, &out)
+	return out, err
+}
+
+// GeoUpdate fetches geo files now; file "" = all of them.
+func (a *App) GeoUpdate(file string) (ipc.GeoStatusResult, error) {
+	var out ipc.GeoStatusResult
+	err := a.call(ipc.MethodGeoUpdate, ipc.GeoUpdateParams{File: file}, &out)
+	return out, err
+}
+
+func (a *App) GeoRollback() (ipc.GeoStatusResult, error) {
+	var out ipc.GeoStatusResult
+	err := a.call(ipc.MethodGeoRollback, nil, &out)
+	return out, err
+}
+
+// ---- Group suggestions ----
+
+func (a *App) SuggestList() ([]ipc.SuggestionDTO, error) {
+	var out []ipc.SuggestionDTO
+	err := a.call(ipc.MethodSuggestList, nil, &out)
+	return out, err
+}
+
+// SuggestDismiss hides a suggestion: forever=false is "not now".
+func (a *App) SuggestDismiss(tag string, forever bool) error {
+	return a.call(ipc.MethodSuggestDismiss, ipc.SuggestDismissParams{Tag: tag, Forever: forever}, nil)
+}
+
+func (a *App) SuggestUndismiss(tag string) error {
+	return a.call(ipc.MethodSuggestUndismiss, ipc.SuggestTagParams{Tag: tag}, nil)
+}
+
+// SuggestDismissed lists the tags dismissed with "never".
+func (a *App) SuggestDismissed() ([]string, error) {
+	var out []string
+	err := a.call(ipc.MethodSuggestDismissed, nil, &out)
+	return out, err
+}
+
+// SuggestAccept creates a custom group from a suggestion and returns its key.
+func (a *App) SuggestAccept(p ipc.SuggestAcceptParams) (string, error) {
+	var out string
+	err := a.call(ipc.MethodSuggestAccept, p, &out)
+	return out, err
+}
+
+func (a *App) SuggestSplit(p ipc.SuggestSplitParams) (ipc.SuggestSplitResult, error) {
+	var out ipc.SuggestSplitResult
+	err := a.call(ipc.MethodSuggestSplit, p, &out)
+	return out, err
+}
+
+// GroupsSyncTag adds a geosite group's new tag patterns to its definition.
+func (a *App) GroupsSyncTag(key string) error {
+	return a.call(ipc.MethodGroupsSyncTag, ipc.GroupsSyncTagParams{Key: key}, nil)
+}
+
+// ---- World map ----
+
+func (a *App) MapPaths(group, iface string) (ipc.MapPathsResult, error) {
+	var out ipc.MapPathsResult
+	err := a.call(ipc.MethodMapPaths, ipc.MapPathsParams{Group: group, Iface: iface}, &out)
+	return out, err
+}

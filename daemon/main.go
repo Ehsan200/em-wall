@@ -21,6 +21,7 @@ import (
 
 	"github.com/ehsan/em-wall/core/decision"
 	"github.com/ehsan/em-wall/core/dnsproxy"
+	"github.com/ehsan/em-wall/core/geo"
 	"github.com/ehsan/em-wall/core/ipc"
 	"github.com/ehsan/em-wall/core/netprobe"
 	"github.com/ehsan/em-wall/core/pfctl"
@@ -175,6 +176,7 @@ func main() {
 	// engine must exist before the tunnel is built.
 	connHealth := newConnStats()
 	exits := &exitKeys{} // measured in the background (see the exit-key prober below)
+	setMapExitKeys(exits)
 	proxyTunnel, proxyTunName, proxyFwd := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, routes, exits, log.Default())
 	if proxyTunnel != nil {
 		defer proxyTunnel.Stop()
@@ -212,7 +214,17 @@ func main() {
 	}
 
 	ipcSrv := ipc.NewServer(*sockPath, log.Default())
+	geoDB := geo.Open(geo.Paths{
+		GeoSite:  filepath.Join(*xrayDataDir, "geosite.dat"),
+		GeoIP:    filepath.Join(*xrayDataDir, "geoip.dat"),
+		CityMMDB: filepath.Join(*xrayDataDir, "dbip-city-lite.mmdb"),
+		ASNMMDB:  filepath.Join(*xrayDataDir, "dbip-asn-lite.mmdb"),
+	})
+	sug := newSuggester(geoDB, store)
+	logSink.suggest = sug
+	activeSuggester.Store(sug)
 	deps := &handlerDeps{
+		geoDB:         geoDB,
 		store:         store,
 		proxyStore:    proxyStore,
 		proxyTable:    proxyTable,
@@ -273,6 +285,7 @@ func main() {
 	go liveConns.run(ctx)
 	logSinkDone := make(chan struct{})
 	go func() { defer close(logSinkDone); logSink.run(ctx) }()
+	go sug.run(ctx)
 	// Land the last batch before store.Close. Deferred calls run LIFO, so
 	// cancel here too or this would wait on a ctx not yet cancelled.
 	defer func() { cancel(); <-logSinkDone }()
@@ -355,6 +368,11 @@ func main() {
 	go func() {
 		defer wg.Done()
 		netReset.watchSleep(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deps.runGeoUpdater(ctx)
 	}()
 
 	// Proxy latency prober: ranks multi-outbound route bindings by measured
@@ -700,6 +718,7 @@ type handlerDeps struct {
 	dnsServer  *dnsproxy.Server
 	latency    *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
 	connHealth *connStats               // proxied-connection health window; nil-safe
+	geoDB      *geo.DB                  // geosite/geoip/mmdb readers; never nil once wired
 	proxyTun   string                   // daemon-owned utun name; "" if proxy routing is disabled
 	listenAddr string
 	upstream   string

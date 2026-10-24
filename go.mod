@@ -5,8 +5,10 @@ go 1.26.3
 require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/miekg/dns v1.1.72
+	github.com/oschwald/maxminddb-golang/v2 v2.4.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
+	google.golang.org/protobuf v1.36.11
 	gorm.io/gorm v1.31.1
 	gvisor.dev/gvisor v0.0.0-20260519190036-266ba6c868f3
 )

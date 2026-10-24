@@ -50,6 +50,9 @@ Commands:
   group sync <key>          add only the patterns no rule covers yet
   group enable <key>        enable every rule created from a group
   group disable <key>       disable every rule created from a group
+  geo [status]              geo data files: source, version, next refresh
+  geo update [file]         fetch geo data now (geosite, geoip, city, asn)
+  geo rollback              restore each geo file's previous version
   version                   print the CLI version
 
 Global flags (accepted before or after the command):
@@ -99,6 +102,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return a.cmdRules(rest[1:])
 	case "group", "groups":
 		return a.cmdGroup(rest[1:])
+	case "geo":
+		return a.cmdGeo(rest[1:])
 	case "version":
 		fmt.Fprintln(a.out, version.Version)
 		return exitOK

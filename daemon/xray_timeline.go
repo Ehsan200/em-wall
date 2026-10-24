@@ -596,3 +596,66 @@ func (s *xraySupervisor) noteMasterEdge(master string, demotion bool) {
 		s.logger.Printf("xray pool: master %s %s — carrying nodes: %s; %s", master, what, strings.Join(parts, ", "), swap)
 	}()
 }
+
+// mapCarrierSamples is how many recent samples carriers sums bytes over:
+// two (~20s) so one quiet sample doesn't flip the busiest node.
+const mapCarrierSamples = 2
+
+// carriers returns the member keys of the pool master rides (as owner or
+// alias), busiest first by bytes moved over the last mapCarrierSamples
+// samples; members that moved nothing follow if they carry by role
+// (fallback first, then shortlisted). ok is false when master rides no
+// recorded pool. For the world map's pool hop only — observation, never a
+// routing input.
+func (t *poolTimeline) carriers(master string) (keys []string, ok bool) {
+	if t == nil {
+		return nil, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var h *poolHistory
+	for _, p := range t.pools {
+		for _, m := range p.masters {
+			if strings.EqualFold(m, master) {
+				h = p
+			}
+		}
+	}
+	if h == nil || len(h.samples) == 0 {
+		return nil, h != nil
+	}
+	last := h.samples[len(h.samples)-1]
+	bytes := map[string]int64{}
+	for i := max(0, len(h.samples)-mapCarrierSamples); i < len(h.samples); i++ {
+		for k, c := range h.samples[i].nodes {
+			if c.up+c.down > 0 {
+				bytes[k] += c.up + c.down
+			}
+		}
+	}
+	rank := func(k string) int {
+		switch last.nodes[k].role {
+		case ipc.PoolRoleFallback:
+			return 0
+		case ipc.PoolRoleActive:
+			return 1
+		}
+		return 2
+	}
+	for k, c := range last.nodes {
+		if bytes[k] > 0 || c.role == ipc.PoolRoleFallback || c.role == ipc.PoolRoleActive {
+			keys = append(keys, k)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if bytes[a] != bytes[b] {
+			return bytes[a] > bytes[b]
+		}
+		if rank(a) != rank(b) {
+			return rank(a) < rank(b)
+		}
+		return a < b
+	})
+	return keys, true
+}

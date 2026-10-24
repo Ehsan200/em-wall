@@ -27,6 +27,9 @@ type storeLogSink struct {
 	store   *rules.Store
 	ch      chan rules.LogEntry
 	dropped atomic.Int64
+	// suggest, when set, is offered every name no rule matched (group
+	// suggestions, via Unmatched). Nil-safe.
+	suggest *suggester
 }
 
 func newStoreLogSink(store *rules.Store) *storeLogSink {
@@ -47,6 +50,13 @@ func (s *storeLogSink) Log(name, action, iface string, ruleID int64, clientIP st
 	default:
 		s.dropped.Add(1)
 	}
+}
+
+// Unmatched is told every name the DNS proxy answered without a rule
+// matching (plain allows are never logged, so Log doesn't see them). It
+// feeds group suggestions: a non-blocking channel send, nothing more.
+func (s *storeLogSink) Unmatched(name string) {
+	s.suggest.Offer(name)
 }
 
 // run drains the queue until ctx ends, then writes what is left.

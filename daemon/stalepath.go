@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,11 +52,18 @@ var stalePathTick = time.Second
 // liveConns is the registry of spliced TCP connections, by the upstream
 // (proxy-store name) carrying each. The xray supervisor marks entries whose
 // path changed; the sweeper closes the stale connections that stall.
+//
+// The world map (map.go) reads the same registry: each connection also
+// carries what it is for (flow) and byte counters, sampled into a small
+// rate window — only while the map is being watched.
 type liveConns struct {
 	mu     sync.Mutex
 	conns  map[*trackedConn]struct{}
 	stale  atomic.Int64 // stale connections still open; 0 = sweeper idles
 	logger *log.Logger
+	// watchUntil (unix nanos): the map polled recently, so the sweeper
+	// tick samples rates. Past it, the tick does no per-connection work.
+	watchUntil atomic.Int64
 }
 
 func newLiveConns(logger *log.Logger) *liveConns {
@@ -69,15 +77,34 @@ type trackedConn struct {
 	net.Conn
 	name   string       // proxy-store name of the upstream
 	client net.Conn     // closed together with the upstream
+	flow   connFlow     // what the connection is for; immutable
+	opened int64        // unix nanos at track
 	since  atomic.Int64 // unix nanos of the oldest unanswered write; 0 = none
 	stale  atomic.Bool
 	closed atomic.Bool
+	// up/down count bytes written (client → upstream) and read back. The
+	// only per-packet cost the map adds: one atomic add per Read/Write.
+	up, down atomic.Int64
+	// rate is the sampled window, touched only under liveConns.mu.
+	rate rateWindow
+}
+
+// connFlow is what a tracked connection carries, for the world map.
+type connFlow struct {
+	Host   string     // destination hostname ("" or the IP for IP rules)
+	DestIP netip.Addr // local destination: a FakeIP for proxied names
+	Port   uint16
+	RuleID int64
+	Sent   int64 // opening bytes already forwarded before the splice
 }
 
 func (t *trackedConn) Write(p []byte) (int, error) {
 	n, err := t.Conn.Write(p)
 	if n > 0 {
-		t.since.CompareAndSwap(0, time.Now().UnixNano())
+		t.up.Add(int64(n))
+		if t.since.Load() == 0 {
+			t.since.CompareAndSwap(0, time.Now().UnixNano())
+		}
 	}
 	return n, err
 }
@@ -85,6 +112,7 @@ func (t *trackedConn) Write(p []byte) (int, error) {
 func (t *trackedConn) Read(p []byte) (int, error) {
 	n, err := t.Conn.Read(p)
 	if n > 0 {
+		t.down.Add(int64(n))
 		t.since.Store(0)
 	}
 	return n, err
@@ -111,10 +139,16 @@ func (t *trackedConn) stalledFor(now time.Time) time.Duration {
 // returns the wrapper to splice through plus the func that unregisters it.
 // Nil-safe: a nil registry returns upstream unchanged.
 func (l *liveConns) track(name string, client, upstream net.Conn) (net.Conn, func()) {
+	return l.trackFlow(name, connFlow{}, client, upstream)
+}
+
+// trackFlow is track with the connection's flow recorded for the map.
+func (l *liveConns) trackFlow(name string, flow connFlow, client, upstream net.Conn) (net.Conn, func()) {
 	if l == nil {
 		return upstream, func() {}
 	}
-	t := &trackedConn{Conn: upstream, name: name, client: client}
+	t := &trackedConn{Conn: upstream, name: name, client: client, flow: flow, opened: time.Now().UnixNano()}
+	t.up.Store(flow.Sent)
 	l.mu.Lock()
 	l.conns[t] = struct{}{}
 	l.mu.Unlock()
@@ -178,6 +212,7 @@ func (l *liveConns) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
+			l.sampleRates(now)
 			if n := l.sweep(now); n > 0 && l.logger != nil {
 				l.logger.Printf("proxytun: closed %d stalled connection(s) left on a changed xray path — clients reconnect onto the new one", n)
 			}
@@ -228,4 +263,111 @@ func slotIndexOf(tag string) (int, bool) {
 	}
 	i, err := strconv.Atoi(num)
 	return i, err == nil
+}
+
+// Rate window for the world map.
+//
+// The splice path only adds to two atomic counters. Turning them into
+// bytes/s is done off that path: while the map is being watched (it polls
+// every couple of seconds), the sweeper's one-second tick copies each
+// connection's counters into a small ring, and a rate is the difference
+// across the ring. Unwatched, the tick skips it — a closed Map tab costs
+// nothing per connection.
+
+const (
+	rateSlots = 5 // one-second samples: rates cover the last ~4s
+	// mapWatchTTL keeps sampling on this long after the last map poll.
+	mapWatchTTL = 15 * time.Second
+)
+
+type rateSample struct{ at, up, down int64 }
+
+// rateWindow is a ring of counter samples, oldest overwritten first.
+type rateWindow struct {
+	s    [rateSlots]rateSample
+	next int // where the next sample goes
+	n    int // samples held, ≤ rateSlots
+}
+
+// rateGap: a sample this far past the newest one means sampling was off in
+// between, and the ring restarts rather than average across the gap.
+const rateGap = 3 * time.Second
+
+func (w *rateWindow) add(s rateSample) {
+	if w.n > 0 && s.at-w.s[(w.next-1+rateSlots)%rateSlots].at > int64(rateGap) {
+		w.n = 0
+	}
+	w.s[w.next] = s
+	w.next = (w.next + 1) % rateSlots
+	if w.n < rateSlots {
+		w.n++
+	}
+}
+
+// rates returns bytes/s from the oldest held sample to cur; ok is false
+// with fewer than one sample or no time elapsed.
+func (w *rateWindow) rates(cur rateSample) (up, down float64, ok bool) {
+	if w.n == 0 {
+		return 0, 0, false
+	}
+	oldest := w.s[(w.next-w.n+rateSlots)%rateSlots]
+	dt := float64(cur.at-oldest.at) / float64(time.Second)
+	if dt <= 0 {
+		return 0, 0, false
+	}
+	return float64(max(0, cur.up-oldest.up)) / dt, float64(max(0, cur.down-oldest.down)) / dt, true
+}
+
+// watch notes that the map is reading; sampling stays on for mapWatchTTL.
+func (l *liveConns) watch(now time.Time) {
+	if l != nil {
+		l.watchUntil.Store(now.Add(mapWatchTTL).UnixNano())
+	}
+}
+
+// sampleRates records every open connection's counters while watched.
+func (l *liveConns) sampleRates(now time.Time) {
+	if l == nil || now.UnixNano() > l.watchUntil.Load() {
+		return
+	}
+	at := now.UnixNano()
+	l.mu.Lock()
+	for t := range l.conns {
+		t.rate.add(rateSample{at: at, up: t.up.Load(), down: t.down.Load()})
+	}
+	l.mu.Unlock()
+}
+
+// liveFlow is one open connection as the map sees it.
+type liveFlow struct {
+	name             string // proxy-store name of the upstream
+	flow             connFlow
+	up, down         int64   // bytes since open
+	rateUp, rateDown float64 // bytes/s over the rate window
+}
+
+// flows snapshots every open connection. A connection without samples yet
+// (just opened, or sampling just switched on) is rated by its lifetime
+// average, which for a young connection is close to the truth and for an
+// old one is at least the right order of magnitude for one poll.
+func (l *liveConns) flows(now time.Time) []liveFlow {
+	if l == nil {
+		return nil
+	}
+	at := now.UnixNano()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]liveFlow, 0, len(l.conns))
+	for t := range l.conns {
+		cur := rateSample{at: at, up: t.up.Load(), down: t.down.Load()}
+		f := liveFlow{name: t.name, flow: t.flow, up: cur.up, down: cur.down}
+		var ok bool
+		if f.rateUp, f.rateDown, ok = t.rate.rates(cur); !ok {
+			if age := float64(at-t.opened) / float64(time.Second); age > 0 {
+				f.rateUp, f.rateDown = float64(cur.up)/age, float64(cur.down)/age
+			}
+		}
+		out = append(out, f)
+	}
+	return out
 }

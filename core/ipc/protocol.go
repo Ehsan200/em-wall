@@ -109,6 +109,21 @@ const (
 	// (stable, or nodes dying and returning in waves) before any switching
 	// strategy is tuned against it.
 	MethodHealthPools = "health.pools"
+
+	// Geo data (geosite/geoip .dat + DB-IP .mmdb): status, update, rollback.
+	MethodGeoStatus   = "geo.status"
+	MethodGeoUpdate   = "geo.update"   // fetch now; File "" = every file due or not
+	MethodGeoRollback = "geo.rollback" // restore each file's .bak
+	// Group suggestions from geosite tags seen in DNS traffic.
+	MethodSuggestList      = "suggest.list"
+	MethodSuggestDismiss   = "suggest.dismiss"   // "not now" or "never"
+	MethodSuggestUndismiss = "suggest.undismiss" // drop a "never"
+	MethodSuggestDismissed = "suggest.dismissed" // list "never" tags
+	MethodSuggestAccept    = "suggest.accept"    // create the custom group (no rules)
+	MethodSuggestSplit     = "suggest.split"     // move overlapping patterns out of custom groups
+	MethodGroupsSyncTag    = "groups.sync-tag"   // add a geosite group's TagNew to its definition
+	// World map: live proxied flows with geolocated hops.
+	MethodMapPaths = "map.paths"
 )
 
 // HealthPoolsParams narrows health.pools. Master matches a pool's owner or
@@ -402,6 +417,14 @@ type GroupDTO struct {
 	// drifted, typically because an app update added domains to the curated
 	// list. This is what the UI's "+N new" / Sync affordance keys off.
 	MissingPatterns []string `json:"missingPatterns"`
+	// SourceTag is the geosite tag a custom group was created from; "" for
+	// every other group. TagNew are the tag's patterns the definition lacks
+	// (a newer geosite.dat added them; groups.sync-tag adds them). TagGone
+	// are definition patterns the tag no longer lists — reported, never
+	// removed automatically.
+	SourceTag string   `json:"sourceTag,omitempty"`
+	TagNew    []string `json:"tagNew,omitempty"`
+	TagGone   []string `json:"tagGone,omitempty"`
 }
 
 // DynamicGroupDTO reports one dynamic group's refresh outcome: how many
@@ -425,6 +448,7 @@ type GroupsAddParams struct {
 	Description string   `json:"description"`
 	Patterns    []string `json:"patterns"`
 	Color       string   `json:"color"`
+	SourceTag   string   `json:"sourceTag,omitempty"` // geosite tag, set by suggest.accept
 }
 
 // GroupsUpdateParams edits an existing custom group, matched by Key.
@@ -1010,4 +1034,163 @@ type SystemDNSStatus struct {
 	Upstream          []string            `json:"upstream"`          // current daemon upstream
 	DetectedResolvers []string            `json:"detectedResolvers"` // what scutil sees (excl. loopback)
 	PerService        map[string][]string `json:"perService"`        // current per-service DNS
+}
+
+// ---- Geo data ----
+
+// GeoFileDTO is one geo data file's state.
+type GeoFileDTO struct {
+	File      string `json:"file"`   // "geosite" | "geoip" | "city" | "asn"
+	Source    string `json:"source"` // source key, e.g. "loyalsoldier", "dbip"
+	Present   bool   `json:"present"`
+	Version   string `json:"version"`   // release tag / month, "" if unknown
+	UpdatedAt string `json:"updatedAt"` // RFC 3339, "" if never
+	NextDue   string `json:"nextDue"`   // RFC 3339, "" if auto-update off
+	SizeBytes int64  `json:"sizeBytes"`
+	Entries   int    `json:"entries"`   // tags (dat) or networks (mmdb)
+	HasBackup bool   `json:"hasBackup"` // .bak present → rollback possible
+	LastError string `json:"lastError,omitempty"`
+}
+
+type GeoStatusResult struct {
+	Files []GeoFileDTO `json:"files"`
+	// Settings, mirrored for the Settings panel.
+	GeositeSource string `json:"geositeSource"` // "loyalsoldier" | "chocolate4u" | "v2fly" | "custom"
+	CustomURL     string `json:"customUrl"`     // geosite custom base URL when source = custom
+	AutoUpdate    bool   `json:"autoUpdate"`
+	FetchVia      string `json:"fetchVia"` // "" = direct only, else an Interface ("xrayset:nj") tried after direct fails
+	Updating      bool   `json:"updating"`
+}
+
+type GeoUpdateParams struct {
+	File string `json:"file,omitempty"` // "" = all
+}
+
+// ---- Group suggestions ----
+
+// SuggestionDTO is one geosite tag seen in recent DNS traffic that no group
+// fully covers.
+type SuggestionDTO struct {
+	Tag         string   `json:"tag"`         // "SPOTIFY"
+	DisplayName string   `json:"displayName"` // "Spotify"
+	Patterns    []string `json:"patterns"`    // full translated list (what accept creates)
+	CIDRs       []string `json:"cidrs"`       // same-named geoip tag, may be empty
+	Skipped     int      `json:"skipped"`     // keyword/regexp entries that can't be used
+	SeenNames   []string `json:"seenNames"`   // hostnames actually queried, most recent first (capped)
+	Hits        int      `json:"hits"`
+	LastSeen    string   `json:"lastSeen"` // RFC 3339
+	// Missing are Patterns no stored rule covers yet; a tag only partly
+	// covered by existing groups is suggested as just this part.
+	Missing    []string              `json:"missing"`
+	Collisions []SuggestCollisionDTO `json:"collisions"`
+}
+
+// SuggestCollisionDTO: an existing group already covering some of the tag.
+type SuggestCollisionDTO struct {
+	GroupKey   string   `json:"groupKey"`
+	GroupName  string   `json:"groupName"`
+	Custom     bool     `json:"custom"`     // only custom groups can be split
+	Patterns   []string `json:"patterns"`   // the overlap
+	Interfaces []string `json:"interfaces"` // distinct Interface values of the overlap's rules ("" = block/allow)
+	Actions    []string `json:"actions"`
+}
+
+type SuggestDismissParams struct {
+	Tag     string `json:"tag"`
+	Forever bool   `json:"forever"` // false = "not now" (cooldown)
+}
+
+type SuggestTagParams struct {
+	Tag string `json:"tag"`
+}
+
+// SuggestAcceptParams creates a custom group from a suggestion. Patterns
+// empty = the suggestion's Missing list. No rules are created; the UI
+// applies the group afterwards as with any other.
+type SuggestAcceptParams struct {
+	Tag         string   `json:"tag"`
+	DisplayName string   `json:"displayName,omitempty"`
+	Patterns    []string `json:"patterns,omitempty"`
+	IncludeIPs  bool     `json:"includeIps"`
+}
+
+// SuggestSplitParams moves Patterns out of the listed custom groups'
+// definitions into a new custom group. Rule rows are untouched, so routing
+// does not change. Before carries the old definitions for undo.
+type SuggestSplitParams struct {
+	Tag         string   `json:"tag"`
+	DisplayName string   `json:"displayName"`
+	Patterns    []string `json:"patterns"`
+	FromGroups  []string `json:"fromGroups"`
+}
+
+type SuggestSplitResult struct {
+	NewGroupKey string               `json:"newGroupKey"`
+	Before      []GroupsUpdateParams `json:"before"` // replay via groups.update to undo
+}
+
+// ---- World map ----
+
+// MapPathsParams filters map.paths; empty = everything.
+type MapPathsParams struct {
+	Group string `json:"group,omitempty"` // group key
+	Iface string `json:"iface,omitempty"` // rule Interface, e.g. "xrayset:nj"
+}
+
+// Hop roles, in path order.
+const (
+	MapHopYou    = "you"
+	MapHopPool   = "pool"   // subscription pool node (master entries only)
+	MapHopServer = "server" // the entry's / proxy's own server
+	MapHopExit   = "exit"   // measured exit IP, when it differs from server
+	MapHopDest   = "dest"
+)
+
+type MapHopDTO struct {
+	Role        string  `json:"role"`
+	Label       string  `json:"label"` // entry/node name, hostname
+	Host        string  `json:"host,omitempty"`
+	IP          string  `json:"ip,omitempty"`
+	Country     string  `json:"country"`
+	CountryName string  `json:"countryName"`
+	City        string  `json:"city"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
+	Precision   string  `json:"precision"` // "city" | "country" | "" (unplaced)
+	ASN         uint32  `json:"asn"`
+	Org         string  `json:"org"`
+	Anycast     bool    `json:"anycast"`
+	// Uncertain: the hop is a best guess (e.g. a pool node — xray's
+	// balancer picks per connection; this is the node carrying the most
+	// bytes for the slot right now). Alternatives lists the other carriers.
+	Uncertain    bool     `json:"uncertain"`
+	Alternatives []string `json:"alternatives,omitempty"`
+}
+
+// MapFlowDTO aggregates live proxied connections sharing one path and one
+// group.
+type MapFlowDTO struct {
+	Group      string      `json:"group"` // group key, "" = no group
+	GroupName  string      `json:"groupName"`
+	GroupColor string      `json:"groupColor"`
+	Iface      string      `json:"iface"`    // rule Interface
+	Upstream   string      `json:"upstream"` // member that carries it
+	Hosts      []string    `json:"hosts"`    // destination hostnames (capped)
+	Hops       []MapHopDTO `json:"hops"`
+	Conns      int         `json:"conns"`
+	RateUp     float64     `json:"rateUp"` // bytes/s, last few seconds
+	RateDown   float64     `json:"rateDown"`
+	BytesUp    int64       `json:"bytesUp"` // since the connections opened
+	BytesDown  int64       `json:"bytesDown"`
+}
+
+type MapPathsResult struct {
+	Flows       []MapFlowDTO `json:"flows"`
+	CityData    bool         `json:"cityData"` // false = country centroids only
+	GeneratedAt string       `json:"generatedAt"`
+}
+
+// GroupsSyncTagParams names the geosite-sourced custom group to top up.
+type GroupsSyncTagParams struct {
+	Key string `json:"key"`
 }

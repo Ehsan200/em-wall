@@ -14,6 +14,8 @@ import {
   saveDisplayTimezone, loadDisplayTimezone, fmtTime,
 } from '../timezone';
 import ImportDialog from './ImportDialog.vue';
+import GeoSettings from './GeoSettings.vue';
+import SuggestSettings from './SuggestSettings.vue';
 
 // focusReinstallSeq is bumped by the parent when the user clicks the
 // version-mismatch banner's "Reinstall daemon" button. Each bump scrolls
@@ -409,6 +411,9 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+
+      <GeoSettings />
+      <SuggestSettings />
 
       <!-- Fallback DNS servers -->
       <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">

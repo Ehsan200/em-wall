@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -579,7 +580,10 @@ func (pf *proxyForwarder) handle(conn net.Conn, local, remote *net.TCPAddr) {
 	// conn→upstream is bytes the client sent; upstream→conn is bytes it
 	// received. SpliceCounted reports deltas live so long-lived streams
 	// register on the usage dashboard before they close.
-	tracked, untrack := pf.live.track(used, conn, upstream)
+	destIP, _ := netip.AddrFromSlice(local.IP)
+	tracked, untrack := pf.live.trackFlow(used, connFlow{
+		Host: entry.Hostname, DestIP: destIP.Unmap(), Port: uint16(local.Port), RuleID: entry.RuleID, Sent: int64(sent),
+	}, conn, upstream)
 	defer untrack()
 	res := proxy.SpliceObserved(conn, tracked, proxyTrafficFlushInterval, func(a, b int64) {
 		pf.recordTraffic(entry.Hostname, used, a, b)

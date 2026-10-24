@@ -8,6 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/ehsan/em-wall/core/geo/meta"
 )
 
 // ErrNotPackaged means the embedded resources are missing — the app
@@ -165,10 +168,55 @@ func Install(ctx context.Context) error {
 	if err := extract("resources/geosite.dat", geositePath, 0o644); err != nil {
 		return fmt.Errorf("install: extract geosite: %w", err)
 	}
+	// A reinstall must not downgrade a .dat the daemon has since
+	// downloaded: an empty path makes the script leave that file alone.
+	keepSite, keepIP := keepDownloadedGeo(XrayDataDir, bundleTime())
+	if keepSite {
+		geositePath = ""
+	}
+	if keepIP {
+		geoipPath = ""
+	}
 	if err := os.WriteFile(scriptPath, []byte(installScript(binPath, cliPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath)), 0o700); err != nil {
 		return fmt.Errorf("install: write script: %w", err)
 	}
 	return runWithAdminPrivileges(ctx, scriptPath)
+}
+
+// keepDownloadedGeo reports, for geosite.dat and geoip.dat, whether the
+// installed copy is a download newer than the bundled one. geo.meta (the
+// daemon's updater record) says where each file came from and when; no
+// meta, a "bundled" entry, or a missing file means the bundle goes in.
+func keepDownloadedGeo(dataDir string, bundled time.Time) (site, ip bool) {
+	m, err := meta.Read(dataDir)
+	if err != nil {
+		return false, false
+	}
+	keep := func(key string) bool {
+		e, ok := m[key]
+		if !ok || e.Source == "" || e.Source == "bundled" || e.UpdatedAt.IsZero() {
+			return false
+		}
+		if _, err := os.Stat(filepath.Join(dataDir, meta.FileNames[key])); err != nil {
+			return false
+		}
+		return e.UpdatedAt.After(bundled)
+	}
+	return keep(meta.GeoSite), keep(meta.GeoIP)
+}
+
+// bundleTime is when the embedded resources were staged: the app
+// binary's build time. Zero (keep any download) if it can't be read.
+func bundleTime() time.Time {
+	exe, err := os.Executable()
+	if err != nil {
+		return time.Time{}
+	}
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
 }
 
 // extract reads name from the embedded FS and writes it to dst with
@@ -209,11 +257,19 @@ func Uninstall(ctx context.Context, purge bool) error {
 // script `install`s them into their final locations, patches
 // /etc/pf.conf to load the anchor, then bootstraps the LaunchDaemon.
 // Idempotent — safe to re-run. cliPath may be empty, in which case the
-// CLI is skipped.
+// CLI is skipped; likewise an empty geoipPath / geositePath keeps the
+// installed file (a newer download — see keepDownloadedGeo).
 func installScript(binPath, cliPath, plistPath, anchorPath, xrayBinPath, geoipPath, geositePath string) string {
 	cliBlock := ""
 	if cliPath != "" {
 		cliBlock = fmt.Sprintf("install -m 0755 %q %q\n", cliPath, CLIBinaryDest)
+	}
+	geoBlock := ""
+	if geoipPath != "" {
+		geoBlock += fmt.Sprintf("install -m 0644 %q \"$XRAY_GEOIP\"\n", geoipPath)
+	}
+	if geositePath != "" {
+		geoBlock += fmt.Sprintf("install -m 0644 %q \"$XRAY_GEOSITE\"\n", geositePath)
 	}
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
@@ -236,9 +292,7 @@ mkdir -p "$DB_DIR" "$LOG_DIR" "$XRAY_DATA_DIR" "$XRAY_RUNTIME_DIR"
 chmod 0755 "$DB_DIR" "$LOG_DIR" "$XRAY_DATA_DIR" "$XRAY_RUNTIME_DIR"
 
 install -m 0755 %q "$XRAY_BIN_DST"
-install -m 0644 %q "$XRAY_GEOIP"
-install -m 0644 %q "$XRAY_GEOSITE"
-
+%s
 mkdir -p "$(dirname "$ANCHOR_FILE")"
 [ -e "$ANCHOR_FILE" ] || install -m 0644 %q "$ANCHOR_FILE"
 chmod 0644 "$ANCHOR_FILE"
@@ -267,7 +321,7 @@ launchctl kickstart -k system/com.em-wall.daemon
 `,
 		DaemonBinaryDest, PlistDest, AnchorFile, PFConf, LogDir, DBDir,
 		XrayBinaryDest, XrayDataDir, XrayGeoIPFile, XrayGeoSite, XrayRuntimeDir,
-		binPath, cliBlock, xrayBinPath, geoipPath, geositePath, anchorPath, plistPath,
+		binPath, cliBlock, xrayBinPath, geoBlock, anchorPath, plistPath,
 	)
 }
 

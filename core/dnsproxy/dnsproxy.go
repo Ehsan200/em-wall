@@ -327,7 +327,11 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 			return
 		}
 		_ = w.WriteMsg(resp)
-		// Plain allows are not logged per user spec.
+		// Plain allows are not logged per user spec, but a sink may still
+		// want the names no rule matched (the daemon's group suggester).
+		if u, ok := s.cfg.Logs.(interface{ Unmatched(name string) }); ok && d.RuleID == 0 {
+			u.Unmatched(name)
+		}
 	}
 }
 

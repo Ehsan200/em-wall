@@ -21,14 +21,19 @@ const CustomGroupPrefix = "custom:"
 // a JSON array via GORM's json serializer. Color is an optional brand-accent
 // hex used by the UI badge.
 type CustomGroup struct {
-	ID          int64     `gorm:"primaryKey;column:id"`
-	Key         string    `gorm:"not null;uniqueIndex;column:key"`
-	DisplayName string    `gorm:"not null;column:display_name"`
-	Description string    `gorm:"not null;default:'';column:description"`
-	Patterns    []string  `gorm:"column:patterns;serializer:json"`
-	Color       string    `gorm:"not null;default:'';column:color"`
-	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt   time.Time `gorm:"column:updated_at;autoUpdateTime"`
+	ID          int64    `gorm:"primaryKey;column:id"`
+	Key         string   `gorm:"not null;uniqueIndex;column:key"`
+	DisplayName string   `gorm:"not null;column:display_name"`
+	Description string   `gorm:"not null;default:'';column:description"`
+	Patterns    []string `gorm:"column:patterns;serializer:json"`
+	Color       string   `gorm:"not null;default:'';column:color"`
+	// SourceTag is the geosite tag the group was created from (group
+	// suggestions); "" for every other group. Nullable column added by
+	// AutoMigrate — rows written before it existed read back as "".
+	// Set only at creation: UpdateCustomGroup never writes it.
+	SourceTag string    `gorm:"column:source_tag"`
+	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
 func (CustomGroup) TableName() string { return "custom_groups" }
@@ -77,6 +82,7 @@ func canonGroupKey(key string) string {
 // canonicalises the key (deriving one from the display name when empty).
 func sanitizeGroup(g *CustomGroup) error {
 	g.DisplayName = strings.TrimSpace(g.DisplayName)
+	g.SourceTag = strings.ToUpper(strings.TrimSpace(g.SourceTag))
 	if g.DisplayName == "" {
 		return ErrEmptyGroupName
 	}

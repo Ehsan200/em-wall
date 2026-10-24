@@ -33,6 +33,7 @@ func registerCustomGroupHandlers(s *ipc.Server, d *handlerDeps) {
 			Description: p.Description,
 			Patterns:    p.Patterns,
 			Color:       p.Color,
+			SourceTag:   p.SourceTag,
 		})
 		if err != nil {
 			return nil, err
@@ -373,6 +374,7 @@ func customGroupToDTO(g rules.CustomGroup) ipc.GroupDTO {
 		Color:       g.Color,
 		Category:    groups.CategoryCustomKey,
 		Custom:      true,
+		SourceTag:   g.SourceTag,
 	}
 }
 

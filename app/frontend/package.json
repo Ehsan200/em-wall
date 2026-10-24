@@ -10,12 +10,19 @@
   },
   "dependencies": {
     "chart.js": "^4.5.1",
+    "d3-geo": "3.1.1",
     "monaco-editor": "^0.55.1",
+    "topojson-client": "3.1.0",
     "vue": "^3.2.37",
-    "vue-chartjs": "^5.3.3"
+    "vue-chartjs": "^5.3.3",
+    "world-atlas": "2.0.2"
   },
   "devDependencies": {
     "@babel/types": "^7.18.10",
+    "@types/d3-geo": "3.1.1",
+    "@types/geojson": "7946.0.16",
+    "@types/topojson-client": "3.1.5",
+    "@types/topojson-specification": "1.0.5",
     "@vitejs/plugin-vue": "^3.0.3",
     "typescript": "^4.6.4",
     "vite": "^3.0.7",

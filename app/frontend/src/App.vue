@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, defineAsyncComponent } from 'vue';
 import { startPoll } from './poll';
 import StatusBar from './components/StatusBar.vue';
 import RulesPanel from './components/RulesPanel.vue';
@@ -7,6 +7,8 @@ import LogsPanel from './components/LogsPanel.vue';
 import DashboardPanel from './components/DashboardPanel.vue';
 import HealthPanel from './components/HealthPanel.vue';
 import NetworkPanel from './components/NetworkPanel.vue';
+// Lazy: d3-geo and the bundled world atlas load only when the Map tab opens.
+const MapPanel = defineAsyncComponent(() => import('./components/MapPanel.vue'));
 import ProxiesPanel from './components/ProxiesPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
@@ -16,7 +18,7 @@ import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime'
 import type { ipc, installer, main } from '../wailsjs/go/models';
 import { loadDisplayTimezone } from './timezone';
 
-type Tab = 'rules' | 'logs' | 'usage' | 'health' | 'network' | 'proxies' | 'xray' | 'settings';
+type Tab = 'rules' | 'logs' | 'usage' | 'health' | 'map' | 'network' | 'proxies' | 'xray' | 'settings';
 const tab = ref<Tab>('rules');
 const status = ref<ipc.StatusResult | null>(null);
 const error = ref<string>('');
@@ -290,6 +292,7 @@ onUnmounted(() => {
       <button :class="{active: tab==='logs'}"     @click="tab='logs'">Logs</button>
       <button :class="{active: tab==='usage'}"    @click="tab='usage'">Usage</button>
       <button :class="{active: tab==='health'}"   @click="tab='health'">Health</button>
+      <button :class="{active: tab==='map'}"      @click="tab='map'">Map</button>
       <button :class="{active: tab==='network'}"  @click="tab='network'">Network</button>
       <button :class="{active: tab==='proxies'}"  @click="tab='proxies'">Proxies</button>
       <button :class="{active: tab==='xray'}"     @click="tab='xray'">Xray</button>
@@ -300,6 +303,7 @@ onUnmounted(() => {
     <LogsPanel     v-else-if="tab==='logs'" />
     <DashboardPanel v-else-if="tab==='usage'" />
     <HealthPanel   v-else-if="tab==='health'" />
+    <MapPanel      v-else-if="tab==='map'" />
     <NetworkPanel  v-else-if="tab==='network'" />
     <ProxiesPanel  v-else-if="tab==='proxies'" />
     <XrayPanel     v-else-if="tab==='xray'" />
