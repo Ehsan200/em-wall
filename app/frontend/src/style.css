@@ -132,30 +132,56 @@ th {
   border-right: 1px solid var(--border);
   background: var(--bg);
 }
-.nav-group + .nav-group { margin-top: 14px; }
+/* Section titles sit a clear step below the items: smaller, darker, and
+   set off by a hairline, so the eye reads them as labels, not links. */
+.nav-group + .nav-group {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
 .nav-title {
-  padding: 0 10px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  padding: 0 10px 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--text-dim);
+  color: #5e5e72;
 }
 .sidebar .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 9px;
   width: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px;
   margin: 1px 0;
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-dim);
+  color: #c4c4d0;
+  font-weight: 500;
   text-align: left;
 }
+.sidebar .nav-item .nav-icon { width: 15px; height: 15px; flex-shrink: 0; color: var(--text-dim); }
+.sidebar .nav-item .nav-label { flex: 1; }
 .sidebar .nav-item:hover { background: var(--panel); color: var(--text); }
-.sidebar .nav-item.active { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.sidebar .nav-item:hover .nav-icon { color: var(--text); }
+.sidebar .nav-item.active {
+  background: rgba(110, 168, 255, 0.12);
+  color: var(--text);
+  font-weight: 600;
+}
+.sidebar .nav-item.active .nav-icon { color: var(--accent); }
+.sidebar .nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
 .nav-badge {
   min-width: 18px;
   padding: 0 5px;

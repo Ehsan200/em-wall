@@ -31,6 +31,19 @@ const NAV: { title: string; items: { tab: Tab; label: string }[] }[] = [
   ] },
   { title: 'System', items: [{ tab: 'network', label: 'Network' }, { tab: 'settings', label: 'Settings' }] },
 ];
+// One stroke path per tab (24×24 grid), so items scan by shape as well as name.
+const NAV_ICONS: Record<Tab, string> = {
+  rules: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+  suggest: 'M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V16h8v-1.3A7 7 0 0 0 12 2z',
+  xray: 'M12 2 3 7v10l9 5 9-5V7zM3 7l9 5 9-5M12 12v10',
+  proxies: 'M5 12h14M13 6l6 6-6 6M5 6v12',
+  map: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20',
+  usage: 'M3 3v18h18M7 16v-5M12 16V8M17 16v-8',
+  health: 'M22 12h-4l-3 9L9 3l-3 9H2',
+  logs: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h8',
+  network: 'M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M2 9a15 15 0 0 1 20 0M12 20h.01',
+  settings: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6',
+};
 const TAB_KEY = 'em-wall.tab';
 function readTab(): Tab {
   try {
@@ -334,7 +347,11 @@ onUnmounted(() => {
           <div class="nav-title">{{ g.title }}</div>
           <button v-for="i in g.items" :key="i.tab" class="nav-item" :class="{ active: tab === i.tab }"
                   :aria-current="tab === i.tab ? 'page' : undefined" @click="tab = i.tab">
-            <span>{{ i.label }}</span>
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path :d="NAV_ICONS[i.tab]" />
+            </svg>
+            <span class="nav-label">{{ i.label }}</span>
             <span v-if="i.tab === 'suggest' && suggestCount > 0" class="nav-badge">{{ suggestCount }}</span>
           </button>
         </div>

@@ -28,6 +28,12 @@ const selectedTag = ref('');
 const error = ref('');
 const busy = ref(false);
 const includeIPs = ref<Record<string, boolean>>({});
+// Past this many IP ranges, "Include IP ranges" asks twice: every range
+// becomes its own rule and, once routed, its own system route — geoip:GOOGLE
+// alone is ~8.5k ranges, enough to bog down the daemon, the host's routing
+// table and the Rules page.
+const LARGE_IP_COUNT = 200;
+const confirmIPs = ref(''); // tag whose large IP include awaits a second click
 const showDomains = ref(false);
 const splitOpen = ref(''); // collision group key whose split preview is open
 const lastSplit = ref<{ name: string; moved: number; result: ipc.SuggestSplitResult } | null>(null);
@@ -52,7 +58,12 @@ let stop: (() => void) | null = null;
 onMounted(() => { load(); stop = startPoll(load, 60_000); });
 onUnmounted(() => stop?.());
 
-watch(selectedTag, () => { showDomains.value = false; splitOpen.value = ''; });
+watch(selectedTag, () => { showDomains.value = false; splitOpen.value = ''; confirmIPs.value = ''; });
+watch(includeIPs, () => { confirmIPs.value = ''; }, { deep: true });
+
+function largeIPInclude(s: ipc.SuggestionDTO): boolean {
+  return !!includeIPs.value[s.tag] && (s.cidrs || []).length > LARGE_IP_COUNT;
+}
 
 // ---- list ----
 
@@ -145,6 +156,11 @@ function collisionVerb(c: ipc.SuggestCollisionDTO): string {
 // ---- actions ----
 
 async function create(s: ipc.SuggestionDTO, preset: Preset) {
+  if (largeIPInclude(s) && confirmIPs.value !== s.tag) {
+    confirmIPs.value = s.tag;
+    return;
+  }
+  confirmIPs.value = '';
   busy.value = true;
   try {
     const cidrs = s.cidrs || [];
@@ -354,16 +370,29 @@ const DOMAIN_PREVIEW = 200;
           <input type="checkbox" v-model="includeIPs[selected.tag]" />
           <span>Include {{ plural(selected.cidrs.length, 'IP range') }}</span>
         </label>
+        <div v-if="!selected.builtin && largeIPInclude(selected)" class="ip-warn">
+          <strong>This adds {{ plural(selected.cidrs.length, 'IP rule') }}.</strong>
+          Each routed range installs its own system route, so this many will slow
+          down em-wall, your Mac's networking and the Rules page. The domain patterns
+          usually cover the service on their own — only include IP ranges if an app
+          connects by raw IP.
+        </div>
 
         <div class="row actions">
           <button v-if="selected.builtin" class="primary" :disabled="busy" @click="applyBuiltin(selected)"
                   :title="`Open the built-in ${selected.builtinName} group on the Rules page`">
             Apply {{ selected.builtinName }}
           </button>
+          <button v-else-if="confirmIPs === selected.tag" class="primary danger-fill" :disabled="busy"
+                  @click="create(selected, null)">
+            <span v-if="busy" class="spinner"></span>Create anyway ({{ plural(selected.cidrs.length, 'IP rule') }})
+          </button>
           <button v-else class="primary" :disabled="busy" @click="create(selected, null)"
                   title="Create a custom group with these domains, then choose where it goes">
             <span v-if="busy" class="spinner"></span>Create group
           </button>
+          <button v-if="confirmIPs === selected.tag" :disabled="busy"
+                  @click="includeIPs[selected.tag] = false">Domains only</button>
           <button :disabled="busy" title="Hide for 7 days" @click="dismiss(selected, false)">Not now</button>
           <span style="flex: 1"></span>
           <button v-if="selected.builtin" class="quiet" :disabled="busy" @click="create(selected, null)"
@@ -440,6 +469,17 @@ const DOMAIN_PREVIEW = 200;
   padding-top: 6px; border-top: 1px solid var(--border);
 }
 .ip-opt { gap: 6px; align-items: center; font-size: 12px; cursor: pointer; }
+.ip-warn {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 200, 87, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 200, 87, 0.08);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ip-warn strong { color: var(--warn); }
+button.danger-fill { background: var(--danger); border-color: var(--danger); }
 .actions { gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 12px; }
 button.small { padding: 3px 9px; font-size: 11px; }
 button.quiet {
