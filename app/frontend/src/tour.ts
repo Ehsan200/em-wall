@@ -724,7 +724,9 @@ export function sectionRun(id: string): TourRun | null {
   // The closing card rides on the last section.
   return { kind: 'section', section: sec, next, steps: next ? sec.steps : [...sec.steps, FINISH] };
 }
-export function sectionPosition(sec: TourSection): number { return SECTIONS.indexOf(sec) + 1; }
+// By id: the section reaching the component is Vue's reactive proxy, which
+// indexOf would never find in the raw list.
+export function sectionPosition(sec: TourSection): number { return SECTIONS.findIndex((s) => s.id === sec.id) + 1; }
 
 // Two separate records. `seen`: steps the user has been shown — drives the
 // ✓ and progress per section. `known`: steps that existed when the user

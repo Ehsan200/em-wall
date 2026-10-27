@@ -61,15 +61,22 @@ function findTarget(): Element | null {
   return null;
 }
 
-// The element scrolled into view for this step, so the periodic re-measure
-// doesn't fight the user's (or the page's) scrolling.
+// The element last scrolled to. A new target is always scrolled to; the
+// same one again only once it has left the window — pages finish loading
+// after the step opens (Settings' cards arrive over IPC) and push it down.
+// The scrim swallows the wheel, so this can't fight the user's scrolling.
 let scrolledFor: Element | null = null;
 function measure() {
   const el = findTarget();
   if (!el) { box.value = null; return; }
-  if (el !== scrolledFor) {
+  const r0 = el.getBoundingClientRect();
+  const inView = r0.top >= 0 && r0.top < window.innerHeight - 60;
+  if (el !== scrolledFor || !inView) {
     scrolledFor = el;
-    el.scrollIntoView({ block: 'nearest' });
+    // Room beside it (sidebar items): just bring it into view. A wide
+    // target in the page: put it near the top so the card fits below.
+    const beside = r0.right + PAD + GAP + cardW.value <= window.innerWidth - EDGE;
+    el.scrollIntoView({ block: beside ? 'nearest' : 'start' });
   }
   const r = el.getBoundingClientRect();
   // Clip to the window: a long list must not push the outline off-screen.
