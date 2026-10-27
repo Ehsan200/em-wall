@@ -369,7 +369,7 @@ onUnmounted(() => stopPoll?.());
       DNS-only and interface-routed traffic does not pass through the daemon and can't be measured.
     </div>
 
-    <div class="toolbar">
+    <div class="toolbar" data-tour="usage-toolbar">
       <div class="ctl">
         <span class="ctl-label">Group by</span>
         <div class="row" style="gap: 0">

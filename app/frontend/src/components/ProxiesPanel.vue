@@ -205,7 +205,7 @@ defineExpose({ refresh });
 
 <template>
   <div class="panel">
-  <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+  <div data-tour="proxies-list" class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
     <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px">
       <div class="col" style="gap: 4px; flex: 1">
         <strong>Proxies</strong>

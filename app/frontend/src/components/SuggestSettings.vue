@@ -60,7 +60,7 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+  <div data-tour="settings-suggest" class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
     <label class="row" style="justify-content: space-between; gap: 16px">
       <div class="col" style="gap: 4px">
         <strong>Group suggestions</strong>

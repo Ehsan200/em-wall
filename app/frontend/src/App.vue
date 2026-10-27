@@ -14,12 +14,13 @@ import SuggestionsPanel from './components/SuggestionsPanel.vue';
 import XrayPanel from './components/XrayPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
+import AppTour from './components/AppTour.vue';
+import TourMenu from './components/TourMenu.vue';
+import { autoRun, markSeen, sectionRun, unseenSteps, type Tab, type TourRun } from './tour';
 import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, CancelUpdate, PublicIP, SuggestList } from '../wailsjs/go/main/App';
 import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
 import { loadDisplayTimezone } from './timezone';
-
-type Tab = 'rules' | 'suggest' | 'logs' | 'usage' | 'health' | 'map' | 'network' | 'proxies' | 'xray' | 'settings';
 
 // Sidebar, grouped by job. Order here is the order on screen.
 const NAV: { title: string; items: { tab: Tab; label: string }[] }[] = [
@@ -54,6 +55,38 @@ function readTab(): Tab {
 }
 const tab = ref<Tab>(readTab());
 watch(tab, (t) => { try { localStorage.setItem(TAB_KEY, t); } catch { /* ignore */ } });
+
+// Guided tour. The first time the main UI shows (right after install, not
+// over the install gate) the full tour plays; after an update that added
+// steps, What's new plays instead. The sidebar's Tour menu starts any run.
+// Finishing or skipping a run marks its steps seen; the tab is put back.
+const tourRun = ref<TourRun | null>(null);
+const tourMenuOpen = ref(false);
+// Bumped on every markSeen so the menu's and button's "new" counts
+// recompute — the seen set lives in localStorage, outside Vue.
+const tourSeenSeq = ref(0);
+const tourUnseen = computed(() => (tourSeenSeq.value, unseenSteps().length));
+let tabBeforeTour: Tab | null = null;
+function startTour(run: TourRun) {
+  tourMenuOpen.value = false;
+  if (!tourRun.value) tabBeforeTour = tab.value;
+  tourRun.value = run;
+}
+function finishRun() {
+  if (tourRun.value) markSeen(tourRun.value.steps);
+  tourSeenSeq.value++;
+}
+function closeTour() {
+  finishRun();
+  tourRun.value = null;
+  if (tabBeforeTour) tab.value = tabBeforeTour;
+  tabBeforeTour = null;
+}
+function continueTour(sectionId: string) {
+  finishRun();
+  const next = sectionRun(sectionId);
+  if (next) tourRun.value = next; else closeTour();
+}
 
 // Suggestions badge. The page reports its own count while open; otherwise
 // a slow poll keeps the badge roughly current.
@@ -214,6 +247,12 @@ const showInstallGate = computed(() =>
   packaged.value && !reinstalling.value &&
   (!install.value || !install.value.daemonRunning || !install.value.binaryPresent || !install.value.plistPresent)
 );
+const showMain = computed(() => booted.value && !showInstallGate.value);
+watch(showMain, (m) => {
+  if (!m || tourRun.value) return;
+  const run = autoRun();
+  if (run) startTour(run);
+}, { immediate: true });
 
 async function refresh() {
   // installStatus is local to the UI process — never fails.
@@ -343,10 +382,10 @@ onUnmounted(() => {
   <template v-else>
     <div class="shell">
       <nav class="sidebar" aria-label="Sections">
-        <div v-for="g in NAV" :key="g.title" class="nav-group">
+        <div v-for="g in NAV" :key="g.title" class="nav-group" :data-tour="'group-' + g.title">
           <div class="nav-title">{{ g.title }}</div>
           <button v-for="i in g.items" :key="i.tab" class="nav-item" :class="{ active: tab === i.tab }"
-                  :aria-current="tab === i.tab ? 'page' : undefined" @click="tab = i.tab">
+                  :aria-current="tab === i.tab ? 'page' : undefined" :data-tour="'nav-' + i.tab" @click="tab = i.tab">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path :d="NAV_ICONS[i.tab]" />
@@ -355,6 +394,15 @@ onUnmounted(() => {
             <span v-if="i.tab === 'suggest' && suggestCount > 0" class="nav-badge">{{ suggestCount }}</span>
           </button>
         </div>
+        <button class="nav-item nav-foot" :class="{ active: tourMenuOpen }" title="Guided tours of the app"
+                @click="tourMenuOpen = !tourMenuOpen">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM16.2 7.8l-2.1 6.3-6.3 2.1 2.1-6.3z" />
+          </svg>
+          <span class="nav-label">Tour</span>
+          <span v-if="tourUnseen > 0" class="nav-badge" title="New since your last tour">{{ tourUnseen }}</span>
+        </button>
       </nav>
 
       <main class="content">
@@ -375,5 +423,7 @@ onUnmounted(() => {
                    @reinstalling="(v: boolean) => reinstalling = v" />
       </main>
     </div>
+    <TourMenu v-if="tourMenuOpen" :seenSeq="tourSeenSeq" @pick="startTour" @close="tourMenuOpen = false" />
+    <AppTour :run="tourRun" @close="closeTour" @continue="continueTour" @navigate="(t) => { if (t) tab = t; }" />
   </template>
 </template>

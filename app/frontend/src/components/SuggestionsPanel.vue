@@ -268,14 +268,14 @@ const DOMAIN_PREVIEW = 200;
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <div v-if="!items.length" class="empty">
+    <div v-if="!items.length" class="empty" data-tour="suggest-list">
       <strong>No suggestions right now</strong>
       <span class="muted">
         When you keep using a site a geosite list knows and no rule covers, it shows up here as a ready-made group.
       </span>
     </div>
 
-    <div v-else class="md">
+    <div v-else class="md" data-tour="suggest-list">
       <!-- master -->
       <div ref="listEl" class="list" role="listbox" tabindex="0" aria-label="Suggestions"
            :aria-activedescendant="selectedTag ? `sg-${selectedTag}` : undefined"

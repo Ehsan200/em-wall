@@ -1218,7 +1218,7 @@ onUnmounted(() => stopLivePoll?.());
     <!-- Search box up top: drives both the quick-add cards below and
          the rules sections further down. Lazy substring match on group
          name/description/patterns and rule pattern. -->
-    <div class="row search-row" style="gap: 8px; margin-bottom: 10px">
+    <div class="row search-row" style="gap: 8px; margin-bottom: 10px" data-tour="rules-search">
       <input v-model="search" type="search"
              placeholder="Search rules and groups (e.g. docker, anthropic, *.openai.com)"
              style="flex: 1" />
@@ -1232,7 +1232,7 @@ onUnmounted(() => stopLivePoll?.());
     </div>
 
     <!-- Quick add from a known service group -->
-    <div class="groups-bar">
+    <div class="groups-bar" data-tour="rules-quick">
       <div class="muted" style="font-size: 11px; margin-bottom: 8px">
         Quick add — one click creates rules for every domain of a service:
       </div>
@@ -1263,7 +1263,7 @@ onUnmounted(() => stopLivePoll?.());
     </div>
 
     <!-- Custom (user-created) groups: same one-click apply, plus edit/delete -->
-    <div class="groups-bar">
+    <div class="groups-bar" data-tour="rules-custom">
       <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 8px">
         <span class="muted" style="font-size: 11px">Your custom groups — define your own bundle of patterns:</span>
         <button @click="openNewGroup">+ New group</button>
@@ -1381,7 +1381,7 @@ onUnmounted(() => stopLivePoll?.());
       </div>
     </div>
 
-    <div class="add-form">
+    <div class="add-form" data-tour="rules-add">
       <div class="row" style="gap: 8px">
         <input v-model="draft.pattern" placeholder="Pattern (e.g. *.bad.com or 1.2.3.0/24)" style="flex: 1" @keyup.enter="add" />
         <SearchSelect v-model="draft.action" :options="ACTION_OPTIONS" style="width: 100px" />
@@ -1543,7 +1543,7 @@ onUnmounted(() => stopLivePoll?.());
 
     <!-- Drift banner: groups whose shipped domain list has grown past the
          rules created from it (typically after an app update). -->
-    <div v-if="driftedGroups.length" class="drift-banner">
+    <div v-if="driftedGroups.length" class="drift-banner" data-tour="rules-sync">
       <span class="drift-dot">↑</span>
       <span style="flex: 1">
         <strong>{{ driftedGroups.length }}</strong>
@@ -1578,7 +1578,7 @@ onUnmounted(() => stopLivePoll?.());
     </div>
 
     <div v-for="sec in sections" :key="sec.group?.key || '__ungrouped__'"
-         class="rule-section">
+         class="rule-section" data-tour="rules-list">
       <!-- Section header -->
       <div class="section-header">
         <!-- Tri-state section checkbox: ticks every rule in this

@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,12 +14,10 @@ import (
 	"app/internal/installer"
 
 	"github.com/ehsan/em-wall/core/ipc"
+	"github.com/ehsan/em-wall/core/update"
 	"github.com/ehsan/em-wall/core/version"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
-
-// releasesAPI is the GitHub Releases endpoint for this project.
-const releasesAPI = "https://api.github.com/repos/ehsan200/em-wall/releases/latest"
 
 // App is the Wails-bound surface. Every public method is callable from
 // the Vue frontend via the generated `wailsjs/go/main/App` bindings.
@@ -778,50 +773,22 @@ func (a *App) CheckForUpdate() UpdateInfo {
 	if current == "" || current == "dev" {
 		return UpdateInfo{}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesAPI, nil)
-	if err != nil {
+	release, err := update.Latest(context.Background(), current)
+	if err != nil || !update.Newer(release.Tag, current) {
 		return UpdateInfo{}
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "em-wall/"+current)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return UpdateInfo{}
-	}
-	defer resp.Body.Close()
-	var release struct {
-		TagName string `json:"tag_name"`
-		HTMLURL string `json:"html_url"`
-		Assets  []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-			Size               int64  `json:"size"`
-			Digest             string `json:"digest"` // "sha256:<hex>" on recent releases
-		} `json:"assets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return UpdateInfo{}
-	}
-	if !semverNewer(release.TagName, current) {
-		return UpdateInfo{}
-	}
-	info := UpdateInfo{HasUpdate: true, Version: release.TagName, URL: release.HTMLURL}
-	for _, asset := range release.Assets {
-		if strings.HasSuffix(strings.ToLower(asset.Name), ".dmg") {
-			t := updateTarget{
-				Version: release.TagName,
-				URL:     asset.BrowserDownloadURL,
-				Size:    asset.Size,
-				Digest:  asset.Digest,
-			}
-			a.rememberUpdateTarget(t)
-			info.DownloadURL = t.URL
-			info.Size = t.Size
-			info.Downloaded = cachedUpdateBytes(t)
-			break
+	info := UpdateInfo{HasUpdate: true, Version: release.Tag, URL: release.URL}
+	if asset, ok := release.DMG(); ok {
+		t := updateTarget{
+			Version: release.Tag,
+			URL:     asset.URL,
+			Size:    asset.Size,
+			Digest:  asset.Digest,
 		}
+		a.rememberUpdateTarget(t)
+		info.DownloadURL = t.URL
+		info.Size = t.Size
+		info.Downloaded = cachedUpdateBytes(t)
 	}
 	return info
 }
@@ -888,31 +855,6 @@ func (a *App) CancelUpdate() {
 	if cancel != nil {
 		cancel()
 	}
-}
-
-// semverNewer reports whether latest is a higher version than current.
-// Both strings may optionally start with "v". Non-numeric segments are
-// treated as 0, so malformed tags lose gracefully instead of crashing.
-func semverNewer(latest, current string) bool {
-	trim := func(s string) string { return strings.TrimPrefix(s, "v") }
-	lp := strings.SplitN(trim(latest), ".", 3)
-	cp := strings.SplitN(trim(current), ".", 3)
-	for i := 0; i < 3; i++ {
-		lv, cv := 0, 0
-		if i < len(lp) {
-			lv, _ = strconv.Atoi(lp[i])
-		}
-		if i < len(cp) {
-			cv, _ = strconv.Atoi(cp[i])
-		}
-		if lv > cv {
-			return true
-		}
-		if lv < cv {
-			return false
-		}
-	}
-	return false
 }
 
 // WaitForDaemon polls until the daemon answers Status() or the

@@ -85,7 +85,7 @@ onUnmounted(() => stopPoll?.());
 </script>
 
 <template>
-  <section class="health">
+  <section class="health" data-tour="health-conn">
     <div class="head">
       <h3>Connection health</h3>
       <span class="muted">last {{ Math.round((stats?.windowSec ?? 900) / 60) }} min · proxied traffic</span>

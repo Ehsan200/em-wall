@@ -159,7 +159,7 @@ onUnmounted(() => {
 
 <template>
   <div class="panel map-panel">
-    <div class="head">
+    <div class="head" data-tour="map-head">
       <h2>Map</h2>
       <span v-if="mock" class="mock-pill" title="Dev build showing sample data (map/mock.ts)">sample data</span>
       <div class="filters">

@@ -77,6 +77,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			UpstreamDNS:       d.upstream,
 			ListenAddr:        d.listenAddr,
 			RuleCount:         len(list),
+			UpdateAvailable:   d.updates.Latest(),
 		}, nil
 	})
 

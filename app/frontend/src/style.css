@@ -127,6 +127,8 @@ th {
 .sidebar {
   width: 168px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   padding: 10px 8px;
   border-right: 1px solid var(--border);
@@ -181,6 +183,12 @@ th {
   width: 3px;
   border-radius: 0 2px 2px 0;
   background: var(--accent);
+}
+/* Pinned to the bottom of the sidebar, under the last group. */
+.sidebar .nav-item.nav-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  color: var(--text-dim);
 }
 .nav-badge {
   min-width: 18px;

@@ -40,6 +40,9 @@ func (a *app) cmdStatus(args []string) int {
 		{"rules", strconv.Itoa(st.RuleCount)},
 		{"block encrypted dns", yesNo(st.BlockEncryptedDNS)},
 	})
+	if st.UpdateAvailable != "" {
+		fmt.Fprintf(a.errOut, "em-wall %s is available — open the app to install it.\n", st.UpdateAvailable)
+	}
 	if w := versionSkew(st.Version); w != "" {
 		fmt.Fprintln(a.errOut, w)
 	}

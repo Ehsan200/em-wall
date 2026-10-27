@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import { startPoll } from '../poll';
+import { onTourView } from '../tour';
 import SkeletonRows from './SkeletonRows.vue';
 import { fmtTime as fmtZoned } from '../timezone';
 import { Interfaces, SystemRoutes, ActiveRoutes } from '../../wailsjs/go/main/App';
@@ -8,6 +9,7 @@ import type { ipc } from '../../wailsjs/go/models';
 
 type Section = 'interfaces' | 'routes' | 'pinned';
 const section = ref<Section>('interfaces');
+onTourView('network', (v) => { section.value = v as Section; });
 
 const interfaces = ref<ipc.InterfaceDTO[]>([]);
 const sysRoutes = ref<ipc.SystemRouteDTO[]>([]);
@@ -55,7 +57,7 @@ onUnmounted(() => stopPoll?.());
     <div v-if="error" class="error">{{ error }}</div>
 
     <div class="row" style="justify-content: space-between; align-items: baseline; margin-bottom: 12px">
-      <div class="row" style="gap: 0">
+      <div class="row" style="gap: 0" data-tour="network-sections">
         <button :class="{active: section==='interfaces'}" class="seg" @click="section='interfaces'">
           Interfaces <span class="count">{{ loaded ? interfaces.length : '…' }}</span>
         </button>

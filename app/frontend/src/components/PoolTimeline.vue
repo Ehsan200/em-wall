@@ -170,7 +170,7 @@ onUnmounted(() => stopPoll?.());
 </script>
 
 <template>
-  <section v-if="visible.length || error" class="pools">
+  <section v-if="visible.length || error" class="pools" data-tour="health-pools">
     <div class="head">
       <h3>Pool timeline</h3>
       <span class="muted">subscription nodes behind each master · one cell per 10 s · tall = carrying traffic</span>

@@ -14,6 +14,7 @@ import {
   saveDisplayTimezone, loadDisplayTimezone, fmtTime,
 } from '../timezone';
 import ImportDialog from './ImportDialog.vue';
+import UpdateSettings from './UpdateSettings.vue';
 import GeoSettings from './GeoSettings.vue';
 import SuggestSettings from './SuggestSettings.vue';
 
@@ -353,7 +354,7 @@ onUnmounted(() => {
     <div class="col" style="max-width: 820px; gap: 20px">
 
       <!-- Hijack panel -->
-      <div class="col" style="gap: 10px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+      <div data-tour="settings-hijack" class="col" style="gap: 10px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <div class="row" style="justify-content: space-between">
           <div class="col" style="gap: 2px">
             <strong>System DNS hijack</strong>
@@ -454,7 +455,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Encrypted DNS toggle -->
-      <div class="col" style="gap: 8px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+      <div data-tour="settings-doh" class="col" style="gap: 8px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <label class="row" style="justify-content: space-between">
           <div class="col" style="gap: 4px">
             <strong>Block encrypted DNS (DoH/DoT)</strong>
@@ -473,6 +474,8 @@ onUnmounted(() => {
           </label>
         </label>
       </div>
+
+      <UpdateSettings />
 
       <!-- Display timezone -->
       <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
@@ -539,7 +542,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Backup & restore -->
-      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+      <div data-tour="settings-backup" class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px">
           <div class="col" style="gap: 4px; flex: 1">
             <strong>Backup &amp; restore</strong>
@@ -559,7 +562,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Uninstall (danger zone) -->
-      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid rgba(255, 111, 111, 0.3); border-radius: 8px">
+      <div data-tour="settings-uninstall" class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid rgba(255, 111, 111, 0.3); border-radius: 8px">
         <div class="row" style="justify-content: space-between; cursor: pointer" @click="uninstallExpanded = !uninstallExpanded">
           <strong style="color: var(--danger)">Uninstall em-wall</strong>
           <span class="muted" style="font-size: 11px">{{ uninstallExpanded ? '▾' : '▸' }}</span>

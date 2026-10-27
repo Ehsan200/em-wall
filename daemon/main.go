@@ -375,6 +375,11 @@ func main() {
 		defer wg.Done()
 		deps.runGeoUpdater(ctx)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deps.runUpdateNotifier(ctx)
+	}()
 
 	// Proxy latency prober: ranks multi-outbound route bindings by measured
 	// latency. Probes ONLY proxies bound alongside another (nothing to rank
@@ -738,6 +743,9 @@ type handlerDeps struct {
 	// spawned from handlers (e.g. a subscription's initial fetch), set once
 	// the run context exists. Nil-safe via bgContext().
 	bgCtx context.Context
+
+	// updates holds the newest release the background check found.
+	updates updateNotifier
 
 	mu sync.Mutex // guards upstream
 }

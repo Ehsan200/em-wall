@@ -289,6 +289,9 @@ type StatusResult struct {
 	UpstreamDNS       string `json:"upstreamDns"`
 	ListenAddr        string `json:"listenAddr"`
 	RuleCount         int    `json:"ruleCount"`
+	// UpdateAvailable is the newer release tag the daemon's background
+	// check found, "" when up to date or not yet checked.
+	UpdateAvailable string `json:"updateAvailable,omitempty"`
 }
 
 type RuleDTO struct {

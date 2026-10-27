@@ -445,7 +445,7 @@ defineExpose({ refresh });
 
 <template>
   <div class="col" style="gap: 10px">
-    <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
+    <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap" data-tour="xray-sub-add">
       <button v-if="!draft.open" @click="openDraft" :disabled="busy">+ Add subscription</button>
       <div style="flex: 1"></div>
       <button @click="refreshAll" :disabled="busy || subs.length === 0">
@@ -498,7 +498,7 @@ defineExpose({ refresh });
     </div>
 
     <!-- Subscription rows -->
-    <div v-for="s in subs" :key="s.id"
+    <div v-for="s in subs" :key="s.id" data-tour="xray-sub"
          class="col" style="gap: 8px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
       <div class="row" style="justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap">
         <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0">
@@ -531,7 +531,7 @@ defineExpose({ refresh });
       <div v-if="s.lastError" class="muted" style="font-size: 11px; color: var(--danger)">✗ {{ s.lastError }}</div>
 
       <!-- Switch strategy -->
-      <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px">
+      <div data-tour="xray-strategy" class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px">
         <span class="muted">Switch strategy</span>
         <div class="row strategy-seg" style="gap: 0">
           <button v-for="o in STRATEGIES" :key="o.value" class="seg" :class="{ active: s.strategy === o.value }"

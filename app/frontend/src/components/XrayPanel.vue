@@ -13,6 +13,7 @@ import FragmentControl, { type FragmentValue } from './FragmentControl.vue';
 import XraySubscriptionsPanel from './XraySubscriptionsPanel.vue';
 import SearchSelect from './SearchSelect.vue';
 import { useXrayActive, pickText, poolOf, PICK_NOTE } from '../xrayActive';
+import { onTourView } from '../tour';
 
 // Local mirrors of the DTOs so the file compiles even before
 // `make run-app` regenerates wailsjs/models.ts.
@@ -81,6 +82,7 @@ const testing = ref<boolean>(false);
 // of the whole table looking idle until everything finishes.
 const testingIds = ref<Set<number>>(new Set());
 const subTab = ref<SubTab>('outbounds');
+onTourView('xray', (v) => { subTab.value = v as SubTab; });
 
 // Live picks from xray's access log: the pool node each master's balancer
 // is handing connections to, and where user routing rules divert an
@@ -823,7 +825,7 @@ defineExpose({ refresh });
     </div>
 
     <!-- ============ Sub-tab nav ============ -->
-    <div class="row" style="gap: 4px; padding: 0; border-bottom: 1px solid var(--border); margin: 0 -2px 4px">
+    <div class="row" style="gap: 4px; padding: 0; border-bottom: 1px solid var(--border); margin: 0 -2px 4px" data-tour="xray-subtabs">
       <button class="subtab" :class="{ active: subTab === 'outbounds' }" @click="subTab = 'outbounds'">
         Outbounds
         <span class="subtab-badge">{{ entries.length }}</span>
@@ -848,7 +850,7 @@ defineExpose({ refresh });
 
     <!-- ============ Outbounds tab ============ -->
     <template v-if="subTab === 'outbounds'">
-      <div class="row" style="gap: 8px; flex-wrap: wrap; align-items: center">
+      <div class="row" style="gap: 8px; flex-wrap: wrap; align-items: center" data-tour="xray-add">
         <button v-if="!draft.open" @click="openDraft" :disabled="busy">+ Add outbound</button>
         <button @click="openImport" :disabled="busy">Import (URI or JSON)</button>
         <div style="flex: 1"></div>
@@ -938,7 +940,7 @@ defineExpose({ refresh });
         </template>
       </div>
 
-      <div v-for="row in filteredEntries" :key="row.id"
+      <div v-for="row in filteredEntries" :key="row.id" data-tour="xray-entry"
            class="col" style="gap: 8px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <!-- View mode -->
         <template v-if="!editing || editing.id !== row.id">
@@ -1120,7 +1122,7 @@ defineExpose({ refresh });
     <!-- ============ Sets tab ============ -->
     <template v-else-if="subTab === 'sets'">
       <div class="col" style="gap: 10px">
-        <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
+        <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap" data-tour="xray-sets-new">
           <button v-if="!setDraft" @click="openSetDraft" :disabled="busy">+ New set</button>
           <span class="muted" style="font-size: 11px; flex: 1">
             A set bundles outbounds under one name. Rules bind to
@@ -1184,7 +1186,7 @@ defineExpose({ refresh });
           </span>
         </div>
 
-        <div v-for="s in sets" :key="s.id"
+        <div v-for="s in sets" :key="s.id" data-tour="xray-set"
              class="col" style="gap: 8px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
           <div class="row" style="justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap">
             <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0">
@@ -1241,7 +1243,7 @@ defineExpose({ refresh });
 
     <!-- ============ Routing tab ============ -->
     <template v-else-if="subTab === 'routing'">
-      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+      <div data-tour="xray-routing" class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <div class="row" style="justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap">
           <div class="col" style="gap: 4px; flex: 1; min-width: 280px">
             <strong>Global routing rules</strong>
@@ -1286,7 +1288,7 @@ defineExpose({ refresh });
     <!-- ============ Status tab ============ -->
     <template v-else-if="subTab === 'status'">
       <!-- Subprocess card -->
-      <div class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
+      <div data-tour="xray-status" class="col" style="gap: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px">
         <div class="row" style="justify-content: space-between; align-items: center">
           <strong>Subprocess</strong>
           <span class="tag" :style="{

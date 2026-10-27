@@ -161,7 +161,7 @@ onUnmounted(() => stopPoll?.());
 </script>
 
 <template>
-  <div class="geo-card col">
+  <div class="geo-card col" data-tour="settings-geo">
     <div class="row" style="justify-content: space-between; align-items: flex-start">
       <div class="col" style="gap: 4px">
         <strong>Geo data</strong>
