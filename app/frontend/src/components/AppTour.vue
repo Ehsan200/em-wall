@@ -42,6 +42,9 @@ const PAD = 6;
 const GAP = 14;
 const EDGE = 12;
 const CARD_W = 420;
+// A card with a diagram gets a little more room so the chain fits on one line.
+const CARD_W_FLOW = 460;
+const cardW = computed(() => (step.value?.flow || step.value?.fork ? CARD_W_FLOW : CARD_W));
 
 function candidates(s: TourStep): string[] {
   const list = s.target ? (Array.isArray(s.target) ? [...s.target] : [s.target]) : [];
@@ -87,7 +90,7 @@ const cardStyle = computed(() => {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const h = Math.min(cardH.value, vh - EDGE * 2);
-  const w = Math.min(CARD_W, vw - EDGE * 2);
+  const w = Math.min(cardW.value, vw - EDGE * 2);
   const clampTop = (y: number) => Math.min(Math.max(EDGE, y), vh - h - EDGE);
   const clampLeft = (x: number) => Math.min(Math.max(EDGE, x), vw - w - EDGE);
   // First side with room wins: right (sidebar items), below (bars and
@@ -159,7 +162,8 @@ onUnmounted(stop);
     <div v-if="box" class="tour-spot" :class="{ danger: step.danger }"
          :style="{ top: box.top + 'px', left: box.left + 'px', width: box.width + 'px', height: box.height + 'px' }"></div>
 
-    <div ref="cardEl" class="tour-card" :class="{ centered: !box, danger: step.danger }" :style="cardStyle">
+    <div ref="cardEl" class="tour-card" :class="{ centered: !box, danger: step.danger }"
+         :style="[cardStyle, box ? { width: cardW + 'px' } : {}]">
       <div class="tour-head">
         <span class="tour-chapter"><template v-if="step.danger">⚠ Important · </template>{{ heading }}</span>
         <span class="tour-count">{{ index + 1 }} / {{ TOUR.length }}</span>
@@ -169,23 +173,35 @@ onUnmounted(stop);
       <p v-for="(p, i) in step.body" :key="i" class="tour-p" v-html="p"></p>
 
       <div v-if="step.flow || step.fork" class="tour-flow" :class="{ forked: step.fork }" aria-hidden="true">
-        <template v-for="(n, i) in step.flow || []" :key="i">
+        <!-- Each arrow travels with the node it points at, so a wrapped line
+             starts with "→ node" instead of leaving an arrow dangling. -->
+        <span v-for="(n, i) in step.flow || []" :key="i" class="tour-link">
           <span v-if="i > 0" class="tour-arrow">→</span>
           <span class="tour-node" :class="n.tone ? 'tone-' + n.tone : ''">
             <span>{{ n.label }}</span>
             <small v-if="n.sub">{{ n.sub }}</small>
           </span>
-        </template>
-        <!-- One of several outcomes, drawn as a branch, not a chain. -->
-        <template v-if="step.fork">
+        </span>
+        <!-- Alternatives, drawn as a branch, not a chain; with `join` the
+             branches meet again in one node. -->
+        <span v-if="step.fork" class="tour-link">
           <span v-if="step.flow?.length" class="tour-arrow">→</span>
-          <span class="tour-fork">
-            <span v-for="(n, i) in step.fork" :key="i" class="tour-node" :class="n.tone ? 'tone-' + n.tone : ''">
-              <span>{{ n.label }}</span>
-              <small v-if="n.sub">{{ n.sub }}</small>
+          <span class="tour-fork" :class="{ joined: step.join }">
+            <span v-for="(n, i) in step.fork" :key="i" class="tour-branch">
+              <span class="tour-node" :class="n.tone ? 'tone-' + n.tone : ''">
+                <span>{{ n.label }}</span>
+                <small v-if="n.sub">{{ n.sub }}</small>
+              </span>
             </span>
           </span>
-        </template>
+        </span>
+        <span v-if="step.fork && step.join" class="tour-link">
+          <span class="tour-arrow">→</span>
+          <span class="tour-node" :class="step.join.tone ? 'tone-' + step.join.tone : ''">
+            <span>{{ step.join.label }}</span>
+            <small v-if="step.join.sub">{{ step.join.sub }}</small>
+          </span>
+        </span>
       </div>
 
       <dl v-if="step.terms" class="tour-terms">
@@ -264,29 +280,40 @@ onUnmounted(stop);
 .tour-p :deep(b), .tour-terms :deep(b) { color: var(--text); }
 
 .tour-flow {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 5px;
   margin: 10px 0; padding: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border);
 }
 .tour-arrow { color: var(--text-dim); }
-.tour-flow.forked { flex-wrap: nowrap; }
-.tour-flow.forked > .tour-node { flex-shrink: 1; min-width: 0; }
-/* Branches: each node draws its own tick and its slice of the trunk, so
+/* One line always: when space runs short the text inside nodes wraps,
+   never the chain itself. */
+.tour-link { display: flex; align-items: center; gap: 5px; min-width: 0; flex: 0 1 auto; }
+.tour-flow.forked > .tour-link { flex-shrink: 1; }
+.tour-flow.forked > .tour-link:last-child { flex-shrink: 0; }
+/* Branches: each branch draws its own tick and its slice of the trunk, so
    the trunk runs exactly from the first branch's middle to the last's
-   whatever the node heights. */
+   whatever the node heights. A joined fork mirrors that on the right,
+   drawn by the node inside each branch; branches stretch to one width so
+   the right-hand ticks line up. */
 .tour-fork { display: flex; flex-direction: column; gap: 6px; padding-left: 14px; flex-shrink: 0; }
-.tour-fork > .tour-node { position: relative; }
-.tour-fork > .tour-node::before {
-  content: ''; position: absolute; left: -14px; top: 50%; width: 13px; border-top: 1px solid var(--text-dim);
+.tour-fork.joined { padding-right: 14px; }
+.tour-branch { position: relative; display: flex; }
+.tour-branch > .tour-node { position: relative; flex: 1; }
+.tour-branch::before, .tour-fork.joined .tour-branch > .tour-node::before {
+  content: ''; position: absolute; top: 50%; width: 13px; border-top: 1px solid var(--text-dim);
 }
-.tour-fork > .tour-node::after {
-  content: ''; position: absolute; left: -14px; top: -3px; bottom: -3px; border-left: 1px solid var(--text-dim);
+.tour-branch::after, .tour-fork.joined .tour-branch > .tour-node::after {
+  content: ''; position: absolute; top: -3px; bottom: -3px; border-left: 1px solid var(--text-dim);
 }
-.tour-fork > .tour-node:first-child::after { top: 50%; }
-.tour-fork > .tour-node:last-child::after { bottom: 50%; }
-.tour-fork > .tour-node:only-child::after { display: none; }
+.tour-branch::before, .tour-branch::after { left: -14px; }
+.tour-fork.joined .tour-branch > .tour-node::before { right: -14px; }
+.tour-fork.joined .tour-branch > .tour-node::after { right: -14px; }
+.tour-branch:first-child::after, .tour-fork.joined .tour-branch:first-child > .tour-node::after { top: 50%; }
+.tour-branch:last-child::after, .tour-fork.joined .tour-branch:last-child > .tour-node::after { bottom: 50%; }
+.tour-branch:only-child::after, .tour-fork.joined .tour-branch:only-child > .tour-node::after { display: none; }
 .tour-node {
-  display: flex; flex-direction: column; padding: 4px 8px; border-radius: 6px;
+  display: flex; flex-direction: column; min-width: 0; padding: 4px 7px; border-radius: 6px;
   background: var(--panel-2); border: 1px solid var(--border); font-size: 12px; font-weight: 600;
+  line-height: 1.3;
 }
 .tour-node small { font-size: 10px; font-weight: 400; color: var(--text-dim); }
 .tour-node.tone-accent { border-color: rgba(110, 168, 255, 0.5); color: var(--accent); }

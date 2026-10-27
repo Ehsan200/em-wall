@@ -30,6 +30,8 @@ export type TourStep = {
   flow?: FlowNode[];
   // Alternatives after the flow: exactly one of them happens.
   fork?: FlowNode[];
+  // Where the fork's branches meet again (all paths end at one place).
+  join?: FlowNode;
   terms?: { term: string; def: string }[];
   tip?: string;
   // Red card and outline, for steps where getting it wrong hurts.
@@ -91,6 +93,24 @@ const STEPS: TourStep[] = [
       'The pages are grouped by job: <b>Routing</b> decides where names go, <b>Outbounds</b> are the servers and proxies traffic can leave through, <b>Monitor</b> shows what is happening, and <b>System</b> controls how em-wall hooks into macOS.',
       'A number on <b>Suggestions</b> means em-wall has spotted services you might want a rule for.',
     ],
+  },
+  {
+    id: 'settings-uninstall',
+    chapter: 'Welcome',
+    title: 'Uninstall: always from Settings first',
+    tab: 'settings',
+    target: t('settings-uninstall'),
+    danger: true,
+    body: [
+      '<b>Never drag em-wall to the Trash while it is still installed.</b>',
+      'The background service doesn’t live inside the app. Trash only the app and the service <b>keeps running and keeps controlling your Mac’s DNS</b>, with no app left to turn it off. If it ever stops after that, <b>websites stop loading</b> until DNS is fixed by hand.',
+    ],
+    flow: [
+      { label: '1. Settings → Uninstall', tone: 'danger' },
+      { label: '2. DNS put back', sub: 'service removed', tone: 'success' },
+      { label: '3. Trash the app' },
+    ],
+    tip: '<b>Uninstall</b> is at the bottom of this page. It puts your original DNS settings back and removes the background service. <b>Only then</b> drag the app to the Trash.',
   },
 
   // ───────────────────────── Use cases
@@ -413,9 +433,9 @@ const STEPS: TourStep[] = [
       'Pool nodes are <b>not</b> rule targets on their own. They exist to carry a <b>master</b> (next step). <b>Nodes</b> opens the list with each node’s ping. ★ marks the nodes carrying traffic right now.',
     ],
     flow: [
-      { label: 'Subscription URL' },
+      { label: 'Subscription URL', sub: 'from your provider' },
       { label: 'Pool', sub: 'node 1 · node 2 · … node N', tone: 'accent' },
-      { label: 'feeds a master’s Dialer' },
+      { label: 'Master', sub: 'dials through a pool node', tone: 'warn' },
     ],
     tip: 'Want to use one node directly? Its <b>+ Add</b> button makes an independent copy as a normal outbound, so later refreshes can’t break it.',
   },
@@ -469,9 +489,17 @@ const STEPS: TourStep[] = [
     view: 'sets',
     target: [t('xray-set'), t('xray-sets-new')],
     body: [
-      'A <b>set</b> is a named, ordered list of outbounds, for example <code>xray:nyc</code> and <code>proxy:office</code>. A rule targets the set as <code>xrayset:NAME</code>, so when you change the set’s members, every rule using it follows automatically. <b>+ New set</b> creates one.',
-      'em-wall chooses a member for each site and <b>keeps using it</b>, because changing exits mid-session makes sites suspicious. It only moves when that member fails or another one is clearly better. Each card shows how many members can be used right now.',
+      'A <b>set</b> is a named, ordered list of outbounds that a rule targets as <code>xrayset:NAME</code>. A typical use: <b>two xray configs with different settings that reach the same server</b>, say one over a CDN with TLS and one direct with REALITY. If your network blocks one way in, traffic carries on over the other, and sites see <b>the same exit IP</b> either way.',
+      'em-wall chooses a member for each site and <b>keeps using it</b>. It only moves when that member fails or another one is clearly better. Change a set’s members and every rule using it follows. <b>+ New set</b> creates one, and each card shows how many members can be used right now.',
     ],
+    flow: [
+      { label: '*.github.com', sub: 'xrayset:home' },
+    ],
+    fork: [
+      { label: 'xray:home-cdn', sub: 'TLS via a CDN', tone: 'accent' },
+      { label: 'xray:home-reality', sub: 'REALITY, direct', tone: 'accent' },
+    ],
+    join: { label: 'Your server', sub: 'one exit IP', tone: 'success' },
     terms: [
       { term: 'down', def: 'Several failures in a row. Back as soon as it answers again.' },
       { term: 'demoted', def: 'Fails often, or keeps going up and down. Held out for a cooldown period.' },
@@ -638,24 +666,6 @@ const STEPS: TourStep[] = [
       '<b>Backup &amp; restore</b> exports your rules and custom groups to a password-encrypted file and imports them back, on this Mac or another. <b>Reinstall daemon</b> fixes a version mismatch after an app update. Fallback DNS and timezone are here too.',
     ],
   },
-  {
-    id: 'settings-uninstall',
-    chapter: 'System',
-    title: 'Uninstall: always from Settings first',
-    tab: 'settings',
-    target: t('settings-uninstall'),
-    danger: true,
-    body: [
-      '<b>Never drag em-wall to the Trash while it is still installed.</b>',
-      'The background service doesn’t live inside the app. Trash only the app and the service <b>keeps running and keeps controlling your Mac’s DNS</b>, with no app left to turn it off. If it ever stops after that, <b>websites stop loading</b> until DNS is fixed by hand.',
-    ],
-    flow: [
-      { label: '1. Settings → Uninstall', tone: 'danger' },
-      { label: '2. DNS put back', sub: 'service removed', tone: 'success' },
-      { label: '3. Trash the app' },
-    ],
-    tip: '<b>Uninstall</b> is at the bottom of this page. It puts your original DNS settings back and removes the background service. <b>Only then</b> drag the app to the Trash.',
-  },
 
   // ───────────────────────── Done
   {
@@ -680,7 +690,7 @@ export type TourSection = { id: string; title: string; blurb: string; icon: stri
 const FINISH = STEPS.find((s) => s.id === 'finish')!;
 // Icons are one stroke path on a 24×24 grid, like the sidebar's.
 const SECTION_DEFS: { id: string; chapter: string; title: string; blurb: string; icon: string }[] = [
-  { id: 'basics', chapter: 'Welcome', title: 'Basics', blurb: 'What em-wall does, the status bar, the sidebar',
+  { id: 'basics', chapter: 'Welcome', title: 'Basics', blurb: 'What em-wall does, finding your way, how to uninstall safely',
     icon: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM16.2 7.8l-2.1 6.3-6.3 2.1 2.1-6.3z' },
   { id: 'usecases', chapter: 'Use cases', title: 'Use cases', blurb: 'What em-wall is good for, and its limits today',
     icon: 'M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V16h8v-1.3A7 7 0 0 0 12 2z' },
@@ -690,7 +700,7 @@ const SECTION_DEFS: { id: string; chapter: string; title: string; blurb: string;
     icon: 'M12 2 3 7v10l9 5 9-5V7zM3 7l9 5 9-5M12 12v10' },
   { id: 'monitor', chapter: 'Monitor', title: 'Monitor', blurb: 'Map, usage, health, logs',
     icon: 'M22 12h-4l-3 9L9 3l-3 9H2' },
-  { id: 'system', chapter: 'System', title: 'System', blurb: 'Network, DNS hijack, updates, uninstall',
+  { id: 'system', chapter: 'System', title: 'System', blurb: 'Network, DNS hijack, encrypted DNS, updates, backup',
     icon: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6' },
 ];
 export const SECTIONS: TourSection[] = SECTION_DEFS.map((d) => ({
