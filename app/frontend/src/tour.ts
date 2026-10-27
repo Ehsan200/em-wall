@@ -6,6 +6,8 @@ import { reactive, watch } from 'vue';
 
 export type Tab = 'rules' | 'suggest' | 'logs' | 'usage' | 'health' | 'map' | 'network' | 'proxies' | 'xray' | 'settings';
 
+type FlowNode = { label: string; sub?: string; tone?: 'accent' | 'danger' | 'success' | 'warn' };
+
 export type TourStep = {
   // Stable key. The app remembers which ids a user has seen, so a new id
   // is what makes a step show up in "What's new" — keep ids when rewording
@@ -25,15 +27,15 @@ export type TourStep = {
   target?: string | string[];
   body: string[];
   // A left-to-right chain of boxes: how traffic or config flows.
-  flow?: { label: string; sub?: string; tone?: 'accent' | 'danger' | 'success' | 'warn' }[];
+  flow?: FlowNode[];
+  // Alternatives after the flow: exactly one of them happens.
+  fork?: FlowNode[];
   terms?: { term: string; def: string }[];
   tip?: string;
   // Red card and outline, for steps where getting it wrong hurts.
   danger?: boolean;
 };
 
-// Step ids this user has already been shown (JSON array).
-const SEEN_KEY = 'em-wall.tour.seen';
 
 // Tour → panel hand-off for sub-views. A new object per request, so asking
 // for the same view twice still fires; cleared when the tour closes so a
@@ -62,11 +64,13 @@ const STEPS: TourStep[] = [
     flow: [
       { label: 'App asks for a name' },
       { label: 'em-wall', sub: 'matches your rules', tone: 'accent' },
+    ],
+    fork: [
       { label: 'Block', sub: 'name does not exist', tone: 'danger' },
       { label: 'Allow', sub: 'normal internet', tone: 'success' },
       { label: 'Route', sub: 'tunnel or proxy', tone: 'accent' },
     ],
-    tip: 'Use ← → or Enter to move, Esc to leave. Skip any time; the <b>Tour</b> menu at the bottom of the sidebar brings it back, whole or one section at a time.',
+    tip: 'Use ← → or Enter to move, Esc to leave. The <b>Tour</b> menu at the bottom of the sidebar opens any section again later.',
   },
   {
     chapter: 'Welcome',
@@ -101,9 +105,13 @@ const STEPS: TourStep[] = [
       'You choose, per domain, what goes direct, what goes through which server, and what’s blocked, instead of one VPN for everything. Local sites like your bank stay on your home connection.',
     ],
     flow: [
-      { label: '*.anthropic.com', sub: 'xrayset:us', tone: 'accent' },
-      { label: '*.netflix.com', sub: 'xray:uk', tone: 'accent' },
-      { label: 'everything else', sub: 'direct', tone: 'success' },
+      { label: 'Any site', sub: 'by name or IP' },
+      { label: 'em-wall', sub: 'your rules', tone: 'accent' },
+    ],
+    fork: [
+      { label: '*.anthropic.com', sub: '→ xrayset:us', tone: 'accent' },
+      { label: '*.netflix.com', sub: '→ xray:uk', tone: 'accent' },
+      { label: 'everything else', sub: '→ direct', tone: 'success' },
     ],
   },
   {
@@ -128,9 +136,9 @@ const STEPS: TourStep[] = [
       'Reach an office or home network through a server inside it. Internal names are looked up <b>on the far side</b>, so <code>jira.corp.internal</code> works from anywhere, and the network’s IP ranges can go the same way.',
     ],
     flow: [
-      { label: '*.corp.internal' },
-      { label: '10.20.0.0/16' },
+      { label: '*.corp.internal', sub: '+ 10.20.0.0/16' },
       { label: 'xray:office', sub: 'server inside the network', tone: 'accent' },
+      { label: 'Office network', tone: 'success' },
     ],
   },
   {
@@ -664,39 +672,86 @@ const STEPS: TourStep[] = [
 
 // ───────────────────────── Sections and runs
 
-// The full tour is these sections in order; each one can also be started
-// on its own from the Tour menu, and ends by offering the next one.
-export type TourSection = { id: string; title: string; blurb: string; steps: TourStep[] };
+// The tour is these sections, in order. There is no single run through all
+// of them: a run is one section, its last card shows every section's
+// progress and offers the next one, so the order is kept without one long
+// walk. The first launch plays Basics; the Tour menu starts any section.
+export type TourSection = { id: string; title: string; blurb: string; icon: string; steps: TourStep[] };
 const FINISH = STEPS.find((s) => s.id === 'finish')!;
-const SECTION_DEFS: { id: string; chapter: string; title: string; blurb: string }[] = [
-  { id: 'basics', chapter: 'Welcome', title: 'Basics', blurb: 'What em-wall does, the status bar, the sidebar' },
-  { id: 'usecases', chapter: 'Use cases', title: 'Use cases', blurb: 'What em-wall is good for, and its limits today' },
-  { id: 'rules', chapter: 'Rules', title: 'Rules', blurb: 'Patterns, actions, targets, groups, suggestions' },
-  { id: 'xray', chapter: 'Xray', title: 'Xray & proxies', blurb: 'Outbounds, subscriptions, masters, strategies, sets' },
-  { id: 'monitor', chapter: 'Monitor', title: 'Monitor', blurb: 'Map, usage, health, logs' },
-  { id: 'system', chapter: 'System', title: 'System', blurb: 'Network, DNS hijack, encrypted DNS, backup' },
+// Icons are one stroke path on a 24×24 grid, like the sidebar's.
+const SECTION_DEFS: { id: string; chapter: string; title: string; blurb: string; icon: string }[] = [
+  { id: 'basics', chapter: 'Welcome', title: 'Basics', blurb: 'What em-wall does, the status bar, the sidebar',
+    icon: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM16.2 7.8l-2.1 6.3-6.3 2.1 2.1-6.3z' },
+  { id: 'usecases', chapter: 'Use cases', title: 'Use cases', blurb: 'What em-wall is good for, and its limits today',
+    icon: 'M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V16h8v-1.3A7 7 0 0 0 12 2z' },
+  { id: 'rules', chapter: 'Rules', title: 'Rules', blurb: 'Patterns, actions, targets, groups, suggestions',
+    icon: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01' },
+  { id: 'xray', chapter: 'Xray', title: 'Xray & proxies', blurb: 'Outbounds, subscriptions, masters, strategies, sets',
+    icon: 'M12 2 3 7v10l9 5 9-5V7zM3 7l9 5 9-5M12 12v10' },
+  { id: 'monitor', chapter: 'Monitor', title: 'Monitor', blurb: 'Map, usage, health, logs',
+    icon: 'M22 12h-4l-3 9L9 3l-3 9H2' },
+  { id: 'system', chapter: 'System', title: 'System', blurb: 'Network, DNS hijack, updates, uninstall',
+    icon: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6' },
 ];
 export const SECTIONS: TourSection[] = SECTION_DEFS.map((d) => ({
-  id: d.id, title: d.title, blurb: d.blurb, steps: STEPS.filter((s) => s.chapter === d.chapter),
+  id: d.id, title: d.title, blurb: d.blurb, icon: d.icon, steps: STEPS.filter((s) => s.chapter === d.chapter),
 }));
 const ALL = SECTIONS.flatMap((s) => s.steps);
 
 export type TourRun = {
-  kind: 'full' | 'section' | 'new';
+  kind: 'section' | 'new';
   steps: TourStep[];
-  // Section run: the section that follows, offered on the last card.
+  // Section run: which section this is, and the one offered after it.
+  section?: TourSection;
   next?: TourSection;
 };
 
-export function fullRun(): TourRun { return { kind: 'full', steps: [...ALL, FINISH] }; }
 export function sectionRun(id: string): TourRun | null {
   const i = SECTIONS.findIndex((s) => s.id === id);
   if (i < 0) return null;
-  return { kind: 'section', steps: SECTIONS[i].steps, next: SECTIONS[i + 1] };
+  const sec = SECTIONS[i];
+  const next = SECTIONS[i + 1];
+  // The closing card rides on the last section.
+  return { kind: 'section', section: sec, next, steps: next ? sec.steps : [...sec.steps, FINISH] };
 }
-// Steps added since the user last took a tour, behind one intro card.
+export function sectionPosition(sec: TourSection): number { return SECTIONS.indexOf(sec) + 1; }
+
+// Two separate records. `seen`: steps the user has been shown — drives the
+// ✓ and progress per section. `known`: steps that existed when the user
+// first got the tour, plus any shown since — what's NOT known is "new".
+// Keeping them apart is what stops "you skipped five sections" from
+// reading as "44 new things" on the next launch.
+const SEEN_KEY = 'em-wall.tour.seen';
+const KNOWN_KEY = 'em-wall.tour.known';
+
+function readSet(key: string): Set<string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || '[]');
+    return new Set(Array.isArray(v) ? v : []);
+  } catch { return new Set(); }
+}
+function addTo(key: string, ids: string[]) {
+  const set = readSet(key);
+  for (const id of ids) if (!id.startsWith('__')) set.add(id);
+  try { localStorage.setItem(key, JSON.stringify([...set])); } catch { /* ignore */ }
+}
+export function markSeen(steps: TourStep[]) {
+  const ids = steps.map((s) => s.id);
+  addTo(SEEN_KEY, ids);
+  addTo(KNOWN_KEY, ids);
+}
+export function newSteps(): TourStep[] {
+  const known = readSet(KNOWN_KEY);
+  return ALL.filter((s) => !known.has(s.id));
+}
+export function sectionSeen(sec: TourSection): number {
+  const seen = readSet(SEEN_KEY);
+  return sec.steps.filter((s) => seen.has(s.id)).length;
+}
+
+// Steps added since the user's tour baseline, behind one intro card.
 export function newRun(): TourRun | null {
-  const fresh = unseenSteps();
+  const fresh = newSteps();
   if (!fresh.length) return null;
   const intro: TourStep = {
     id: '__new',
@@ -704,36 +759,21 @@ export function newRun(): TourRun | null {
     title: fresh.length === 1 ? 'One new thing in em-wall' : `${fresh.length} new things in em-wall`,
     body: ['Since you last took the tour, em-wall has learned a few things. Here they are, one card each:'],
     terms: fresh.map((s) => ({ term: s.chapter, def: s.title })),
-    tip: 'The full tour and each section are always in the <b>Tour</b> menu at the bottom of the sidebar.',
+    tip: 'Every section of the tour is always in the <b>Tour</b> menu at the bottom of the sidebar.',
   };
   return { kind: 'new', steps: [intro, ...fresh] };
 }
 
-function readSeen(): Set<string> {
-  try {
-    const v = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
-    return new Set(Array.isArray(v) ? v : []);
-  } catch { return new Set(); }
-}
-export function markSeen(steps: TourStep[]) {
-  const seen = readSeen();
-  for (const s of steps) if (!s.id.startsWith('__')) seen.add(s.id);
-  try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seen])); } catch { /* ignore */ }
-}
-export function unseenSteps(): TourStep[] {
-  const seen = readSeen();
-  return ALL.filter((s) => !seen.has(s.id));
-}
-export function sectionUnseen(sec: TourSection): number {
-  const seen = readSeen();
-  return sec.steps.filter((s) => !seen.has(s.id)).length;
-}
-// First launch: nothing seen at all → full tour; otherwise What's new if
-// a release added steps; otherwise nothing.
-export function autoRun(): TourRun | null {
-  // Storage unavailable reads as "nothing seen"; don't open a tour on
+// First launch (no baseline yet): every current step becomes known — none
+// of it is "new" to someone just starting — and the section picker opens.
+// Later: What's new if a release added steps, else nothing.
+export function autoRun(): TourRun | 'picker' | null {
+  // Storage unavailable reads as "no baseline"; don't open a tour on
   // every launch because of it.
-  try { localStorage.getItem(SEEN_KEY); } catch { return null; }
-  if (readSeen().size === 0) return fullRun();
+  try { localStorage.getItem(KNOWN_KEY); } catch { return null; }
+  if (readSet(KNOWN_KEY).size === 0) {
+    addTo(KNOWN_KEY, ALL.map((s) => s.id));
+    return 'picker';
+  }
   return newRun();
 }

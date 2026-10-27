@@ -16,7 +16,7 @@ import SettingsPanel from './components/SettingsPanel.vue';
 import InstallPanel from './components/InstallPanel.vue';
 import AppTour from './components/AppTour.vue';
 import TourMenu from './components/TourMenu.vue';
-import { autoRun, markSeen, sectionRun, unseenSteps, type Tab, type TourRun } from './tour';
+import { autoRun, markSeen, sectionRun, newSteps, type Tab, type TourRun } from './tour';
 import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, DownloadAndApplyUpdate, CancelUpdate, PublicIP, SuggestList } from '../wailsjs/go/main/App';
 import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
@@ -56,16 +56,18 @@ function readTab(): Tab {
 const tab = ref<Tab>(readTab());
 watch(tab, (t) => { try { localStorage.setItem(TAB_KEY, t); } catch { /* ignore */ } });
 
-// Guided tour. The first time the main UI shows (right after install, not
-// over the install gate) the full tour plays; after an update that added
-// steps, What's new plays instead. The sidebar's Tour menu starts any run.
-// Finishing or skipping a run marks its steps seen; the tab is put back.
+// Guided tour, in sections. The first time the main UI shows (right after
+// install, not over the install gate) the section picker opens as a
+// welcome dialog; after an update that added steps, What's new plays
+// instead. The sidebar's Tour button opens the same picker. Finishing or
+// skipping a run marks its steps seen; the tab is put back.
 const tourRun = ref<TourRun | null>(null);
 const tourMenuOpen = ref(false);
+const tourMenuDialog = ref(false);
 // Bumped on every markSeen so the menu's and button's "new" counts
 // recompute — the seen set lives in localStorage, outside Vue.
 const tourSeenSeq = ref(0);
-const tourUnseen = computed(() => (tourSeenSeq.value, unseenSteps().length));
+const tourUnseen = computed(() => (tourSeenSeq.value, newSteps().length));
 let tabBeforeTour: Tab | null = null;
 function startTour(run: TourRun) {
   tourMenuOpen.value = false;
@@ -247,11 +249,17 @@ const showInstallGate = computed(() =>
   packaged.value && !reinstalling.value &&
   (!install.value || !install.value.daemonRunning || !install.value.binaryPresent || !install.value.plistPresent)
 );
-const showMain = computed(() => booted.value && !showInstallGate.value);
-watch(showMain, (m) => {
-  if (!m || tourRun.value) return;
+// The tour starts on its own only once the daemon it describes is the one
+// running: answering, the same version as the app, and not mid-reinstall.
+// After an update that means right after Settings → Reinstall finishes,
+// not over the version-mismatch banner.
+const tourReady = computed(() =>
+  booted.value && !showInstallGate.value && !!status.value && !daemonIncompatible.value && !reinstalling.value);
+watch(tourReady, (ready) => {
+  if (!ready || tourRun.value) return;
   const run = autoRun();
-  if (run) startTour(run);
+  if (run === 'picker') { tourMenuDialog.value = true; tourMenuOpen.value = true; }
+  else if (run) startTour(run);
 }, { immediate: true });
 
 async function refresh() {
@@ -395,7 +403,7 @@ onUnmounted(() => {
           </button>
         </div>
         <button class="nav-item nav-foot" :class="{ active: tourMenuOpen }" title="Guided tours of the app"
-                @click="tourMenuOpen = !tourMenuOpen">
+                @click="tourMenuDialog = false; tourMenuOpen = !tourMenuOpen">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM16.2 7.8l-2.1 6.3-6.3 2.1 2.1-6.3z" />
@@ -423,7 +431,8 @@ onUnmounted(() => {
                    @reinstalling="(v: boolean) => reinstalling = v" />
       </main>
     </div>
-    <TourMenu v-if="tourMenuOpen" :seenSeq="tourSeenSeq" @pick="startTour" @close="tourMenuOpen = false" />
+    <TourMenu v-if="tourMenuOpen" :seenSeq="tourSeenSeq" :dialog="tourMenuDialog"
+              @pick="startTour" @close="tourMenuOpen = false" />
     <AppTour :run="tourRun" @close="closeTour" @continue="continueTour" @navigate="(t) => { if (t) tab = t; }" />
   </template>
 </template>

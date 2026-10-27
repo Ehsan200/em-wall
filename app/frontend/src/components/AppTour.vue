@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
-import { setTourView, clearTourView, type TourStep, type TourRun } from '../tour';
+import { setTourView, clearTourView, SECTIONS, sectionSeen, sectionPosition, type TourStep, type TourRun } from '../tour';
 
 // Guided tour. App.vue decides which run plays (full tour on first launch,
 // What's new after an update, or whatever the Tour menu picked); this
@@ -19,11 +19,20 @@ const index = ref(0);
 const step = computed(() => TOUR.value[index.value]);
 const isFirst = computed(() => index.value === 0);
 const isLast = computed(() => index.value === TOUR.value.length - 1);
-const chapters = computed(() => {
-  const seen = new Map<string, number>();
-  if (props.run?.kind !== 'full') return [];
-  TOUR.value.forEach((s, i) => { if (!seen.has(s.chapter)) seen.set(s.chapter, i); });
-  return [...seen].map(([title, start]) => ({ title, start }));
+const heading = computed(() => {
+  const sec = props.run?.section;
+  return sec ? `Section ${sectionPosition(sec)} of ${SECTIONS.length} · ${sec.title}` : step.value?.chapter || '';
+});
+const progress = computed(() => (TOUR.value.length ? (index.value + 1) / TOUR.value.length : 0));
+// Last card of a section: where the user stands across all sections. The
+// section being finished counts as done (it's marked seen on close).
+const sectionMap = computed(() => {
+  if (!isLast.value || !props.run?.section) return [];
+  const current = props.run.section.id;
+  return SECTIONS.map((s) => ({
+    id: s.id, title: s.title, current: s.id === current,
+    done: s.id === current || sectionSeen(s) >= s.steps.length,
+  }));
 });
 
 // Target box in viewport coordinates; null = centered card, full dim.
@@ -152,19 +161,29 @@ onUnmounted(stop);
 
     <div ref="cardEl" class="tour-card" :class="{ centered: !box, danger: step.danger }" :style="cardStyle">
       <div class="tour-head">
-        <span class="tour-chapter"><template v-if="step.danger">⚠ Important · </template>{{ step.chapter }}</span>
+        <span class="tour-chapter"><template v-if="step.danger">⚠ Important · </template>{{ heading }}</span>
         <span class="tour-count">{{ index + 1 }} / {{ TOUR.length }}</span>
       </div>
       <h3 class="tour-title">{{ step.title }}</h3>
 
       <p v-for="(p, i) in step.body" :key="i" class="tour-p" v-html="p"></p>
 
-      <div v-if="step.flow" class="tour-flow" aria-hidden="true">
-        <template v-for="(n, i) in step.flow" :key="i">
+      <div v-if="step.flow || step.fork" class="tour-flow" :class="{ forked: step.fork }" aria-hidden="true">
+        <template v-for="(n, i) in step.flow || []" :key="i">
           <span v-if="i > 0" class="tour-arrow">→</span>
           <span class="tour-node" :class="n.tone ? 'tone-' + n.tone : ''">
             <span>{{ n.label }}</span>
             <small v-if="n.sub">{{ n.sub }}</small>
+          </span>
+        </template>
+        <!-- One of several outcomes, drawn as a branch, not a chain. -->
+        <template v-if="step.fork">
+          <span v-if="step.flow?.length" class="tour-arrow">→</span>
+          <span class="tour-fork">
+            <span v-for="(n, i) in step.fork" :key="i" class="tour-node" :class="n.tone ? 'tone-' + n.tone : ''">
+              <span>{{ n.label }}</span>
+              <small v-if="n.sub">{{ n.sub }}</small>
+            </span>
           </span>
         </template>
       </div>
@@ -178,19 +197,19 @@ onUnmounted(stop);
 
       <div v-if="step.tip" class="tour-tip" v-html="step.tip"></div>
 
-      <!-- Chapter jump list on the first card, so a returning user can go
-           straight to the part they came back for. -->
-      <div v-if="isFirst && chapters.length > 1" class="tour-chapters">
-        <button v-for="c in chapters.slice(1)" :key="c.title" class="tour-chip" @click="show(c.start)">{{ c.title }}</button>
+      <div v-if="sectionMap.length" class="tour-map">
+        <span class="tour-map-label">Your progress</span>
+        <div class="tour-chapters">
+          <button v-for="s in sectionMap" :key="s.id" class="tour-chip"
+                  :class="{ done: s.done, current: s.current }" :disabled="s.current"
+                  @click="emit('continue', s.id)">{{ s.done ? '✓ ' : '' }}{{ s.title }}</button>
+        </div>
       </div>
 
-      <div class="tour-dots" aria-hidden="true">
-        <button v-for="(s, i) in TOUR" :key="s.id" class="tour-dot"
-                :class="{ on: i === index, done: i < index }" :title="s.title" @click="show(i)"></button>
-      </div>
+      <div class="tour-bar" aria-hidden="true"><div class="tour-bar-fill" :style="{ width: progress * 100 + '%' }"></div></div>
 
       <div class="tour-foot">
-        <button class="tour-skip" @click="emit('close')">{{ isLast ? 'Close' : 'Skip tour' }}</button>
+        <button class="tour-skip" @click="emit('close')">{{ isLast ? (run.next ? 'Finish later' : 'Close') : 'Skip' }}</button>
         <div class="row" style="gap: 6px">
           <button v-if="!isFirst" @click="back">Back</button>
           <button v-if="isLast && run.next" class="primary" @click="emit('continue', run.next.id)">Next: {{ run.next.title }} →</button>
@@ -249,6 +268,22 @@ onUnmounted(stop);
   margin: 10px 0; padding: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border);
 }
 .tour-arrow { color: var(--text-dim); }
+.tour-flow.forked { flex-wrap: nowrap; }
+.tour-flow.forked > .tour-node { flex-shrink: 1; min-width: 0; }
+/* Branches: each node draws its own tick and its slice of the trunk, so
+   the trunk runs exactly from the first branch's middle to the last's
+   whatever the node heights. */
+.tour-fork { display: flex; flex-direction: column; gap: 6px; padding-left: 14px; flex-shrink: 0; }
+.tour-fork > .tour-node { position: relative; }
+.tour-fork > .tour-node::before {
+  content: ''; position: absolute; left: -14px; top: 50%; width: 13px; border-top: 1px solid var(--text-dim);
+}
+.tour-fork > .tour-node::after {
+  content: ''; position: absolute; left: -14px; top: -3px; bottom: -3px; border-left: 1px solid var(--text-dim);
+}
+.tour-fork > .tour-node:first-child::after { top: 50%; }
+.tour-fork > .tour-node:last-child::after { bottom: 50%; }
+.tour-fork > .tour-node:only-child::after { display: none; }
 .tour-node {
   display: flex; flex-direction: column; padding: 4px 8px; border-radius: 6px;
   background: var(--panel-2); border: 1px solid var(--border); font-size: 12px; font-weight: 600;
@@ -270,12 +305,13 @@ onUnmounted(stop);
 .tour-chapters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
 .tour-chip { padding: 3px 10px; border-radius: 12px; font-size: 11.5px; }
 
-.tour-dots { display: flex; flex-wrap: wrap; gap: 4px; margin: 14px 0 10px; }
-.tour-dot {
-  width: 8px; height: 8px; padding: 0; border-radius: 50%; border: none; background: var(--border);
-}
-.tour-dot.done { background: rgba(110, 168, 255, 0.45); }
-.tour-dot.on { background: var(--accent); width: 18px; border-radius: 4px; }
+.tour-bar { height: 3px; margin: 14px 0 10px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.tour-bar-fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
+.tour-card.danger .tour-bar-fill { background: var(--danger); }
+.tour-map { margin: 12px 0 0; }
+.tour-map-label { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+.tour-chip.done { color: var(--success); border-color: rgba(95, 208, 122, 0.35); }
+.tour-chip.current { opacity: 1; cursor: default; }
 .tour-foot { display: flex; justify-content: space-between; align-items: center; }
 .tour-skip { background: transparent; border: none; color: var(--text-dim); padding: 6px 0; }
 .tour-skip:hover { background: transparent; color: var(--text); }
