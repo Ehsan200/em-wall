@@ -520,6 +520,28 @@ func KnownGroups() []Group {
 			Icon: svgDocker(),
 		},
 		{
+			Key:         "kubernetes",
+			DisplayName: "Kubernetes / k3s",
+			Description: "kubectl/k8s releases + registry.k8s.io, k3s/Rancher, Helm, Quay, GHCR images",
+			Patterns: []string{
+				"*.kubernetes.io",
+				"*.k8s.io",  // dl/cdn.dl (kubectl, kubeadm), pkgs (apt/yum), registry.k8s.io, sigs (kind)
+				"*.pkg.dev", // registry.k8s.io redirects blob pulls to <region>-docker.pkg.dev
+				"*.k8s.gcr.io",
+				"*.k3s.io", // get.k3s.io install script + update channels
+				"*.k3d.io",
+				"*.rancher.com",
+				"*.rancher.io",
+				"*.helm.sh", // get.helm.sh binaries, charts
+				"*.artifacthub.io",
+				"*.quay.io", // quay.io + cdn*.quay.io blob CDN
+				"quayio-production-s3.s3.amazonaws.com",
+				"*.ghcr.io",
+				"*.k8slens.dev",
+			},
+			Icon: svgBranded("K8", "#326ce5", "#326ce5", "#ffffff"),
+		},
+		{
 			Key:         "homebrew",
 			DisplayName: "Homebrew",
 			Description: "Homebrew formulae/taps + bottle downloads (GHCR / githubusercontent)",

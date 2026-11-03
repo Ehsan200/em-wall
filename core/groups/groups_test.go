@@ -376,6 +376,16 @@ func TestDevRegistries_CoverRealFetchHosts(t *testing.T) {
 		{"php", "repo.packagist.org"},
 		{"hashicorp", "releases.hashicorp.com"},
 		{"hashicorp", "registry.terraform.io"},
+		{"kubernetes", "registry.k8s.io"},
+		{"kubernetes", "dl.k8s.io"},
+		{"kubernetes", "cdn.dl.k8s.io"},
+		{"kubernetes", "pkgs.k8s.io"},
+		{"kubernetes", "us-west1-docker.pkg.dev"},
+		{"kubernetes", "get.k3s.io"},
+		{"kubernetes", "update.k3s.io"},
+		{"kubernetes", "get.helm.sh"},
+		{"kubernetes", "quay.io"},
+		{"kubernetes", "cdn01.quay.io"},
 	} {
 		if !covers(c.key, c.host) {
 			t.Errorf("group %q must cover %q but does not", c.key, c.host)

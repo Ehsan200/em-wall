@@ -47,6 +47,7 @@ var categories = map[string]string{
 	// Developer tooling: source hosts, package registries, toolchains.
 	"github":         CategoryDev,
 	"docker":         CategoryDev,
+	"kubernetes":     CategoryDev,
 	"homebrew":       CategoryDev,
 	"jetbrains":      CategoryDev,
 	"vscode":         CategoryDev,
