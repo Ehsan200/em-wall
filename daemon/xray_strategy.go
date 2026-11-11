@@ -488,11 +488,13 @@ func (s *xraySupervisor) agileStep(slots []xray.DialerSlot, byTag map[string]nod
 		if len(c.dropped) == 0 {
 			continue
 		}
-		masters := map[string]bool{}
-		for _, m := range c.slot.SlotMasters() {
-			masters[m] = true
+		// Connections are tracked by their hidden proxy name (_xray_NAME,
+		// _xsub_ID), not the bare master name.
+		riders := map[string]bool{}
+		for _, n := range c.slot.ProxyNames() {
+			riders[n] = true
 		}
-		n := s.live.markStale(masters)
+		n := s.live.markStale(riders)
 		s.logger.Printf("xray pool %s (agile): carrying node(s) %s stopped answering — %d open connection(s) will be closed if stalled",
 			c.slot.Master, strings.Join(c.dropped, ", "), n)
 	}

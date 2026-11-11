@@ -147,6 +147,12 @@ func ExpandMembers(refs []DialerRef) string {
 // that accepts a user-supplied interface rather than relying on the UI
 // to send the right case.
 func CanonicalizeInterface(s string) string {
+	if IsSubInterface(s) {
+		if name := ParseSubName(s); name != "" {
+			return SubInterface(name)
+		}
+		return s
+	}
 	if !IsSetInterface(s) {
 		return s
 	}
@@ -167,6 +173,12 @@ func CanonicalizeInterface(s string) string {
 // closed on its own, and the dangling name stays visible in logs and in
 // the daemon's cold-path readers instead of turning into a silent "".
 func ExpandSetInterface(stored string, expansions map[string]string) string {
+	if IsSubInterface(stored) {
+		if v, ok := expansions[SubPrefix+ParseSubName(stored)]; ok {
+			return v
+		}
+		return stored
+	}
 	name := ParseSetName(stored)
 	if name == "" {
 		return stored

@@ -95,6 +95,7 @@ func main() {
 	xraySup.routes = routes
 	liveConns := newLiveConns(log.Default()) // marked by the supervisor, swept for the proxy tunnel
 	xraySup.live = liveConns
+	xraySup.ruleExits = storeRuleExits(store)
 	if err := xraySup.Reconcile(context.Background()); err != nil {
 		log.Printf("em-walld: initial xray reconcile failed (continuing): %v", err)
 	}
@@ -167,6 +168,9 @@ func main() {
 	// netstack paths never see the indirection. Must be installed before
 	// the first Reload or set-bound rules would start out unresolved.
 	engine.SetExpander(xrayStore)
+	// A rule newly bound to a subscription exit needs its xray slot up
+	// before the rule index goes live (xray_subexit.go).
+	engine.SetOnReload((&exitWatch{reconcile: xraySup.Reconcile, logf: log.Printf}).onReload)
 	if err := engine.Reload(context.Background()); err != nil {
 		log.Fatalf("em-walld: load rules: %v", err)
 	}
@@ -223,6 +227,8 @@ func main() {
 	sug := newSuggester(geoDB, store)
 	logSink.suggest = sug
 	activeSuggester.Store(sug)
+	// Subscription exit measurement (xray_subexit_probe.go).
+	subExits := newSubExitProber(xrayStore, store, xraySup.Running, log.Default())
 	deps := &handlerDeps{
 		geoDB:         geoDB,
 		store:         store,
@@ -231,6 +237,7 @@ func main() {
 		xrayStore:     xrayStore,
 		xraySup:       xraySup,
 		subFetch:      subFetch,
+		subExits:      subExits,
 		engine:        engine,
 		router:        router,
 		pf:            pf,
@@ -370,6 +377,18 @@ func main() {
 		defer wg.Done()
 		netReset.watchSleep(ctx)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		subExits.run(ctx)
+	}()
+	// A refresh can add nodes, and with them new exits: measure once xray
+	// has their probe outbounds.
+	subFetch.onChange = func(c context.Context) error {
+		err := xraySup.SyncDialerMembers(c)
+		subExits.KickAfter(ctx, 0, subExitAfterRefresh)
+		return err
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -716,6 +735,7 @@ type handlerDeps struct {
 	proxyTable *proxy.Table
 	xrayStore  *xray.Store
 	xraySup    *xraySupervisor
+	subExits   *subExitProber // nil-safe: no exit checks
 	subFetch   *subFetcher
 	engine     *decision.Engine
 	router     *routing.Manager

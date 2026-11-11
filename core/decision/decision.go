@@ -63,9 +63,10 @@ type InterfaceExpander interface {
 // Engine decides outcomes for DNS queries. It caches the rule list
 // in memory and is hot-path safe; call Reload after rule changes.
 type Engine struct {
-	src   RuleSource
-	exp   InterfaceExpander
-	cache atomic.Pointer[rules.Index]
+	src    RuleSource
+	exp    InterfaceExpander
+	onLoad func(ctx context.Context, raw []rules.Rule)
+	cache  atomic.Pointer[rules.Index]
 }
 
 func New(src RuleSource) *Engine {
@@ -79,6 +80,12 @@ func New(src RuleSource) *Engine {
 // expansion. Not safe to call concurrently with Reload.
 func (e *Engine) SetExpander(exp InterfaceExpander) { e.exp = exp }
 
+// SetOnReload installs a hook that sees the stored rule list (before any
+// expansion) on every Reload, ahead of the new index going live. The daemon
+// uses it to bring up the xray slot a newly bound subscription exit needs.
+// The hook must not modify the slice. Call before the first Reload.
+func (e *Engine) SetOnReload(f func(ctx context.Context, raw []rules.Rule)) { e.onLoad = f }
+
 // Reload refreshes the cached rule list. Indirect interface bindings are
 // resolved ONCE here rather than per query, so Decide stays a pure
 // in-memory lookup and every downstream consumer of Decision.Interface
@@ -87,6 +94,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 	list, err := e.src.List(ctx)
 	if err != nil {
 		return err
+	}
+	if e.onLoad != nil {
+		e.onLoad(ctx, list)
 	}
 	if e.exp != nil {
 		rewrite, err := e.exp.Expansions(ctx)

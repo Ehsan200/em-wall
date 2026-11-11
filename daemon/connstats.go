@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ehsan/em-wall/core/xray"
@@ -293,7 +294,30 @@ func (c *connStats) snapshot() connSnapshot {
 }
 
 // displayUpstream turns a proxy-store name into what the user named it:
-// xray entries live behind hidden "_xray_NAME" proxy rows.
+// xray entries live behind hidden "_xray_NAME" proxy rows, subscription
+// exits behind "_xsub_ID" ones (shown as "sub:NAME").
 func displayUpstream(name string) string {
+	if strings.HasPrefix(name, xray.SubProxyPrefix) {
+		if m := subExitLabels.Load(); m != nil {
+			if l, ok := (*m)[name]; ok {
+				return l
+			}
+		}
+		return name
+	}
 	return strings.TrimPrefix(name, xray.InternalProxyName(""))
+}
+
+// subExitLabels maps a subscription exit's hidden proxy name to its display
+// label; published by the xray supervisor on every Reconcile.
+var subExitLabels atomic.Pointer[map[string]string]
+
+func publishSubExitLabels(slots []xray.DialerSlot) {
+	m := map[string]string{}
+	for _, sl := range slots {
+		for _, ex := range sl.Exits {
+			m[xray.SubProxyName(ex.SubID)] = xray.ExitOwner(ex.Sub)
+		}
+	}
+	subExitLabels.Store(&m)
 }

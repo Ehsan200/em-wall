@@ -13,6 +13,11 @@ import SearchSelect from './SearchSelect.vue';
 import CustomGroupForm from './CustomGroupForm.vue';
 import ExportDialog from './ExportDialog.vue';
 import MoveToGroupDialog from './MoveToGroupDialog.vue';
+import SubExitNote from './SubExitNote.vue';
+import ExitConfirmDialog from './ExitConfirmDialog.vue';
+import {
+  useSubExits, withExitConfirm, ruleIsSub, ruleSubName, verdictShort, ackSubExits, SUB_PREFIX,
+} from '../subExits';
 
 // Local shape for a proxy row — same fields as ipc.ProxyDTO; using a
 // local type means the component still type-checks while wailsjs/models
@@ -101,6 +106,7 @@ const revealedExitIPs = ref<Record<number, boolean>>({});
 let pendingDeleteTimer: number | undefined;
 let pendingDeleteGroupTimer: number | undefined;
 let stopLivePoll: (() => void) | undefined;
+let stopExitPoll: (() => void) | undefined;
 
 function normalizePattern(p: string): string {
   return p.toLowerCase().trim().replace(/\.$/, '');
@@ -442,11 +448,12 @@ async function confirmDeleteGroupNow(g: ipc.GroupDTO) {
 const groupApply = ref<{
   key: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'proxy' | 'xray' | 'set';
+  binding: 'iface' | 'proxy' | 'xray' | 'set' | 'sub';
   iface: string;
   proxies: string[];
   xrays: string[];
   set: string;
+  sub: string;
   enabled: boolean;
 } | null>(null);
 
@@ -461,6 +468,7 @@ function openGroupForm(g: ipc.GroupDTO, preset?: { action: 'block' | 'route'; if
     proxies: [],
     xrays: [],
     set: '',
+    sub: '',
     enabled: true,
   };
   if (!preset) return;
@@ -468,7 +476,8 @@ function openGroupForm(g: ipc.GroupDTO, preset?: { action: 'block' | 'route'; if
   a.action = preset.action;
   const f = preset.iface;
   if (preset.action !== 'route' || !f) return;
-  if (f.startsWith('xrayset:')) { a.binding = 'set'; a.set = f.slice('xrayset:'.length); }
+  if (ruleIsSub(f)) { a.binding = 'sub'; a.sub = ruleSubName(f); }
+  else if (f.startsWith('xrayset:')) { a.binding = 'set'; a.set = f.slice('xrayset:'.length); }
   else if (f.startsWith('xray:')) { a.binding = 'xray'; a.xrays = f.slice('xray:'.length).split(',').filter(Boolean); }
   else if (f.startsWith('proxy:')) { a.binding = 'proxy'; a.proxies = f.slice('proxy:'.length).split(',').filter(Boolean); }
   else { a.binding = 'iface'; a.iface = f; }
@@ -496,6 +505,7 @@ function groupInterfaceField(): string {
   if (g.binding === 'proxy' && g.proxies.length > 0) return `proxy:${g.proxies.join(',')}`;
   if (g.binding === 'xray' && g.xrays.length > 0) return `xray:${g.xrays.join(',')}`;
   if (g.binding === 'set' && g.set) return `xrayset:${g.set}`;
+  if (g.binding === 'sub' && g.sub) return SUB_PREFIX + g.sub;
   if (g.binding === 'iface') return g.iface;
   return '';
 }
@@ -508,6 +518,7 @@ function groupApplyValid(): boolean {
   if (g.binding === 'proxy') return g.proxies.length > 0;
   if (g.binding === 'xray') return g.xrays.length > 0;
   if (g.binding === 'set') return !!g.set;
+  if (g.binding === 'sub') return !!g.sub;
   return false;
 }
 
@@ -518,7 +529,12 @@ async function applyGroupNow() {
   const g = groupApply.value;
   if (!g || !groupApplyValid()) return;
   try {
-    const result = await ApplyGroup(g.key, g.action, groupInterfaceField(), g.enabled);
+    const iface = groupInterfaceField();
+    let result: ipc.GroupsApplyResult | undefined;
+    const done = await withExitConfirm(iface, async (ack) => {
+      result = await ApplyGroup(g.key, g.action, iface, g.enabled, ack);
+    });
+    if (!done || !result) return; // cancelled: keep the form open
     const created = result.created?.length || 0;
     const skipped = result.skipped?.length || 0;
     error.value = '';
@@ -611,7 +627,7 @@ const syncing = ref<string | null>(null);
 async function syncGroup(g: ipc.GroupDTO) {
   syncing.value = g.key;
   try {
-    const result = await SyncGroup(g.key, '', '');
+    const result = await SyncGroup(g.key, '', '', false);
     const created = result.created?.length || 0;
     error.value = created > 0
       ? `Added ${created} new domain rule(s) to ${g.displayName}.`
@@ -632,7 +648,7 @@ async function syncAllGroups() {
   let created = 0;
   try {
     for (const g of targets) {
-      const result = await SyncGroup(g.key, '', '');
+      const result = await SyncGroup(g.key, '', '', false);
       created += result.created?.length || 0;
     }
     error.value = `Added ${created} new domain rule(s) across ${targets.length} group(s).`;
@@ -657,11 +673,12 @@ const draft = ref({
   pattern: '',
   action: 'block' as 'block' | 'route',
   // Only meaningful when action === 'route':
-  binding: 'iface' as 'iface' | 'proxy' | 'xray' | 'set',
+  binding: 'iface' as 'iface' | 'proxy' | 'xray' | 'set' | 'sub',
   iface: '',
   proxies: [] as string[],
   xrays: [] as string[],
   set: '',
+  sub: '',
   enabled: true,
 });
 
@@ -676,6 +693,9 @@ function draftInterfaceField(): string {
   if (draft.value.binding === 'set' && draft.value.set) {
     return `xrayset:${draft.value.set}`;
   }
+  if (draft.value.binding === 'sub' && draft.value.sub) {
+    return SUB_PREFIX + draft.value.sub;
+  }
   if (draft.value.binding === 'iface') return draft.value.iface;
   return '';
 }
@@ -688,6 +708,7 @@ function draftIsValid(): boolean {
   if (draft.value.binding === 'proxy') return draft.value.proxies.length > 0;
   if (draft.value.binding === 'xray') return draft.value.xrays.length > 0;
   if (draft.value.binding === 'set') return !!draft.value.set;
+  if (draft.value.binding === 'sub') return !!draft.value.sub;
   return false;
 }
 
@@ -765,11 +786,12 @@ function toggleSection(rs: ipc.RuleDTO[]) {
 // Editor panel state, mirroring `draft` minus pattern/enabled.
 type BulkState = {
   action: 'block' | 'route';
-  binding: 'iface' | 'proxy' | 'xray' | 'set';
+  binding: 'iface' | 'proxy' | 'xray' | 'set' | 'sub';
   iface: string;
   proxies: string[];
   xrays: string[];
   set: string;
+  sub: string;
 };
 const bulk = ref<BulkState | null>(null);
 
@@ -781,6 +803,7 @@ function openBulk() {
     proxies: [],
     xrays: [],
     set: '',
+    sub: '',
   };
 }
 
@@ -806,6 +829,7 @@ function bulkInterfaceField(): string {
   if (b.binding === 'proxy' && b.proxies.length > 0) return `proxy:${b.proxies.join(',')}`;
   if (b.binding === 'xray' && b.xrays.length > 0) return `xray:${b.xrays.join(',')}`;
   if (b.binding === 'set' && b.set) return `xrayset:${b.set}`;
+  if (b.binding === 'sub' && b.sub) return SUB_PREFIX + b.sub;
   if (b.binding === 'iface') return b.iface;
   return '';
 }
@@ -818,6 +842,7 @@ function bulkIsValid(): boolean {
   if (b.binding === 'proxy') return b.proxies.length > 0;
   if (b.binding === 'xray') return b.xrays.length > 0;
   if (b.binding === 'set') return !!b.set;
+  if (b.binding === 'sub') return !!b.sub;
   return false;
 }
 
@@ -829,7 +854,12 @@ async function applyBulkNow() {
   if (!b || !bulkIsValid() || selected.value.size === 0) return;
   try {
     const ids = [...selected.value];
-    const result = await BulkUpdateRules(ids, b.action, bulkInterfaceField());
+    const iface = bulkInterfaceField();
+    let result: ipc.GroupsBulkResult | undefined;
+    const done = await withExitConfirm(iface, async (ack) => {
+      result = await BulkUpdateRules(ids, b.action, iface, ack);
+    });
+    if (!done) return;
     const affected = result?.affected ?? 0;
     error.value = '';
     if (affected < ids.length) {
@@ -850,22 +880,24 @@ type EditState = {
   id: number;
   pattern: string;
   action: 'block' | 'route';
-  binding: 'iface' | 'proxy' | 'xray' | 'set';
+  binding: 'iface' | 'proxy' | 'xray' | 'set' | 'sub';
   iface: string;
   proxies: string[];
   xrays: string[];
   set: string;
+  sub: string;
   enabled: boolean;
 };
 
 const editing = ref<EditState | null>(null);
 
 function beginEdit(r: ipc.RuleDTO) {
-  let binding: 'iface' | 'proxy' | 'xray' | 'set' = 'iface';
+  let binding: 'iface' | 'proxy' | 'xray' | 'set' | 'sub' = 'iface';
   let iface = '';
   let proxyNames: string[] = [];
   let xrayNames: string[] = [];
   let setName = '';
+  let subName = '';
   if (r.interface.startsWith('app:')) {
     // Legacy app-bound rules are being removed daemon-side; degrade
     // gracefully to an empty interface binding so editing doesn't crash.
@@ -874,6 +906,9 @@ function beginEdit(r: ipc.RuleDTO) {
   } else if (r.interface.startsWith('proxy:')) {
     binding = 'proxy';
     proxyNames = r.interface.substring(6).split(',').map(s => s.trim()).filter(Boolean);
+  } else if (ruleIsSub(r.interface)) {
+    binding = 'sub';
+    subName = ruleSubName(r.interface);
   } else if (r.interface.startsWith('xrayset:')) {
     binding = 'set';
     setName = r.interface.substring(8).trim();
@@ -899,6 +934,7 @@ function beginEdit(r: ipc.RuleDTO) {
     proxies: proxyNames,
     xrays: xrayNames,
     set: setName,
+    sub: subName,
     enabled: r.enabled,
   };
 }
@@ -911,6 +947,7 @@ function editingInterfaceField(): string {
   if (e.binding === 'proxy' && e.proxies.length > 0) return `proxy:${e.proxies.join(',')}`;
   if (e.binding === 'xray' && e.xrays.length > 0) return `xray:${e.xrays.join(',')}`;
   if (e.binding === 'set' && e.set) return `xrayset:${e.set}`;
+  if (e.binding === 'sub' && e.sub) return SUB_PREFIX + e.sub;
   if (e.binding === 'iface') return e.iface;
   return '';
 }
@@ -923,6 +960,7 @@ function editingIsValid(): boolean {
   if (e.binding === 'proxy') return e.proxies.length > 0;
   if (e.binding === 'xray') return e.xrays.length > 0;
   if (e.binding === 'set') return !!e.set;
+  if (e.binding === 'sub') return !!e.sub;
   return false;
 }
 
@@ -947,7 +985,10 @@ async function saveEditNow() {
   const e = editing.value;
   if (!editingIsValid()) return;
   try {
-    await UpdateRule(e!.id, e!.pattern.trim(), e!.action, editingInterfaceField(), e!.enabled);
+    const iface = editingInterfaceField();
+    const done = await withExitConfirm(iface, (ack) =>
+      UpdateRule(e!.id, e!.pattern.trim(), e!.action, iface, e!.enabled, ack));
+    if (!done) return; // cancelled: keep editing
     editing.value = null;
     await refresh();
     emit('changed');
@@ -974,6 +1015,7 @@ async function refresh() {
       members: s.members || [],
     })) as unknown as XraySetRow[];
     knownGroups.value = gs || [];
+    void loadExits();
     error.value = '';
     // Drop cached exit IPs for rules that no longer exist or whose
     // binding changed, so stale entries don't linger, then auto-fetch
@@ -1000,9 +1042,11 @@ function add() {
 async function addNow() {
   if (!draftIsValid()) return;
   try {
-    await AddRule(draft.value.pattern.trim(), draft.value.action,
-      draftInterfaceField(),
-      draft.value.enabled);
+    const iface = draftInterfaceField();
+    const pattern = draft.value.pattern.trim();
+    const done = await withExitConfirm(iface, (ack) =>
+      AddRule(pattern, draft.value.action, iface, draft.value.enabled, ack));
+    if (!done) return; // cancelled: keep the draft
     draft.value.pattern = '';
     draft.value.iface = '';
     draft.value.proxies = [];
@@ -1019,7 +1063,8 @@ function toggle(r: ipc.RuleDTO) {
 }
 async function toggleNow(r: ipc.RuleDTO) {
   try {
-    await UpdateRule(r.id, r.pattern, r.action, r.interface, !r.enabled);
+    // Same binding: the daemon never asks for an exit confirmation here.
+    await UpdateRule(r.id, r.pattern, r.action, r.interface, !r.enabled, false);
     await refresh();
     emit('changed');
   } catch (e: any) {
@@ -1144,6 +1189,37 @@ function setStatusLabel(name: string): string {
   return parts.join(' · ');
 }
 
+// ---- Subscription exits ("xraysub:NAME") ----
+const { byName: subExitByName, drifted: driftedSubs, options: subOptions, load: loadExits } = useSubExits();
+
+function subStatusBadge(name: string): string {
+  const e = subExitByName(name);
+  if (!e) return '?';
+  if (!e.enabled) return 'off';
+  return verdictShort(e);
+}
+
+function subStatusLabel(name: string): string {
+  const e = subExitByName(name);
+  if (!e) return `${name} — subscription no longer exists`;
+  if (!e.enabled) return `subscription "${name}" is disabled — its rules return NXDOMAIN`;
+  const ips = (e.exits || []).map(x => `${x.ip}${x.country ? ` (${x.country})` : ''}`).join(', ');
+  const base = `subscription "${name}" — each node is the exit · ${verdictShort(e)}`;
+  return ips ? `${base}: ${ips}` : base;
+}
+
+const acking = ref<number | null>(null);
+async function acceptSubExits(id: number) {
+  acking.value = id;
+  try {
+    await ackSubExits(id);
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    acking.value = null;
+  }
+}
+
 function xrayByName(name: string): XrayRow | undefined {
   return xrays.value.find(x => x.name === name);
 }
@@ -1192,6 +1268,10 @@ function bindingDown(field: string): boolean {
       return !!x && x.enabled;
     });
   }
+  if (ruleIsSub(field)) {
+    const e = subExitByName(ruleSubName(field));
+    return !e || !e.enabled;
+  }
   if (ruleIsSet(field)) {
     // A set is down when it's gone, switched off, or every member it
     // names has become undialable — the daemon falls through the
@@ -1206,13 +1286,15 @@ function bindingDown(field: string): boolean {
 onMounted(() => {
   refresh();
   stopLivePoll = startPoll(refreshLive, 2000);
+  stopExitPoll = startPoll(loadExits, 30000);
 });
-onUnmounted(() => stopLivePoll?.());
+onUnmounted(() => { stopLivePoll?.(); stopExitPoll?.(); });
 </script>
 
 <template>
   <div class="panel">
     <h2>Rules</h2>
+    <ExitConfirmDialog />
     <div v-if="error" class="error">{{ error }}</div>
 
     <!-- Search box up top: drives both the quick-add cards below and
@@ -1332,6 +1414,8 @@ onUnmounted(() => stopLivePoll?.());
             <button :class="['seg', {active: groupApply.binding === 'xray'}]" @click="groupApply.binding = 'xray'">Xray</button>
             <button :class="['seg', {active: groupApply.binding === 'set'}]" @click="groupApply.binding = 'set'"
                     title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
+            <button :class="['seg', {active: groupApply.binding === 'sub'}]" @click="groupApply.binding = 'sub'"
+                    title="Route through a subscription's nodes — each node is the exit">Subscription</button>
           </div>
           <SearchSelect v-if="groupApply.binding === 'iface'" v-model="groupApply.iface" :options="ifaceOptions"
                         placeholder="— pick interface —" search-placeholder="search interfaces…"
@@ -1348,10 +1432,14 @@ onUnmounted(() => stopLivePoll?.());
               · {{ groupApply.xrays.length }} selected
             </span>
           </span>
+          <SearchSelect v-else-if="groupApply.binding === 'sub'" v-model="groupApply.sub" :options="subOptions"
+                        placeholder="— pick subscription —" search-placeholder="search subscriptions…"
+                        style="flex: 1" />
           <SearchSelect v-else v-model="groupApply.set" :options="setOptions"
                         placeholder="— pick outbound set —" search-placeholder="search sets…"
                         style="flex: 1" />
         </div>
+        <SubExitNote v-if="groupApply.binding === 'sub' && groupApply.sub" :exit="subExitByName(groupApply.sub)" :name="groupApply.sub" />
         <div v-if="groupApply.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
                   :class="['app-chip', {active: groupApply.proxies.includes(p.name)}]"
@@ -1402,6 +1490,8 @@ onUnmounted(() => stopLivePoll?.());
             <button :class="['seg', {active: draft.binding === 'xray'}]" @click="draft.binding = 'xray'">Xray</button>
             <button :class="['seg', {active: draft.binding === 'set'}]" @click="draft.binding = 'set'"
                     title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
+            <button :class="['seg', {active: draft.binding === 'sub'}]" @click="draft.binding = 'sub'"
+                    title="Route through a subscription's nodes — each node is the exit">Subscription</button>
           </div>
           <SearchSelect v-if="draft.binding === 'iface'" v-model="draft.iface" :options="ifaceOptions"
                         placeholder="— pick interface —" search-placeholder="search interfaces…"
@@ -1418,10 +1508,14 @@ onUnmounted(() => stopLivePoll?.());
               · {{ draft.xrays.length }} selected
             </span>
           </span>
+          <SearchSelect v-else-if="draft.binding === 'sub'" v-model="draft.sub" :options="subOptions"
+                        placeholder="— pick subscription —" search-placeholder="search subscriptions…"
+                        style="flex: 1" />
           <SearchSelect v-else v-model="draft.set" :options="setOptions"
                         placeholder="— pick outbound set —" search-placeholder="search sets…"
                         style="flex: 1" />
         </div>
+        <SubExitNote v-if="draft.binding === 'sub' && draft.sub" :exit="subExitByName(draft.sub)" :name="draft.sub" />
         <div v-if="draft.binding === 'proxy'" class="chip-grid">
           <button v-for="p in proxies" :key="p.id"
                   :class="['app-chip', {active: draft.proxies.includes(p.name)}]"
@@ -1491,6 +1585,8 @@ onUnmounted(() => stopLivePoll?.());
               <button :class="['seg', {active: bulk.binding === 'xray'}]" @click="bulk.binding = 'xray'">Xray</button>
               <button :class="['seg', {active: bulk.binding === 'set'}]" @click="bulk.binding = 'set'"
                       title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
+              <button :class="['seg', {active: bulk.binding === 'sub'}]" @click="bulk.binding = 'sub'"
+                      title="Route through a subscription's nodes — each node is the exit">Subscription</button>
             </div>
             <SearchSelect v-if="bulk.binding === 'iface'" v-model="bulk.iface" :options="ifaceOptions"
                         placeholder="— pick interface —" search-placeholder="search interfaces…"
@@ -1507,10 +1603,14 @@ onUnmounted(() => stopLivePoll?.());
                 · {{ bulk.xrays.length }} selected
               </span>
             </span>
+            <SearchSelect v-else-if="bulk.binding === 'sub'" v-model="bulk.sub" :options="subOptions"
+                          placeholder="— pick subscription —" search-placeholder="search subscriptions…"
+                          style="flex: 1" />
             <SearchSelect v-else v-model="bulk.set" :options="setOptions"
                         placeholder="— pick outbound set —" search-placeholder="search sets…"
                         style="flex: 1" />
           </div>
+          <SubExitNote v-if="bulk.binding === 'sub' && bulk.sub" :exit="subExitByName(bulk.sub)" :name="bulk.sub" />
           <div v-if="bulk.binding === 'proxy'" class="chip-grid">
             <button v-for="p in proxies" :key="p.id"
                     :class="['app-chip', {active: bulk.proxies.includes(p.name)}]"
@@ -1539,6 +1639,23 @@ onUnmounted(() => stopLivePoll?.());
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Exit drift: a subscription rules route through now leaves from an
+         exit IP the user hasn't accepted (docs/xray-sub-exit.md). Rules
+         keep routing; this only asks. -->
+    <div v-for="e in driftedSubs" :key="'exit-' + e.subId" class="exit-banner" data-tour="sub-exit-banner">
+      <span class="exit-dot">!</span>
+      <span style="flex: 1">
+        Subscription <strong>{{ e.name }}</strong> now leaves from
+        <strong>{{ e.exits.length }}</strong> exit IPs
+        <span class="muted">({{ e.exits.filter(x => !e.accepted.includes(x.ip)).map(x => x.ip + (x.country ? ' ' + x.country : '')).join(', ') }} new)</span>.
+        Its {{ e.ruleCount }} rule{{ e.ruleCount === 1 ? '' : 's' }} keep routing — sites may see your IP change between connections.
+      </span>
+      <button class="danger-outline" :disabled="acking === e.subId" @click="acceptSubExits(e.subId)"
+              title="Accept the current exit IPs; em-wall asks again only if another one appears">
+        {{ acking === e.subId ? 'Accepting…' : 'Accept exits' }}
+      </button>
     </div>
 
     <!-- Drift banner: groups whose shipped domain list has grown past the
@@ -1690,10 +1807,12 @@ onUnmounted(() => stopLivePoll?.());
                       :title="ruleIsProxy(r.interface) ? 'Proxy missing — referenced proxy no longer exists'
                             : ruleIsXray(r.interface) ? 'No referenced xray entry is enabled — queries return NXDOMAIN'
                             : ruleIsSet(r.interface) ? setStatusLabel(ruleSetName(r.interface))
+                            : ruleIsSub(r.interface) ? subStatusLabel(ruleSubName(r.interface))
                             : 'Configured interface is not up — queries return NXDOMAIN until it comes back'">
                   ⚠ {{ ruleIsProxy(r.interface) ? 'proxy missing'
                        : ruleIsXray(r.interface) ? 'xray off'
                        : ruleIsSet(r.interface) ? 'set unusable'
+                       : ruleIsSub(r.interface) ? 'subscription off'
                        : 'iface down' }}
                 </span>
               </td>
@@ -1724,6 +1843,18 @@ onUnmounted(() => stopLivePoll?.());
                         :title="setStatusLabel(ruleSetName(r.interface))">
                     <span>⛓ {{ ruleSetName(r.interface) }}</span>
                     <span class="muted">{{ setStatusBadge(ruleSetName(r.interface)) }}</span>
+                  </span>
+                </div>
+                <div v-else-if="r.action === 'route' && ruleIsSub(r.interface)" class="row" style="gap: 4px; flex-wrap: wrap">
+                  <!-- Subscription exit: one chip, the verdict is the
+                       point — red while the exits need a confirmation. -->
+                  <span :class="['sub-chip', {
+                          'sub-chip-multi': subExitByName(ruleSubName(r.interface))?.verdict === 'multi',
+                          'sub-chip-alert': subExitByName(ruleSubName(r.interface))?.needsAck,
+                        }]"
+                        :title="subStatusLabel(ruleSubName(r.interface))">
+                    <span>⇶ {{ ruleSubName(r.interface) }}</span>
+                    <span class="muted">{{ subStatusBadge(ruleSubName(r.interface)) }}</span>
                   </span>
                 </div>
                 <code v-else-if="r.action === 'route'" style="font-size: 12px">{{ r.interface }}</code>
@@ -1797,6 +1928,8 @@ onUnmounted(() => stopLivePoll?.());
                         <button :class="['seg', {active: editing!.binding === 'xray'}]" @click="editing!.binding = 'xray'">Xray</button>
                         <button :class="['seg', {active: editing!.binding === 'set'}]" @click="editing!.binding = 'set'"
                                 title="Bind to a named outbound set — the rule follows the set's members as they change">Set</button>
+                        <button :class="['seg', {active: editing!.binding === 'sub'}]" @click="editing!.binding = 'sub'"
+                                title="Route through a subscription's nodes — each node is the exit">Subscription</button>
                       </div>
                       <SearchSelect v-if="editing!.binding === 'iface'" v-model="editing!.iface" :options="ifaceOptions"
                                     placeholder="— pick interface —" search-placeholder="search interfaces…"
@@ -1813,10 +1946,14 @@ onUnmounted(() => stopLivePoll?.());
                           · {{ editing!.xrays.length }} selected
                         </span>
                       </span>
+                      <SearchSelect v-else-if="editing!.binding === 'sub'" v-model="editing!.sub" :options="subOptions"
+                                    placeholder="— pick subscription —" search-placeholder="search subscriptions…"
+                                    style="flex: 1" />
                       <SearchSelect v-else v-model="editing!.set" :options="setOptions"
                         placeholder="— pick outbound set —" search-placeholder="search sets…"
                         style="flex: 1" />
                     </div>
+                    <SubExitNote v-if="editing!.binding === 'sub' && editing!.sub" :exit="subExitByName(editing!.sub)" :name="editing!.sub" />
                     <div v-if="editing!.binding === 'proxy'" class="chip-grid">
                       <button v-for="p in proxies" :key="p.id"
                               :class="['app-chip', {active: editing!.proxies.includes(p.name)}]"
@@ -2178,6 +2315,29 @@ button.tag-pill:hover { filter: brightness(1.2); }
   color: var(--text-dim);
   border: 1px solid var(--border);
 }
+.exit-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 111, 111, 0.55);
+  border-radius: 6px;
+  background: rgba(255, 111, 111, 0.08);
+  font-size: 12px;
+}
+.exit-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--danger); color: #fff; font-weight: 700; font-size: 11px;
+}
+.danger-outline { color: var(--danger); border-color: rgba(255, 111, 111, 0.55); }
+.sub-chip {
+  display: inline-flex; gap: 4px; align-items: center;
+  padding: 2px 6px; border: 1px solid var(--accent); border-radius: 12px; font-size: 11px;
+}
+.sub-chip-multi { border-color: var(--warn); }
+.sub-chip-alert { border-color: var(--danger); background: rgba(255, 111, 111, 0.1); }
 .drift-banner {
   display: flex;
   align-items: center;

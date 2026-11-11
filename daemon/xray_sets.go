@@ -30,14 +30,31 @@ import (
 // closed for a set ref (nothing downstream matches it) and is a no-op
 // for everything else.
 func (d *handlerDeps) expandIface(ctx context.Context, iface string) string {
-	if !xray.IsSetInterface(iface) || d.xrayStore == nil {
+	if !xray.IsIndirectInterface(iface) || d.xrayStore == nil {
 		return iface
 	}
-	exp, err := d.xrayStore.SetExpansions(ctx)
+	exp, err := d.indirectExpansions(ctx)
 	if err != nil {
 		return iface
 	}
 	return xray.ExpandSetInterface(iface, exp)
+}
+
+// indirectExpansions is the map xray.ExpandSetInterface takes: sets by
+// name plus subscription exits by full "xraysub:NAME" key.
+func (d *handlerDeps) indirectExpansions(ctx context.Context) (map[string]string, error) {
+	exp, err := d.xrayStore.SetExpansions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	subs, err := d.xrayStore.SubExpansions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range subs {
+		exp[k] = v
+	}
+	return exp, nil
 }
 
 // expandRuleIfaces returns rs with every set-bound Interface resolved,
@@ -49,7 +66,7 @@ func (d *handlerDeps) expandRuleIfaces(ctx context.Context, rs []rules.Rule) []r
 	}
 	need := false
 	for i := range rs {
-		if xray.IsSetInterface(rs[i].Interface) {
+		if xray.IsIndirectInterface(rs[i].Interface) {
 			need = true
 			break
 		}
@@ -57,7 +74,7 @@ func (d *handlerDeps) expandRuleIfaces(ctx context.Context, rs []rules.Rule) []r
 	if !need {
 		return rs
 	}
-	exp, err := d.xrayStore.SetExpansions(ctx)
+	exp, err := d.indirectExpansions(ctx)
 	if err != nil {
 		return rs
 	}
@@ -84,6 +101,86 @@ func (d *handlerDeps) validateSetRefs(ctx context.Context, iface string) error {
 		return fmt.Errorf("unknown outbound set reference: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// validateSubRefs rejects a rule bound to a subscription exit that doesn't
+// exist, or to more than one (fallback lists aren't supported yet).
+func (d *handlerDeps) validateSubRefs(ctx context.Context, iface string) error {
+	name := xray.ParseSubName(iface)
+	if name == "" {
+		return nil
+	}
+	if strings.Contains(name, ",") {
+		return fmt.Errorf("a rule can route through one subscription only")
+	}
+	if !xray.ValidName(name) {
+		return fmt.Errorf("invalid subscription reference: %s", name)
+	}
+	missing, err := d.xrayStore.SubNamesExist(ctx, []string{name})
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("unknown subscription reference: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// exitAck is what a rule write says about a multi-exit subscription.
+type exitAck int
+
+const (
+	exitAckAsk   exitAck = iota // not confirmed: refuse while it needs a confirm
+	exitAckGiven                // confirmed: accept the current exits
+	exitAckSkip                 // binding unchanged: no check, accept nothing
+)
+
+func exitAckFrom(given bool) exitAck {
+	if given {
+		return exitAckGiven
+	}
+	return exitAckAsk
+}
+
+// validateRuleIface runs every reference check a rule's Interface needs
+// and returns it canonicalized. ack covers a multi-exit subscription (see
+// checkExitAck).
+func (d *handlerDeps) validateRuleIface(ctx context.Context, iface string, ack exitAck) (string, error) {
+	if err := d.validateProxyRefs(ctx, iface); err != nil {
+		return "", err
+	}
+	if err := d.validateXrayRefs(ctx, iface); err != nil {
+		return "", err
+	}
+	iface = xray.CanonicalizeInterface(iface)
+	if err := d.validateSetRefs(ctx, iface); err != nil {
+		return "", err
+	}
+	if err := d.validateSubRefs(ctx, iface); err != nil {
+		return "", err
+	}
+	if ack != exitAckSkip {
+		if err := d.checkExitAck(ctx, iface, ack == exitAckGiven); err != nil {
+			return "", err
+		}
+	}
+	return iface, nil
+}
+
+// rulesReferencingSub returns the IDs of rules routed through subscription name.
+func (d *handlerDeps) rulesReferencingSub(ctx context.Context, name string) ([]int64, error) {
+	all, err := d.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	var ids []int64
+	for _, r := range all {
+		if xray.ParseSubName(r.Interface) == name {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
 }
 
 // rulesReferencingSet returns the IDs of rules bound to set name.

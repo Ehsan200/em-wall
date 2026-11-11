@@ -94,10 +94,11 @@ func (a *app) rulesList(args []string) int {
 func (a *app) rulesAdd(args []string) int {
 	fs := a.newFlagSet("rules add")
 	action := fs.String("action", "", "block, allow, or route (required)")
-	iface := fs.String("iface", "", "route target: utunN, proxy:NAME, xray:NAME, or xrayset:NAME")
+	iface := fs.String("iface", "", "route target: utunN, proxy:NAME, xray:NAME, xrayset:NAME, or xraysub:NAME")
 	disabled := fs.Bool("disabled", false, "create the rule disabled")
+	acceptMulti := fs.Bool("accept-multi-exit", false, "confirm routing through a subscription whose nodes leave from several exit IPs")
 	fs.Usage = func() {
-		fmt.Fprint(a.errOut, "Usage: em-wall rules add <pattern> --action block|allow|route [--iface X] [--disabled]\n")
+		fmt.Fprint(a.errOut, "Usage: em-wall rules add <pattern> --action block|allow|route [--iface X] [--disabled] [--accept-multi-exit]\n")
 		fs.PrintDefaults()
 	}
 	pos, code, done := parseFlags(fs, args)
@@ -117,9 +118,10 @@ func (a *app) rulesAdd(args []string) int {
 		Action:    *action,
 		Interface: *iface,
 		Enabled:   !*disabled,
+		AckExits:  *acceptMulti,
 	}, &added)
 	if err != nil {
-		return a.fail(err)
+		return a.failExit(err)
 	}
 	if a.json {
 		if err := a.emitJSON(added); err != nil {

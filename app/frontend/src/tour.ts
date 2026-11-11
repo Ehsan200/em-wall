@@ -332,6 +332,7 @@ const STEPS: TourStep[] = [
       { term: 'xray:NAME', def: 'An xray outbound from the Xray page.' },
       { term: 'xray:a,b', def: 'Several targets. The first one that works is used.' },
       { term: 'xrayset:NAME', def: 'An outbound set (covered in the Xray chapter).' },
+      { term: 'xraysub:NAME', def: 'A whole subscription: its nodes are the exit (covered in the Xray chapter).' },
     ],
     tip: 'For proxy and xray targets em-wall answers with a placeholder address (<b>FakeIP</b>, 198.18.x.x) without looking the name up. The real lookup happens on the far side, so your ISP never sees which sites you route.',
   },
@@ -430,7 +431,7 @@ const STEPS: TourStep[] = [
     target: [t('xray-sub'), t('xray-sub-add')],
     body: [
       'A <b>subscription</b> is a URL from your provider that lists many servers. Each of those servers is a <b>pool node</b>, and together they make up the subscription’s <b>pool</b>. <b>+ Add subscription</b> to start, and <b>Refresh</b> (or Refresh all) to fetch the current list.',
-      'Pool nodes are <b>not</b> rule targets on their own. They exist to carry a <b>master</b> (next step). <b>Nodes</b> opens the list with each node’s ping. ★ marks the nodes carrying traffic right now.',
+      'A pool usually carries a <b>master</b> (next step). A rule can also route through the whole subscription, with the nodes themselves as the exit (see “A subscription as the exit”). <b>Nodes</b> opens the list with each node’s ping. ★ marks the nodes carrying traffic right now.',
     ],
     flow: [
       { label: 'Subscription URL', sub: 'from your provider' },
@@ -480,6 +481,26 @@ const STEPS: TourStep[] = [
       { term: 'Manual', def: 'Only the nodes you <b>Pin</b> in the node list.' },
     ],
     tip: 'Not sure? Leave it on Auto, and look at the Pool timeline on the Health page if a master feels unsteady.',
+  },
+  {
+    chapter: 'Xray',
+    id: 'xray-sub-exit',
+    title: 'A subscription as the exit',
+    tab: 'xray',
+    view: 'subscriptions',
+    target: [t('xray-sub-exits'), t('xray-sub')],
+    danger: true,
+    body: [
+      'A rule can route straight through a subscription: pick <b>Subscription</b> as the target (<code>xraysub:NAME</code>). The pool picks the node, and that node is the exit, so the site sees the node’s IP.',
+      'That is safe only when all the nodes leave from <b>one</b> IP. em-wall checks every node’s exit IP and shows it here as <b>Exit IPs</b>. If the nodes use several IPs, sites see your IP change between connections, even within one page load. Sign-ins, payments and anti-fraud checks can treat that as a stolen session.',
+      'So a subscription with several exit IPs needs your confirmation before a rule can use it. If it later gains a new exit IP, a red banner on the Rules page asks again. Your rules keep working in the meantime.',
+    ],
+    flow: [
+      { label: 'Rule', sub: 'xraysub:NAME' },
+      { label: 'Pool', sub: 'picks a node', tone: 'accent' },
+      { label: 'Node = exit', sub: 'its IP is what sites see', tone: 'danger' },
+    ],
+    tip: 'Need one fixed exit from a multi-exit subscription? Set its strategy to <b>Manual</b> and pin nodes that share one IP. Only pinned nodes count.',
   },
   {
     chapter: 'Xray',

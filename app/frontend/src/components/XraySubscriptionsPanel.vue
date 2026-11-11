@@ -9,17 +9,20 @@ import {
   SetXraySubEnabled, RefreshXraySub, XraySubNodes, SetXraySubNodeDisabled,
   ImportXraySubNode, XrayObservatory, SetXraySubStrategy, SetXraySubNodePinned,
 } from '../../wailsjs/go/main/App';
+import { useSubExits, checkSubExits, ackSubExits } from '../subExits';
 
-// Subscriptions are URL-fetched pools of nodes. They are consumed only
-// through a master entry's Dialer (see DialerPicker) — never a direct rule
-// target. This panel manages the URLs + their node pools.
+// Subscriptions are URL-fetched pools of nodes. They are consumed through a
+// master entry's Dialer (see DialerPicker), and a rule can route through
+// one directly ("xraysub:NAME", the node being the exit — see
+// docs/xray-sub-exit.md), which is why each row shows its exit-IP verdict.
+// This panel manages the URLs + their node pools.
 
 type Sub = {
   id: number; name: string; url: string; userAgent: string;
   intervalSec: number; nodeCap: number; enabled: boolean;
   lastFetched: string; lastError: string; nodeCount: number; activeCount: number;
   usageUpload: number; usageDownload: number; usageTotal: number; usageExpire: number;
-  strategy: string; pinnedCount: number;
+  strategy: string; pinnedCount: number; ruleCount: number;
 };
 type Node = {
   fingerprint: string; name: string; active: boolean; disabled: boolean; pinned: boolean; latencyMs: number;
@@ -431,13 +434,42 @@ function nodePickTitle(n: Node): string {
   return `Picked for ${p.masters.join(', ')}: ${p.m.picks} connection${p.m.picks === 1 ? '' : 's'} in the last ${r?.windowSec ?? 60}s (${p.m.sharePct}% of the pool's).\n${PICK_NOTE}`;
 }
 
+// ---- Exit IPs (subscription as a rule exit) ----
+const { byId: exitOf, load: loadExits } = useSubExits();
+const exitBusy = ref<number | null>(null);
+let stopExitPoll: (() => void) | undefined;
+
+async function checkExits(id: number) {
+  exitBusy.value = id;
+  try {
+    await checkSubExits(id);
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    exitBusy.value = null;
+  }
+}
+
+async function acceptExits(id: number) {
+  exitBusy.value = id;
+  try {
+    await ackSubExits(id);
+  } catch (e: any) {
+    error.value = e?.message || String(e);
+  } finally {
+    exitBusy.value = null;
+  }
+}
+
 onMounted(() => {
   refresh();
   pollObs();
   stopObsPoll = startPoll(pollObs, 5000);
+  stopExitPoll = startPoll(loadExits, 30000);
 });
 onUnmounted(() => {
   stopObsPoll?.();
+  stopExitPoll?.();
 });
 
 defineExpose({ refresh });
@@ -530,6 +562,38 @@ defineExpose({ refresh });
       </div>
       <div v-if="s.lastError" class="muted" style="font-size: 11px; color: var(--danger)">✗ {{ s.lastError }}</div>
 
+      <!-- Exit IPs: what a rule routed through this subscription looks like
+           to the sites it reaches. One shared IP is safe; several mean the
+           IP hops between connections. -->
+      <div v-if="exitOf(s.id)" data-tour="xray-sub-exits" class="row exit-row"
+           :class="{ 'exit-multi': exitOf(s.id)!.verdict === 'multi', 'exit-alert': exitOf(s.id)!.needsAck }">
+        <span class="muted">Exit IPs</span>
+        <template v-if="exitOf(s.id)!.verdict === 'unverified'">
+          <span class="muted">{{ exitOf(s.id)!.checking ? 'checking…' : 'not checked yet' }}</span>
+        </template>
+        <template v-else>
+          <strong v-if="exitOf(s.id)!.verdict === 'single'" style="color: var(--success)">✓ one</strong>
+          <strong v-else style="color: var(--danger)">⚠ {{ exitOf(s.id)!.exits.length }} different</strong>
+          <code v-for="x in exitOf(s.id)!.exits" :key="x.ip" class="exit-ip"
+                :class="{ 'exit-new': exitOf(s.id)!.verdict === 'multi' && !exitOf(s.id)!.accepted.includes(x.ip) }"
+                :title="`${x.nodes} node${x.nodes === 1 ? '' : 's'} leave from here`">
+            {{ x.ip }}<span v-if="x.country"> {{ x.country }}</span> ×{{ x.nodes }}
+          </code>
+          <span v-if="exitOf(s.id)!.unmeasured" class="muted">· {{ exitOf(s.id)!.unmeasured }} not measured</span>
+          <span v-if="exitOf(s.id)!.rotatingNodes.length" class="muted"
+                :title="exitOf(s.id)!.rotatingNodes.join(', ')">· {{ exitOf(s.id)!.rotatingNodes.length }} rotating</span>
+          <span v-if="exitOf(s.id)!.pinnedOnly" class="muted">· pinned nodes only</span>
+        </template>
+        <span v-if="exitOf(s.id)!.ruleCount" class="muted">· used by {{ exitOf(s.id)!.ruleCount }} rule{{ exitOf(s.id)!.ruleCount === 1 ? '' : 's' }}</span>
+        <span style="flex: 1"></span>
+        <button v-if="exitOf(s.id)!.needsAck && exitOf(s.id)!.ruleCount" class="danger"
+                :disabled="exitBusy === s.id" @click="acceptExits(s.id)"
+                title="Accept these exit IPs for the rules routed through this subscription">Accept exits</button>
+        <button :disabled="exitBusy === s.id || exitOf(s.id)!.checking || !s.enabled" @click="checkExits(s.id)">
+          <span v-if="exitBusy === s.id || exitOf(s.id)!.checking" class="spinner"></span>Check exits
+        </button>
+      </div>
+
       <!-- Switch strategy -->
       <div data-tour="xray-strategy" class="row" style="gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px">
         <span class="muted">Switch strategy</span>
@@ -612,6 +676,10 @@ defineExpose({ refresh });
 </template>
 
 <style scoped>
+.exit-row { gap: 6px; align-items: center; flex-wrap: wrap; font-size: 11px; }
+.exit-row.exit-alert { padding: 6px 8px; border: 1px solid rgba(255, 111, 111, 0.5); border-radius: 6px; background: rgba(255, 111, 111, 0.06); }
+.exit-ip { font-size: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.exit-ip.exit-new { border-color: var(--danger); color: var(--danger); }
 .live-pick {
   font-size: 10px;
   background: var(--panel);

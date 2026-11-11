@@ -267,10 +267,11 @@ func (a *app) groupDelete(args []string) int {
 func (a *app) groupApply(args []string) int {
 	fs := a.newFlagSet("group apply")
 	action := fs.String("action", "block", "block, allow, or route")
-	iface := fs.String("iface", "", "route target: utunN, proxy:NAME, xray:NAME, or xrayset:NAME")
+	iface := fs.String("iface", "", "route target: utunN, proxy:NAME, xray:NAME, xrayset:NAME, or xraysub:NAME")
 	disabled := fs.Bool("disabled", false, "create the rules disabled")
+	acceptMulti := fs.Bool("accept-multi-exit", false, "confirm routing through a subscription whose nodes leave from several exit IPs")
 	fs.Usage = func() {
-		fmt.Fprint(a.errOut, "Usage: em-wall group apply <key> [--action block|allow|route] [--iface X] [--disabled]\n")
+		fmt.Fprint(a.errOut, "Usage: em-wall group apply <key> [--action block|allow|route] [--iface X] [--disabled] [--accept-multi-exit]\n")
 		fs.PrintDefaults()
 	}
 	pos, code, done := parseFlags(fs, args)
@@ -291,9 +292,10 @@ func (a *app) groupApply(args []string) int {
 		Action:    *action,
 		Interface: *iface,
 		Enabled:   !*disabled,
+		AckExits:  *acceptMulti,
 	}, &res)
 	if err != nil {
-		return a.fail(err)
+		return a.failExit(err)
 	}
 	return a.reportApply(g.Key, res)
 }
@@ -303,8 +305,9 @@ func (a *app) groupSync(args []string) int {
 	all := fs.Bool("all", false, "sync every applied group that has drifted")
 	action := fs.String("action", "", "override the action of the created rules")
 	iface := fs.String("iface", "", "override the interface of the created rules")
+	acceptMulti := fs.Bool("accept-multi-exit", false, "confirm routing through a subscription whose nodes leave from several exit IPs")
 	fs.Usage = func() {
-		fmt.Fprint(a.errOut, "Usage: em-wall group sync <key> | --all [--action A] [--iface X]\n")
+		fmt.Fprint(a.errOut, "Usage: em-wall group sync <key> | --all [--action A] [--iface X] [--accept-multi-exit]\n")
 		fs.PrintDefaults()
 	}
 	pos, code, done := parseFlags(fs, args)
@@ -350,10 +353,10 @@ func (a *app) groupSync(args []string) int {
 	for _, k := range keys {
 		var res ipc.GroupsApplyResult
 		err := a.call(ipc.MethodGroupsSync, ipc.GroupsSyncParams{
-			Key: k, Action: *action, Interface: *iface,
+			Key: k, Action: *action, Interface: *iface, AckExits: *acceptMulti,
 		}, &res)
 		if err != nil {
-			return a.fail(fmt.Errorf("sync %s: %w", k, err))
+			return a.failExit(fmt.Errorf("sync %s: %w", k, err))
 		}
 		if code := a.reportApply(k, res); code != exitOK {
 			return code

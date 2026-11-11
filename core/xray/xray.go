@@ -14,6 +14,7 @@
 package xray
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -159,10 +160,47 @@ func InternalProxyName(name string) string {
 const InternalProxyPrefix = "_xray_"
 
 // IsInternalProxyName reports whether a proxy.Proxy.Name was minted
-// by the xray supervisor.
+// by the xray supervisor: an entry's _xray_NAME row or a subscription
+// exit's _xsub_ID row.
 func IsInternalProxyName(name string) bool {
-	return strings.HasPrefix(name, InternalProxyPrefix)
+	return strings.HasPrefix(name, InternalProxyPrefix) || strings.HasPrefix(name, SubProxyPrefix)
 }
+
+// SubPrefix is the literal "xraysub:" on a Rule.Interface that routes
+// through a subscription's node pool, the node itself being the exit
+// (docs/xray-sub-exit.md). Exactly one subscription per rule. The same
+// "xraysub:" spelling is a Dialer ref kind (dialer.go) — there it names a
+// pool a master tunnels through instead.
+const SubPrefix = "xraysub:"
+
+// IsSubInterface reports whether stored routes through a subscription.
+func IsSubInterface(s string) bool { return strings.HasPrefix(s, SubPrefix) }
+
+// SubInterface renders the stored Rule.Interface value for subscription name.
+func SubInterface(name string) string { return SubPrefix + normalizeName(name) }
+
+// ParseSubName returns the subscription named by "xraysub:NAME", or "" for
+// anything else.
+func ParseSubName(s string) string {
+	if !IsSubInterface(s) {
+		return ""
+	}
+	return normalizeName(strings.TrimPrefix(s, SubPrefix))
+}
+
+// SubProxyPrefix marks the hidden proxy.Proxy row the supervisor keeps for a
+// subscription used as a rule exit: socks5 to that subscription's slot
+// inbound. Keyed by subscription ID so a rename never touches it and the
+// name always fits the proxy-name limit.
+const SubProxyPrefix = "_xsub_"
+
+// SubProxyName is the hidden proxy row name for subscription id.
+func SubProxyName(id int64) string { return SubProxyPrefix + strconv.FormatInt(id, 10) }
+
+// IsIndirectInterface reports whether stored is resolved through the
+// expansion map at engine reload (an outbound set or a subscription exit)
+// rather than read literally.
+func IsIndirectInterface(s string) bool { return IsSetInterface(s) || IsSubInterface(s) }
 
 // InboundTag is the xray inbound tag for entry NAME. Used both in the
 // generated config's inbound entry and in the routing rule that pairs

@@ -87,6 +87,12 @@ const (
 	MethodXraySubImportNode      = "xraysub.importNode"    // promote one pool node to a standalone entry
 	MethodXraySubSetStrategy     = "xraysub.setStrategy"   // pool switch strategy: auto/stable/agile/manual
 	MethodXraySubSetNodePinned   = "xraysub.setNodePinned" // pin/unpin a node for a manual pool
+	// Subscriptions as a rule exit ("xraysub:NAME"; docs/xray-sub-exit.md):
+	// per-subscription exit-IP verdicts, accepting a multi-exit set, and
+	// measuring now.
+	MethodXraySubExits      = "xraysub.exits"
+	MethodXraySubAckExits   = "xraysub.ackExits"
+	MethodXraySubCheckExits = "xraysub.checkExits"
 	// Outbound sets — a named, ordered bundle of xray entries / proxies a
 	// rule can bind to as one unit ("xrayset:NAME"). Constants read
 	// "XraySets*" (plural) to keep them clearly apart from
@@ -292,6 +298,9 @@ type StatusResult struct {
 	// UpdateAvailable is the newer release tag the daemon's background
 	// check found, "" when up to date or not yet checked.
 	UpdateAvailable string `json:"updateAvailable,omitempty"`
+	// ExitWarnings names subscriptions rules route through whose exits
+	// changed past what the user accepted (docs/xray-sub-exit.md).
+	ExitWarnings []string `json:"exitWarnings,omitempty"`
 }
 
 type RuleDTO struct {
@@ -309,6 +318,10 @@ type RulesAddParams struct {
 	Action    string `json:"action"`
 	Interface string `json:"interface"`
 	Enabled   bool   `json:"enabled"`
+	// AckExits confirms routing through a subscription whose nodes leave
+	// from more than one exit IP (docs/xray-sub-exit.md). Without it such
+	// a write fails with an error starting "multi-exit:".
+	AckExits bool `json:"ackExits,omitempty"`
 }
 
 type RulesUpdateParams struct {
@@ -317,6 +330,10 @@ type RulesUpdateParams struct {
 	Action    string `json:"action"`
 	Interface string `json:"interface"`
 	Enabled   bool   `json:"enabled"`
+	// AckExits confirms routing through a subscription whose nodes leave
+	// from more than one exit IP (docs/xray-sub-exit.md). Without it such
+	// a write fails with an error starting "multi-exit:".
+	AckExits bool `json:"ackExits,omitempty"`
 }
 
 type RulesDeleteParams struct {
@@ -331,6 +348,10 @@ type RulesBulkUpdateParams struct {
 	IDs       []int64 `json:"ids"`
 	Action    string  `json:"action"`    // "block" or "route"
 	Interface string  `json:"interface"` // empty for block, required for route
+	// AckExits confirms routing through a subscription whose nodes leave
+	// from more than one exit IP (docs/xray-sub-exit.md). Without it such
+	// a write fails with an error starting "multi-exit:".
+	AckExits bool `json:"ackExits,omitempty"`
 }
 
 type SettingsGetParams struct {
@@ -488,6 +509,10 @@ type GroupsApplyParams struct {
 	Action    string `json:"action"`    // "block" or "route"
 	Interface string `json:"interface"` // empty for block, required for route
 	Enabled   bool   `json:"enabled"`
+	// AckExits confirms routing through a subscription whose nodes leave
+	// from more than one exit IP (docs/xray-sub-exit.md). Without it such
+	// a write fails with an error starting "multi-exit:".
+	AckExits bool `json:"ackExits,omitempty"`
 }
 
 // GroupsSyncParams tops up a group that is already applied: only the
@@ -499,6 +524,10 @@ type GroupsSyncParams struct {
 	Key       string `json:"key"`
 	Action    string `json:"action"`    // optional override
 	Interface string `json:"interface"` // optional override
+	// AckExits confirms routing through a subscription whose nodes leave
+	// from more than one exit IP (docs/xray-sub-exit.md). Without it such
+	// a write fails with an error starting "multi-exit:".
+	AckExits bool `json:"ackExits,omitempty"`
 }
 
 type GroupsApplyResult struct {
@@ -720,6 +749,9 @@ type XraySubDTO struct {
 	// its nodes: "auto" (default), "stable", "agile" or "manual".
 	Strategy    string `json:"strategy"`
 	PinnedCount int    `json:"pinnedCount"`
+	// RuleCount is how many rules route through this subscription as an
+	// exit ("xraysub:NAME").
+	RuleCount int `json:"ruleCount"`
 	// Data-quota accounting from the provider's Subscription-Userinfo
 	// header, byte counters. Expire is a Unix timestamp (0 = never). All
 	// zero means the provider never reported quota — frontend hides the bar.
@@ -729,6 +761,43 @@ type XraySubDTO struct {
 	UsageExpire   int64  `json:"usageExpire"`
 	CreatedAt     string `json:"createdAt"`
 	UpdatedAt     string `json:"updatedAt"`
+}
+
+// XraySubExitDTO is one subscription's exit-IP verdict
+// (docs/xray-sub-exit.md).
+type XraySubExitDTO struct {
+	SubID   int64  `json:"subId"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	// Verdict: "single" (every measured node leaves from one IP), "multi"
+	// (two or more IPs, a rotating node included) or "unverified" (no node
+	// measured yet).
+	Verdict string             `json:"verdict"`
+	Exits   []XraySubExitIPDTO `json:"exits"`
+	// RotatingNodes names nodes seen with more than one exit IP within the
+	// memory window.
+	RotatingNodes []string `json:"rotatingNodes"`
+	Measured      int      `json:"measured"`
+	Unmeasured    int      `json:"unmeasured"`
+	// Accepted is the exit set the user confirmed; NeedsAck is true while
+	// the verdict is multi and an exit outside Accepted exists.
+	Accepted   []string `json:"accepted"`
+	NeedsAck   bool     `json:"needsAck"`
+	RuleCount  int      `json:"ruleCount"`
+	LastCheck  string   `json:"lastCheck"` // RFC3339, empty if never
+	Checking   bool     `json:"checking"`
+	Strategy   string   `json:"strategy"`
+	PinnedOnly bool     `json:"pinnedOnly"` // manual strategy: only pinned nodes count
+}
+
+type XraySubExitIPDTO struct {
+	IP      string `json:"ip"`
+	Country string `json:"country"`
+	Nodes   int    `json:"nodes"`
+}
+
+type XraySubExitIDParams struct {
+	ID int64 `json:"id"` // 0 = every subscription (checkExits only)
 }
 
 type XraySubAddParams struct {

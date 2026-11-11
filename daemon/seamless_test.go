@@ -46,7 +46,7 @@ func TestXrayRouteKeys(t *testing.T) {
 		{Name: "nyc-direct", Outbound: vm("157.245.252.237", 11800)},
 		{Name: "nyc-direct-nap", Dialer: "xraysub:nap", Outbound: vm("157.245.252.237", 11800)},
 		{Name: "nyc-mouz-shop-nap", Dialer: "xraysub:nap", Outbound: `{"protocol":"vless","settings":{"vnext":[{"address":"172.64.155.209"}]}}`},
-	})
+	}, nil)
 	k := func(n string) string { return keys[xray.InternalProxyName(n)] }
 	if k("nyc") != k("nyc-afranet-direct") || k("nyc") != "host:79.175.167.62" {
 		t.Errorf("same relay host, different ports must share a route: %v", keys)

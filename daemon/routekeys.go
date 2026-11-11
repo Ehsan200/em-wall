@@ -48,9 +48,15 @@ func (r *routeKeys) lookup(name string) (string, bool) {
 	return k, ok
 }
 
-// xrayRouteKeys computes route keys for every xray entry.
-func xrayRouteKeys(entries []xray.Config) map[string]string {
+// xrayRouteKeys computes route keys for every xray entry and every
+// subscription exit riding one of slots (keyed by its pool, like a master).
+func xrayRouteKeys(entries []xray.Config, slots []xray.DialerSlot) map[string]string {
 	out := make(map[string]string, len(entries))
+	for _, sl := range slots {
+		for _, ex := range sl.Exits {
+			out[xray.SubProxyName(ex.SubID)] = "pool:" + sl.PoolKey
+		}
+	}
 	for _, e := range entries {
 		name := xray.InternalProxyName(e.Name)
 		if refs, err := xray.ParseDialer(e.Dialer); err == nil && len(refs) > 0 {
@@ -70,7 +76,7 @@ func (pf *proxyForwarder) routeOf(name string) string {
 	if k, ok := pf.routes.lookup(name); ok {
 		return k
 	}
-	if pf.store != nil && !strings.HasPrefix(name, xray.InternalProxyName("")) {
+	if pf.store != nil && !xray.IsInternalProxyName(name) {
 		// Served from the store's in-memory cache.
 		if p, err := pf.store.GetByName(context.Background(), name); err == nil && p.Host != "" {
 			return "host:" + strings.ToLower(p.Host)

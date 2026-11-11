@@ -35,6 +35,25 @@ type GenerateOptions struct {
 	ObservatoryInterval string
 	ObservatorySampling int
 	ObservatoryTimeout  string
+
+	// ExitProbes are subscription nodes the daemon measures the exit IP of
+	// (docs/xray-sub-exit.md): each becomes an outbound tagged ExitProbeTag,
+	// reachable only through the probe inbound. Never selected by a
+	// balancer or pinged by the observatory (the tag doesn't start "slot").
+	ExitProbes []ExitProbe
+}
+
+// ExitProbe is one subscription node to emit as a probe-only outbound.
+type ExitProbe struct {
+	SubID    int64
+	Key      string // node fingerprint
+	Outbound json.RawMessage
+}
+
+// ExitProbeTag is the probe-only outbound tag for node key of subscription
+// subID. Must never start with "slot" (the observatory's selector).
+func ExitProbeTag(subID int64, key string) string {
+	return "xexit-" + strconv.FormatInt(subID, 10) + "-" + sanitizeTag(key)
 }
 
 // slotBalancerExpected is how many best-ranked members a dialer slot's
@@ -466,7 +485,8 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 	// outbound — a slot member, or a master chained through one member. Its
 	// rules go right after the api rule, ahead of user rules: they only
 	// match the probe inbound, and a user catch-all must not swallow them.
-	if len(slots) > 0 {
+	// Subscription exit probes (ExitProbes) ride the same inbound.
+	if len(slots) > 0 || len(opt.ExitProbes) > 0 {
 		var accounts []any
 		var probeRules []json.RawMessage
 		route := func(tag string) {
@@ -505,6 +525,23 @@ func Generate(entries []Config, opt GenerateOptions) ([]byte, error) {
 					route(tag)
 				}
 			}
+		}
+		for _, p := range opt.ExitProbes {
+			var ob map[string]any
+			if err := json.Unmarshal(p.Outbound, &ob); err != nil {
+				// One unparseable node must not take xray down; the prober
+				// just never measures it.
+				continue
+			}
+			tag := ExitProbeTag(p.SubID, p.Key)
+			ob["tag"] = tag
+			healXHTTPExtra(ob)
+			b, err := json.Marshal(ob)
+			if err != nil {
+				continue
+			}
+			out.Outbounds = append(out.Outbounds, b)
+			route(tag)
 		}
 		out.Inbounds = append(out.Inbounds, inbound{
 			Tag:      ProbeTag,

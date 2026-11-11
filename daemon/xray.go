@@ -67,12 +67,16 @@ type xraySupervisor struct {
 	// lower-case name, for the timeline; nil = not measured. Set once in
 	// main before the health poll starts.
 	masterStanding func() map[string]masterStanding
-	routes         *routeKeys // route keys published for the proxy tunnel; nil-safe
-	live           *liveConns // open proxied connections, marked stale on a path change; nil-safe
-	logDir         string     // where xray writes its own access/error logs
-	xrayStore      *xray.Store
-	proxyStore     *proxy.Store
-	logger         *log.Logger
+	// ruleExits returns the subscription names (lower-case) an enabled rule
+	// routes through as an exit (xraysub:NAME); nil = none. Set once in
+	// main before the first Reconcile.
+	ruleExits  func(ctx context.Context) map[string]bool
+	routes     *routeKeys // route keys published for the proxy tunnel; nil-safe
+	live       *liveConns // open proxied connections, marked stale on a path change; nil-safe
+	logDir     string     // where xray writes its own access/error logs
+	xrayStore  *xray.Store
+	proxyStore *proxy.Store
+	logger     *log.Logger
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd     // current child process, nil if none running
@@ -225,17 +229,21 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("xray supervisor: list: %w", err)
 	}
 
-	s.routes.set(xrayRouteKeys(entries))
-
-	if err := s.syncProxies(ctx, entries); err != nil {
-		return err
-	}
-
 	if !s.enabled {
-		return nil
+		s.routes.set(xrayRouteKeys(entries, nil))
+		return s.syncProxies(ctx, entries, nil)
 	}
 
-	hasEnabled := false
+	slots, err := s.resolveDialerSlots(ctx, entries)
+	if err != nil {
+		return fmt.Errorf("xray supervisor: resolve dialer slots: %w", err)
+	}
+	probes := s.exitProbes(ctx)
+
+	// xray runs for an enabled entry, and also for subscriptions alone: a
+	// subscription exit is a slot, and measuring a subscription's exits
+	// (xray_subexit.go) needs its probe outbounds loaded.
+	hasEnabled := len(slots) > 0 || len(probes) > 0
 	for _, e := range entries {
 		if e.Enabled {
 			hasEnabled = true
@@ -245,21 +253,27 @@ func (s *xraySupervisor) Reconcile(ctx context.Context) error {
 	if !hasEnabled {
 		s.stopLocked()
 		s.loadedSlots = nil
-		return nil
+		s.routes.set(xrayRouteKeys(entries, nil))
+		return s.syncProxies(ctx, entries, nil)
+	}
+	s.routes.set(xrayRouteKeys(entries, slots))
+	publishSubExitLabels(slots)
+	// Hidden rows are written before the process is changed: a row for a
+	// slot that isn't up yet only fails a dial, which the rule's caller
+	// sees as an ordinary failure, the same as during a restart.
+	if err := s.syncProxies(ctx, entries, slots); err != nil {
+		return err
 	}
 
 	routing, err := s.xrayStore.GetRoutingRules(ctx)
 	if err != nil {
 		return fmt.Errorf("xray supervisor: get routing rules: %w", err)
 	}
-	slots, err := s.resolveDialerSlots(ctx, entries)
-	if err != nil {
-		return fmt.Errorf("xray supervisor: resolve dialer slots: %w", err)
-	}
 	cfg, err := xray.Generate(entries, xray.GenerateOptions{
 		LogDir:       s.logDir,
 		RoutingRules: routing,
 		DialerSlots:  slots,
+		ExitProbes:   probes,
 	})
 	if err != nil {
 		return fmt.Errorf("xray supervisor: generate: %w", err)
@@ -358,10 +372,11 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 	// members of a shared slot, never the aliasing itself.
 	var slots []xray.DialerSlot
 	slotByKey := make(map[string]int) // dialer key → index into slots
-	parked := s.parker.parked()
-	known := map[string]bool{}  // every resolved member, parked or not
-	noPins := map[string]bool{} // manual pools with no pin in them this round
-	idx := 0
+	b := slotBuild{
+		parked: s.parker.parked(),
+		known:  map[string]bool{},
+		noPins: map[string]bool{},
+	}
 	for _, m := range masters {
 		refs, err := xray.ParseDialer(m.Dialer)
 		if err != nil {
@@ -373,81 +388,157 @@ func (s *xraySupervisor) resolveDialerSlots(ctx context.Context, entries []xray.
 			slots[i].Aliases = append(slots[i].Aliases, m.Name)
 			continue
 		}
-		if idx >= xray.SlotCount {
+		if len(slots) >= xray.SlotCount {
 			s.logger.Printf("xray supervisor: dialers exceed slot pool of %d — %q and later route direct",
 				xray.SlotCount, m.Name)
 			break
 		}
-		members, err := s.resolveDialerMembers(ctx, refs, byName)
+		slot, ok, err := s.buildSlot(ctx, &b, "master "+strconv.Quote(m.Name), m.Name, refs, key, len(slots), byName)
 		if err != nil {
 			return nil, err
 		}
-		for _, mb := range members {
-			known[mb.Key] = true
-		}
-		strategy, auto := s.poolStrategy(ctx, key, refs)
-		var pinned []string
-		if strategy == xray.StrategyManual {
-			if pinned = s.poolPins(ctx, refs, members); len(pinned) == 0 {
-				if !s.noPins[key] {
-					s.logger.Printf("xray supervisor: master %q: manual pool has no pinned node in it — running it stable until one is pinned", m.Name)
-				}
-				noPins[key] = true
-				strategy = xray.StrategyStable
-			}
-		}
-		switch strategy {
-		case xray.StrategyManual:
-			members = onlyKeys(members, pinned)
-		case xray.StrategyAgile:
-			// Agile follows nodes that come back: nothing stays parked.
-			var back []string
-			for _, mb := range members {
-				if parked[mb.Key] {
-					back = append(back, mb.Key)
-				}
-			}
-			if len(back) > 0 {
-				s.parker.forget(back)
-				s.logger.Printf("xray supervisor: master %q: agile pool — %d parked node(s) back in the pool", m.Name, len(back))
-			}
-		default:
-			members = withoutParked(members, parked)
-		}
-		if len(members) == 0 {
-			s.logger.Printf("xray supervisor: master %q dialer has no reachable members yet — routing direct", m.Name)
+		if !ok {
 			continue
 		}
 		slotByKey[key] = len(slots)
-		slot := xray.DialerSlot{
-			Master:   m.Name,
-			Index:    idx,
-			Members:  members,
-			PoolKey:  key,
-			Strategy: strategy,
-			Auto:     auto,
-			Pinned:   pinned,
-		}
-		switch strategy {
-		case xray.StrategyAgile:
-			if pk, ok := s.agile.get(key); ok {
-				slot.Preferred, slot.Expected, slot.Fallback = pk.active, len(pk.active), pk.spare
-			}
-		case xray.StrategyStable:
-			slot.Preferred = s.shortlist.preferred(m.Name, members)
-		}
 		slots = append(slots, slot)
-		idx++
 	}
-	// After the loop: aliases join a slot after it was built, and a member
+
+	// Subscriptions used as a rule exit (docs/xray-sub-exit.md), after the
+	// masters so master slot indices never move for them. A master whose
+	// pool is exactly the subscription serves it; otherwise it gets an
+	// exit-only slot of its own.
+	for _, ex := range s.exitSubs(ctx) {
+		ref := []xray.DialerRef{{Kind: xray.DialerKindXraysub, Name: ex.Sub}}
+		key := dialerGroupKey(ref)
+		if i, ok := slotByKey[key]; ok {
+			slots[i].Exits = append(slots[i].Exits, ex)
+			continue
+		}
+		if len(slots) >= xray.SlotCount {
+			s.logger.Printf("xray supervisor: slot pool of %d full — subscription exit %q has no slot (its rules fail closed)",
+				xray.SlotCount, ex.Sub)
+			break
+		}
+		owner := xray.ExitOwner(ex.Sub)
+		slot, ok, err := s.buildSlot(ctx, &b, "subscription exit "+strconv.Quote(ex.Sub), owner, ref, key, len(slots), byName)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		slot.ExitOnly = true
+		slot.Exits = []xray.SlotExit{ex}
+		slotByKey[key] = len(slots)
+		slots = append(slots, slot)
+	}
+
+	// After the loops: aliases join a slot after it was built, and a member
 	// that can't carry an alias is as broken for the slot as for its owner.
 	for i := range slots {
 		slots[i].Broken = s.paths.broken(slots[i])
 	}
-	s.parker.retain(known)
-	s.noPins = noPins
+	s.parker.retain(b.known)
+	s.noPins = b.noPins
 	s.logStrategyChanges(s.loadedSlots, slots)
 	return slots, nil
+}
+
+// slotBuild is resolveDialerSlots' per-round state shared by every slot.
+type slotBuild struct {
+	parked map[string]bool
+	known  map[string]bool // every resolved member, parked or not
+	noPins map[string]bool // manual pools with no pin in them this round
+}
+
+// buildSlot resolves one pool — refs, grouped under key — into a slot owned
+// by owner (a master's name, or an exit-only slot's xray.ExitOwner label).
+// ok=false: the pool has no reachable member right now.
+func (s *xraySupervisor) buildSlot(ctx context.Context, b *slotBuild, what, owner string, refs []xray.DialerRef, key string, idx int, byName map[string]xray.Config) (xray.DialerSlot, bool, error) {
+	members, err := s.resolveDialerMembers(ctx, refs, byName)
+	if err != nil {
+		return xray.DialerSlot{}, false, err
+	}
+	for _, mb := range members {
+		b.known[mb.Key] = true
+	}
+	strategy, auto := s.poolStrategy(ctx, key, refs)
+	var pinned []string
+	if strategy == xray.StrategyManual {
+		if pinned = s.poolPins(ctx, refs, members); len(pinned) == 0 {
+			if !s.noPins[key] {
+				s.logger.Printf("xray supervisor: %s: manual pool has no pinned node in it — running it stable until one is pinned", what)
+			}
+			b.noPins[key] = true
+			strategy = xray.StrategyStable
+		}
+	}
+	switch strategy {
+	case xray.StrategyManual:
+		members = onlyKeys(members, pinned)
+	case xray.StrategyAgile:
+		// Agile follows nodes that come back: nothing stays parked.
+		var back []string
+		for _, mb := range members {
+			if b.parked[mb.Key] {
+				back = append(back, mb.Key)
+			}
+		}
+		if len(back) > 0 {
+			s.parker.forget(back)
+			s.logger.Printf("xray supervisor: %s: agile pool — %d parked node(s) back in the pool", what, len(back))
+		}
+	default:
+		members = withoutParked(members, b.parked)
+	}
+	if len(members) == 0 {
+		s.logger.Printf("xray supervisor: %s has no reachable members yet — routing direct", what)
+		return xray.DialerSlot{}, false, nil
+	}
+	slot := xray.DialerSlot{
+		Master:   owner,
+		Index:    idx,
+		Members:  members,
+		PoolKey:  key,
+		Strategy: strategy,
+		Auto:     auto,
+		Pinned:   pinned,
+	}
+	switch strategy {
+	case xray.StrategyAgile:
+		if pk, ok := s.agile.get(key); ok {
+			slot.Preferred, slot.Expected, slot.Fallback = pk.active, len(pk.active), pk.spare
+		}
+	case xray.StrategyStable:
+		slot.Preferred = s.shortlist.preferred(owner, members)
+	}
+	return slot, true, nil
+}
+
+// exitSubs lists the enabled subscriptions an enabled rule routes through
+// (xraysub:NAME), sorted by name. Nil-safe on a supervisor built without
+// the rule hook (tests).
+func (s *xraySupervisor) exitSubs(ctx context.Context) []xray.SlotExit {
+	if s.ruleExits == nil {
+		return nil
+	}
+	names := s.ruleExits(ctx)
+	if len(names) == 0 {
+		return nil
+	}
+	subs, err := s.xrayStore.ListSubs(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []xray.SlotExit
+	for _, sub := range subs {
+		if sub.Enabled && names[strings.ToLower(sub.Name)] {
+			out = append(out, xray.SlotExit{Sub: strings.ToLower(sub.Name), SubID: sub.ID})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Sub < out[j].Sub })
+	return out
 }
 
 // dialerGroupKey identifies a dialer by the set of refs it names, ignoring
@@ -530,8 +621,23 @@ func proxyToOutbound(p proxy.Proxy) (string, error) {
 // syncProxies aligns hidden proxy.Proxy rows (_xray_*) with the
 // current set of enabled xray entries: add missing rows, update ports
 // that drifted, remove rows for entries the user deleted.
-func (s *xraySupervisor) syncProxies(ctx context.Context, entries []xray.Config) error {
+//
+// Subscription exits get a _xsub_ID row pointing at their slot's inbound,
+// for as long as the slot exists; without one the rule's proxy lookup
+// fails and it fails closed.
+func (s *xraySupervisor) syncProxies(ctx context.Context, entries []xray.Config, slots []xray.DialerSlot) error {
 	want := make(map[string]proxy.Proxy, len(entries))
+	for _, sl := range slots {
+		for _, ex := range sl.Exits {
+			name := xray.SubProxyName(ex.SubID)
+			want[name] = proxy.Proxy{
+				Name:     name,
+				Protocol: proxy.ProtocolSOCKS5,
+				Host:     "127.0.0.1",
+				Port:     xray.SlotPort(sl.Index),
+			}
+		}
+	}
 	for _, e := range entries {
 		// Disabled entries still get a proxy row so a rule referencing
 		// them resolves successfully at decision time — the dial will

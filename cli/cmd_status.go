@@ -40,6 +40,9 @@ func (a *app) cmdStatus(args []string) int {
 		{"rules", strconv.Itoa(st.RuleCount)},
 		{"block encrypted dns", yesNo(st.BlockEncryptedDNS)},
 	})
+	for _, sub := range st.ExitWarnings {
+		fmt.Fprintf(a.errOut, "warning: subscription %q now leaves from new exit IPs — rules keep routing; confirm in the app (Rules).\n", sub)
+	}
 	if st.UpdateAvailable != "" {
 		fmt.Fprintf(a.errOut, "em-wall %s is available — open the app to install it.\n", st.UpdateAvailable)
 	}

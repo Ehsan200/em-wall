@@ -246,8 +246,8 @@ func changedPathEntries(p livePlan, oldSlots []xray.DialerSlot) map[string]bool 
 	}
 	for _, s := range oldSlots {
 		if slotHit[s.Index] {
-			for _, m := range s.SlotMasters() {
-				add(m)
+			for _, n := range s.ProxyNames() {
+				out[n] = true
 			}
 		}
 	}

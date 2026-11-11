@@ -120,8 +120,12 @@ func (d *handlerDeps) syncGroup(ctx context.Context, p ipc.GroupsSyncParams) (ip
 		return out, fmt.Errorf("group %s is not applied; use apply instead of sync", p.Key)
 	}
 	if p.Action != "" {
+		iface, err := d.validateRuleIface(ctx, p.Interface, exitAckFrom(p.AckExits))
+		if err != nil {
+			return out, err
+		}
 		tmpl.Action = rules.Action(p.Action)
-		tmpl.Interface = p.Interface
+		tmpl.Interface = iface
 	}
 	for _, pattern := range missing {
 		r := tmpl

@@ -78,6 +78,7 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			ListenAddr:        d.listenAddr,
 			RuleCount:         len(list),
 			UpdateAvailable:   d.updates.Latest(),
+			ExitWarnings:      d.subExits.Warnings(ctx),
 		}, nil
 	})
 
@@ -98,16 +99,11 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
+		iface, err := d.validateRuleIface(ctx, p.Interface, exitAckFrom(p.AckExits))
+		if err != nil {
 			return nil, err
 		}
-		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
-		p.Interface = xray.CanonicalizeInterface(p.Interface)
-		if err := d.validateSetRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
+		p.Interface = iface
 		r := rules.Rule{
 			Pattern:   p.Pattern,
 			Action:    rules.Action(p.Action),
@@ -128,16 +124,18 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
+		// Only a new binding needs the multi-exit confirmation: toggling or
+		// editing the pattern of a rule already on that subscription must
+		// not be blocked by exits that drifted since (the banner covers that).
+		ack := exitAckFrom(p.AckExits)
+		if cur, gerr := d.store.Get(ctx, p.ID); gerr == nil && cur.Interface == xray.CanonicalizeInterface(p.Interface) {
+			ack = exitAckSkip
+		}
+		iface, err := d.validateRuleIface(ctx, p.Interface, ack)
+		if err != nil {
 			return nil, err
 		}
-		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
-		p.Interface = xray.CanonicalizeInterface(p.Interface)
-		if err := d.validateSetRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
+		p.Interface = iface
 		r := rules.Rule{
 			ID:        p.ID,
 			Pattern:   p.Pattern,
@@ -187,16 +185,11 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 			// rely on an interface surviving a block flip.
 			p.Interface = ""
 		}
-		if err := d.validateProxyRefs(ctx, p.Interface); err != nil {
+		iface, err := d.validateRuleIface(ctx, p.Interface, exitAckFrom(p.AckExits))
+		if err != nil {
 			return nil, err
 		}
-		if err := d.validateXrayRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
-		p.Interface = xray.CanonicalizeInterface(p.Interface)
-		if err := d.validateSetRefs(ctx, p.Interface); err != nil {
-			return nil, err
-		}
+		p.Interface = iface
 		var touched []int64
 		for _, id := range p.IDs {
 			r, err := d.store.Get(ctx, id)
@@ -474,6 +467,9 @@ func registerHandlers(s *ipc.Server, d *handlerDeps) {
 		}
 		if len(pats) == 0 {
 			return ipc.GroupsApplyResult{}, nil
+		}
+		if p.Interface, err = d.validateRuleIface(ctx, p.Interface, exitAckFrom(p.AckExits)); err != nil {
+			return nil, err
 		}
 		// Validate the action / interface combination once up front so
 		// we don't half-create the group on a bad request.
@@ -1183,10 +1179,19 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		if err != nil {
 			return nil, err
 		}
+		used := map[string]int{}
+		if all, lerr := d.store.List(ctx); lerr == nil {
+			for _, r := range all {
+				if n := xray.ParseSubName(r.Interface); n != "" {
+					used[n]++
+				}
+			}
+		}
 		out := make([]ipc.XraySubDTO, len(subs))
 		for i, sub := range subs {
 			c := counts[sub.ID]
 			out[i] = subDTOFrom(sub, c[0], c[1])
+			out[i].RuleCount = used[strings.ToLower(sub.Name)]
 			if pins, err := d.xrayStore.PinnedFingerprints(ctx, sub.ID); err == nil {
 				out[i].PinnedCount = len(pins)
 			}
@@ -1240,11 +1245,19 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 			if _, cerr := d.xrayStore.RenameDialerSubRef(ctx, oldName, p.Name); cerr != nil {
 				return nil, fmt.Errorf("subscription renamed, but cascading dialer refs failed: %w", cerr)
 			}
+			// Rules routed through it as an exit follow the rename too.
+			if _, cerr := d.store.RenameInterfaceRef(ctx, xray.SubPrefix, oldName, p.Name); cerr != nil {
+				return nil, fmt.Errorf("subscription renamed, but cascading rule references failed: %w", cerr)
+			}
 		}
 		// Enable/cap/rename can shift active membership → live-sync (falls
 		// back to a Reconcile on a structural change).
 		if err := d.xraySup.SyncDialerMembers(ctx); err != nil {
 			return nil, fmt.Errorf("subscription updated, but dialer sync failed: %w", err)
+		}
+		// Enable and rename change what xraysub: rules expand to.
+		if err := d.engine.Reload(ctx); err != nil {
+			return nil, fmt.Errorf("subscription updated, but engine reload failed: %w", err)
 		}
 		return map[string]any{"ok": true}, nil
 	})
@@ -1265,6 +1278,13 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		if len(refs) > 0 {
 			return nil, fmt.Errorf("subscription %q is used by dialer(s): %s — clear those first", sub.Name, strings.Join(refs, ", "))
 		}
+		ruleRefs, err := d.rulesReferencingSub(ctx, sub.Name)
+		if err != nil {
+			return nil, err
+		}
+		if len(ruleRefs) > 0 {
+			return nil, fmt.Errorf("subscription %q is used as an exit by %d rule(s); remove or rebind those rules first", sub.Name, len(ruleRefs))
+		}
 		if err := d.xrayStore.DeleteSub(ctx, p.ID); err != nil {
 			return nil, err
 		}
@@ -1282,7 +1302,57 @@ func registerXraySubHandlers(s *ipc.Server, d *handlerDeps) {
 		if err := d.xraySup.SyncDialerMembers(ctx); err != nil {
 			return nil, fmt.Errorf("subscription toggled, but dialer sync failed: %w", err)
 		}
+		// Disabling drops xraysub:NAME out of the expansion map: its rules
+		// fail closed from the next query on.
+		if err := d.engine.Reload(ctx); err != nil {
+			return nil, fmt.Errorf("subscription toggled, but engine reload failed: %w", err)
+		}
 		return map[string]any{"ok": true}, nil
+	})
+
+	s.Handle(ipc.MethodXraySubExits, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if d.subExits == nil {
+			return []ipc.XraySubExitDTO{}, nil
+		}
+		return d.subExits.DTOs(ctx)
+	})
+
+	s.Handle(ipc.MethodXraySubAckExits, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubExitIDParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if d.subExits == nil {
+			return nil, fmt.Errorf("exit checks are not available")
+		}
+		sub, err := d.xrayStore.GetSub(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		v, err := d.subExits.view(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.xrayStore.AckSubExits(ctx, sub.ID, v.ips()); err != nil {
+			return nil, err
+		}
+		d.subExits.noteDrift(ctx)
+		return d.subExits.DTOs(ctx)
+	})
+
+	s.Handle(ipc.MethodXraySubCheckExits, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p ipc.XraySubExitIDParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if d.subExits == nil {
+			return []ipc.XraySubExitDTO{}, nil
+		}
+		// Measuring a pool takes up to a minute or two (dead nodes time
+		// out), longer than an IPC call should block: start it and return
+		// the current view with Checking set; the UI polls.
+		d.subExits.MeasureAsync(d.bgContext(), p.ID)
+		return d.subExits.DTOs(ctx)
 	})
 
 	s.Handle(ipc.MethodXraySubRefresh, func(ctx context.Context, raw json.RawMessage) (any, error) {

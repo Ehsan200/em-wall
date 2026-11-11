@@ -169,6 +169,39 @@ type DialerSlot struct {
 	// Generate costs them behind every other member and never names one as
 	// the fallback. Still a ranking, not an exclusion.
 	Broken []string
+
+	// Exits are subscriptions that rules use as an exit through this slot
+	// (docs/xray-sub-exit.md): the hidden proxy row SubProxyName(SubID)
+	// points at the slot inbound. A master slot carries one only when its
+	// pool is exactly that subscription. ExitOnly marks a slot no master
+	// owns: Master is then just its owner label ExitOwner(sub), which
+	// shortlist, timeline and strategy state key by, and SlotMasters
+	// returns nothing — no dialer outbound, no chain probes.
+	Exits    []SlotExit
+	ExitOnly bool
+}
+
+// SlotExit is a subscription a slot serves as a rule exit.
+type SlotExit struct {
+	Sub   string
+	SubID int64
+}
+
+// ExitOwner is the owner label of an exit-only slot for subscription sub.
+// It can't collide with an entry name: ':' is not in the entry charset.
+func ExitOwner(sub string) string { return "sub:" + normalizeName(sub) }
+
+// ProxyNames are the hidden proxy-store names whose connections ride this
+// slot: every master's _xray_ row and every exit's _xsub_ row.
+func (s DialerSlot) ProxyNames() []string {
+	var out []string
+	for _, m := range s.SlotMasters() {
+		out = append(out, InternalProxyName(m))
+	}
+	for _, e := range s.Exits {
+		out = append(out, SubProxyName(e.SubID))
+	}
+	return out
 }
 
 // brokenSet returns Broken as a set; nil when empty.
@@ -215,7 +248,11 @@ func (s DialerSlot) presentPreferred() []string {
 }
 
 // SlotMasters returns every master wired to the slot, owner first.
+// An exit-only slot has none.
 func (s DialerSlot) SlotMasters() []string {
+	if s.ExitOnly {
+		return append([]string(nil), s.Aliases...)
+	}
 	return append([]string{s.Master}, s.Aliases...)
 }
 

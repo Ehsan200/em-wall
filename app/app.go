@@ -153,17 +153,20 @@ func (a *App) RuleExitIP(ruleID int64) (ipc.ExitIPResult, error) {
 	return out, err
 }
 
-func (a *App) AddRule(pattern, action, iface string, enabled bool) (ipc.RuleDTO, error) {
+// AddRule creates a rule. ackExits confirms routing through a subscription
+// whose nodes leave from several exit IPs; without it the daemon refuses
+// such a rule with an error starting "multi-exit:".
+func (a *App) AddRule(pattern, action, iface string, enabled, ackExits bool) (ipc.RuleDTO, error) {
 	var out ipc.RuleDTO
 	err := a.call(ipc.MethodRulesAdd, ipc.RulesAddParams{
-		Pattern: pattern, Action: action, Interface: iface, Enabled: enabled,
+		Pattern: pattern, Action: action, Interface: iface, Enabled: enabled, AckExits: ackExits,
 	}, &out)
 	return out, err
 }
 
-func (a *App) UpdateRule(id int64, pattern, action, iface string, enabled bool) error {
+func (a *App) UpdateRule(id int64, pattern, action, iface string, enabled, ackExits bool) error {
 	return a.call(ipc.MethodRulesUpdate, ipc.RulesUpdateParams{
-		ID: id, Pattern: pattern, Action: action, Interface: iface, Enabled: enabled,
+		ID: id, Pattern: pattern, Action: action, Interface: iface, Enabled: enabled, AckExits: ackExits,
 	}, nil)
 }
 
@@ -176,10 +179,10 @@ func (a *App) DeleteRule(id int64) error {
 // empty for block and non-empty for route. The daemon validates the
 // combination once before touching any row, so a malformed call leaves
 // the rule list unchanged.
-func (a *App) BulkUpdateRules(ids []int64, action, iface string) (ipc.GroupsBulkResult, error) {
+func (a *App) BulkUpdateRules(ids []int64, action, iface string, ackExits bool) (ipc.GroupsBulkResult, error) {
 	var out ipc.GroupsBulkResult
 	err := a.call(ipc.MethodRulesBulkUpdate, ipc.RulesBulkUpdateParams{
-		IDs: ids, Action: action, Interface: iface,
+		IDs: ids, Action: action, Interface: iface, AckExits: ackExits,
 	}, &out)
 	return out, err
 }
@@ -280,10 +283,10 @@ func (a *App) Groups() ([]ipc.GroupDTO, error) {
 	return out, err
 }
 
-func (a *App) ApplyGroup(key, action, iface string, enabled bool) (ipc.GroupsApplyResult, error) {
+func (a *App) ApplyGroup(key, action, iface string, enabled, ackExits bool) (ipc.GroupsApplyResult, error) {
 	var out ipc.GroupsApplyResult
 	err := a.call(ipc.MethodGroupsApply, ipc.GroupsApplyParams{
-		Key: key, Action: action, Interface: iface, Enabled: enabled,
+		Key: key, Action: action, Interface: iface, Enabled: enabled, AckExits: ackExits,
 	}, &out)
 	return out, err
 }
@@ -292,10 +295,10 @@ func (a *App) ApplyGroup(key, action, iface string, enabled bool) (ipc.GroupsApp
 // gained since (an app update adding domains to the curated list). Only
 // missing patterns are inserted, reusing the action/interface of the
 // group's existing rules unless action is given as an override.
-func (a *App) SyncGroup(key, action, iface string) (ipc.GroupsApplyResult, error) {
+func (a *App) SyncGroup(key, action, iface string, ackExits bool) (ipc.GroupsApplyResult, error) {
 	var out ipc.GroupsApplyResult
 	err := a.call(ipc.MethodGroupsSync, ipc.GroupsSyncParams{
-		Key: key, Action: action, Interface: iface,
+		Key: key, Action: action, Interface: iface, AckExits: ackExits,
 	}, &out)
 	return out, err
 }
@@ -630,6 +633,29 @@ func (a *App) SetXraySubStrategy(id int64, strategy string) error {
 // fingerprint with pinned=false clears every pin.
 func (a *App) SetXraySubNodePinned(subID int64, fingerprint string, pinned bool) error {
 	return a.call(ipc.MethodXraySubSetNodePinned, ipc.XraySubSetNodePinnedParams{SubID: subID, Fingerprint: fingerprint, Pinned: pinned}, nil)
+}
+
+// XraySubExits returns every subscription's exit-IP verdict
+// (docs/xray-sub-exit.md).
+func (a *App) XraySubExits() ([]ipc.XraySubExitDTO, error) {
+	var out []ipc.XraySubExitDTO
+	err := a.call(ipc.MethodXraySubExits, nil, &out)
+	return out, err
+}
+
+// AckXraySubExits accepts a subscription's current exit IPs.
+func (a *App) AckXraySubExits(id int64) ([]ipc.XraySubExitDTO, error) {
+	var out []ipc.XraySubExitDTO
+	err := a.call(ipc.MethodXraySubAckExits, ipc.XraySubExitIDParams{ID: id}, &out)
+	return out, err
+}
+
+// CheckXraySubExits starts measuring a subscription's exits now (0 = all)
+// and returns the current verdicts with Checking set.
+func (a *App) CheckXraySubExits(id int64) ([]ipc.XraySubExitDTO, error) {
+	var out []ipc.XraySubExitDTO
+	err := a.call(ipc.MethodXraySubCheckExits, ipc.XraySubExitIDParams{ID: id}, &out)
+	return out, err
 }
 
 func (a *App) ListXraySubs() ([]ipc.XraySubDTO, error) {

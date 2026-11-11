@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ehsan/em-wall/core/proxy"
 	"gorm.io/gorm"
 )
 
@@ -202,6 +203,33 @@ func (st *Store) Expansions(ctx context.Context) (map[string]string, error) {
 	out := make(map[string]string, len(byName))
 	for name, iface := range byName {
 		out[SetPrefix+name] = iface
+	}
+	subs, err := st.SubExpansions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range subs {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// SubExpansions returns "xraysub:NAME" → "proxy:_xsub_ID" for every ENABLED
+// subscription (docs/xray-sub-exit.md). A disabled one is left out so its
+// rules keep the raw xraysub: string and fail closed, like a disabled set.
+// Keys carry the full prefix, so the map can be merged into SetExpansions'
+// name-keyed one without collisions (names never contain ':') and handed to
+// ExpandSetInterface.
+func (st *Store) SubExpansions(ctx context.Context) (map[string]string, error) {
+	subs, err := st.ListSubs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(subs))
+	for _, sub := range subs {
+		if sub.Enabled {
+			out[SubInterface(sub.Name)] = proxy.InterfacePrefix + SubProxyName(sub.ID)
+		}
 	}
 	return out, nil
 }

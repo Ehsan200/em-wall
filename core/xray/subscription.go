@@ -53,10 +53,16 @@ type Subscription struct {
 	// timestamp, 0 = never). Zero across all four means the provider never
 	// reported quota. Refreshed only when a fetch carries the header, so a
 	// later fetch without it keeps the last known figures.
-	Upload    int64     `gorm:"not null;default:0;column:usage_upload"`
-	Download  int64     `gorm:"not null;default:0;column:usage_download"`
-	Total     int64     `gorm:"not null;default:0;column:usage_total"`
-	Expire    int64     `gorm:"not null;default:0;column:usage_expire"`
+	Upload   int64 `gorm:"not null;default:0;column:usage_upload"`
+	Download int64 `gorm:"not null;default:0;column:usage_download"`
+	Total    int64 `gorm:"not null;default:0;column:usage_total"`
+	Expire   int64 `gorm:"not null;default:0;column:usage_expire"`
+	// ExitAck is the set of exit IPs (sorted, comma-joined) the user
+	// accepted when routing rules through this subscription while its nodes
+	// leave from more than one IP (docs/xray-sub-exit.md). Written only by
+	// AckSubExits.
+	ExitAck   string    `gorm:"column:exit_ack;type:text;not null;default:''"`
+	ExitAckAt time.Time `gorm:"column:exit_ack_at"`
 	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
 	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
@@ -213,6 +219,9 @@ func (s *Store) DeleteSub(ctx context.Context, id int64) error {
 			return err
 		}
 		if err := tx.Where("sub_id = ?", id).Delete(&SubNodeOverride{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("sub_id = ?", id).Delete(&SubExit{}).Error; err != nil {
 			return err
 		}
 		res := tx.Delete(&Subscription{}, id)

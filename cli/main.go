@@ -176,6 +176,17 @@ func (a *app) fail(err error) int {
 	return exitErr
 }
 
+// failExit is fail plus a hint for the daemon's multi-exit refusal: the
+// subscription's nodes leave from several exit IPs, which the user has to
+// confirm (docs/xray-sub-exit.md).
+func (a *app) failExit(err error) int {
+	code := a.fail(err)
+	if strings.Contains(err.Error(), "multi-exit:") {
+		fmt.Fprintln(a.errOut, "em-wall: re-run with --accept-multi-exit to route through it anyway.")
+	}
+	return code
+}
+
 // usageErr reports a bad invocation without the daemon being involved.
 func (a *app) usageErr(format string, args ...any) int {
 	fmt.Fprintf(a.errOut, "em-wall: "+format+"\n", args...)
