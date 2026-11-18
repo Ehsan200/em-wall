@@ -20,6 +20,7 @@ var brandColors = map[string]string{
 	"perplexity":       "#22b8cd", // Perplexity teal
 	"huggingface":      "#ffd21e", // HF yellow
 	"mistral":          "#ff7000", // Mistral orange
+	"kimi":             "#1783ff", // Kimi blue (black brand, accent used for dark bg)
 	"grok":             "#e7e9ea", // xAI / Grok near-white
 	"x":                "#1d9bf0", // X blue
 	"telegram":         "#229ed9", // Telegram blue

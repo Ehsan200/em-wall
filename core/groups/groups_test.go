@@ -558,3 +558,40 @@ func TestGrok_CoversUserContentAndXSurface(t *testing.T) {
 		}
 	}
 }
+
+// Kimi is served from two brands (kimi.com/.ai and Moonshot's moonshot.cn/.ai):
+// chat, the CN + international API/platform, and the static/file/image CDNs.
+func TestKimi_CoversChatAPIAndCDN(t *testing.T) {
+	g := FindByKey("kimi")
+	if g == nil {
+		t.Fatal("kimi group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		"kimi.com",
+		"www.kimi.com",
+		"kimi.ai",
+		"kimi.moonshot.cn",
+		"api.moonshot.ai",
+		"api.moonshot.cn",
+		"api.kimi.com",
+		"platform.moonshot.ai",
+		"platform.kimi.ai",
+		"statics.moonshot.cn",
+		"statics.kimi.ai",
+		"kimi-file.moonshot.cn",
+		"kimi-img.moonshot.cn",
+		"kimi-web-img.moonshot.cn",
+	} {
+		if !covered(h) {
+			t.Errorf("kimi group must cover %q but does not", h)
+		}
+	}
+}

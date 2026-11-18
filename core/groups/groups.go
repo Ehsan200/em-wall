@@ -279,6 +279,18 @@ func KnownGroups() []Group {
 			Icon: svgBranded("M", "#ff7000", "#ffd200", "#ffffff"),
 		},
 		{
+			Key:         "kimi",
+			DisplayName: "Kimi / Moonshot AI",
+			Description: "Kimi chat, Moonshot API/platform, Kimi file + image CDN",
+			Patterns: []string{
+				"*.kimi.com",    // chat (www.kimi.com), platform.kimi.com, api.kimi.com
+				"*.kimi.ai",     // international site, platform.kimi.ai, statics.kimi.ai
+				"*.moonshot.cn", // kimi.moonshot.cn, api/platform (CN), statics + kimi-file/kimi-img CDN
+				"*.moonshot.ai", // api.moonshot.ai, platform.moonshot.ai (international)
+			},
+			Icon: svgBranded("K", "#000000", "#1783ff", "#ffffff"),
+		},
+		{
 			Key:         "grok",
 			DisplayName: "Grok / xAI",
 			Description: "Grok chat, xAI API/console, Grok-on-X surface + user content",

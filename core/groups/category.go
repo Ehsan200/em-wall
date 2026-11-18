@@ -42,6 +42,7 @@ var categories = map[string]string{
 	"perplexity":     CategoryAI,
 	"huggingface":    CategoryAI,
 	"mistral":        CategoryAI,
+	"kimi":           CategoryAI,
 	"grok":           CategoryAI,
 
 	// Developer tooling: source hosts, package registries, toolchains.

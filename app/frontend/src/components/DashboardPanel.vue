@@ -139,6 +139,7 @@ const BRAND: Record<string, string> = {
   'apple': '#d2d2d7', 'sony': '#0070d1',
   'github-copilot': '#8957e5', 'cursor': '#b6b6c2',
   'perplexity': '#22b8cd', 'huggingface': '#ffd21e', 'mistral': '#ff7000',
+  'kimi': '#1783ff',
   'grok': '#e7e9ea', 'x': '#1d9bf0', 'telegram': '#229ed9', 'meta': '#0866ff',
   'youtube': '#ff0000', 'spotify': '#1db954', 'soundcloud': '#ff5500',
   'jetbrains': '#ff318c', 'vscode': '#0098ff', 'github': '#e6edf3', 'docker': '#2496ed',
