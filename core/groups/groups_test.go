@@ -595,3 +595,51 @@ func TestKimi_CoversChatAPIAndCDN(t *testing.T) {
 		}
 	}
 }
+
+// The webrtc group must catch the STUN/TURN servers common ICE configs name,
+// and must NOT swallow the rest of the shared zones they live in — routing
+// every *.l.google.com or *.microsoft.com host through a proxy is not what
+// applying "WebRTC" means.
+func TestWebRTC_CoversStunTurnOnly(t *testing.T) {
+	g := FindByKey("webrtc")
+	if g == nil {
+		t.Fatal("webrtc group missing")
+	}
+	covered := func(host string) bool {
+		for _, p := range g.Patterns {
+			if rules.Match(p, host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, h := range []string{
+		"stun.l.google.com",
+		"stun4.l.google.com",
+		"global.stun.twilio.com",
+		"global.turn.twilio.com",
+		"stun.cloudflare.com",
+		"turn.cloudflare.com",
+		"worldaz.relay.teams.microsoft.com",
+		"myproject.turn.livekit.cloud",
+		"meet-jit-si-turnrelay.jitsi.net",
+		"standard.relay.metered.ca",
+		"global.xirsys.com",
+	} {
+		if !covered(h) {
+			t.Errorf("webrtc group must cover %q but does not", h)
+		}
+	}
+	for _, h := range []string{
+		"www3.l.google.com",
+		"googlehosted.l.google.com",
+		"teams.microsoft.com",
+		"twilio.com",
+		"www.cloudflare.com",
+		"livekit.cloud",
+	} {
+		if covered(h) {
+			t.Errorf("webrtc group must not cover %q", h)
+		}
+	}
+}

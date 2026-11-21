@@ -1092,7 +1092,7 @@ func readOpening(client net.Conn, wait time.Duration) ([]byte, error) {
 // protocols (SSH, SMTP, …) stay on the untouched path.
 func clientSpeaksFirst(port int) bool {
 	switch port {
-	case 443, 853, 993, 995, 8443, 80, 5222:
+	case 443, 853, 993, 995, 8443, 80, 5222, 5349: // 5349 = TURN over TLS
 		return true
 	}
 	return false

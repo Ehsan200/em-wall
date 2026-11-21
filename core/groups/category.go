@@ -66,6 +66,7 @@ var categories = map[string]string{
 	// Whole-vendor surfaces — broad by design.
 	"google":       CategoryPlatform,
 	"google-media": CategoryPlatform,
+	"webrtc":       CategoryPlatform,
 	"microsoft":    CategoryPlatform,
 	"apple":        CategoryPlatform,
 	"sony":         CategoryPlatform,

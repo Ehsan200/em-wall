@@ -224,6 +224,43 @@ func KnownGroups() []Group {
 			Icon: svgBranded("M", "#00832d", "#ffffff", "#ffffff"),
 		},
 		{
+			Key:         "webrtc",
+			DisplayName: "WebRTC STUN / TURN",
+			Description: "Public STUN and TURN servers browsers and call apps use to find your public IP and relay media. Route it through a proxy so the IP a call reveals is the exit's, not yours. Needs a UDP-capable upstream (xray or SOCKS5). Peer-to-peer media to raw IPs still goes direct.",
+			// Hostnames only: STUN/TURN servers are named in the app's ICE
+			// config and resolved through DNS, so a route rule FakeIPs them
+			// and the UDP binding/allocation rides the proxy's UDP relay.
+			// Exact names where the parent zone is shared with unrelated
+			// traffic (l.google.com fronts far more than STUN).
+			Patterns: []string{
+				// Google — the default STUN server in most WebRTC samples.
+				"stun.l.google.com",
+				"stun1.l.google.com",
+				"stun2.l.google.com",
+				"stun3.l.google.com",
+				"stun4.l.google.com",
+				// Mozilla (Firefox Hello legacy, still in many configs).
+				"stun.services.mozilla.com",
+				// Twilio Network Traversal Service.
+				"*.stun.twilio.com",
+				"*.turn.twilio.com",
+				// Cloudflare Realtime / Calls.
+				"stun.cloudflare.com",
+				"turn.cloudflare.com",
+				// Microsoft Teams media relays.
+				"*.relay.teams.microsoft.com",
+				// LiveKit Cloud TURN (ChatGPT voice, many SaaS call apps).
+				"*.turn.livekit.cloud",
+				// Jitsi Meet public instance.
+				"meet-jit-si-turnrelay.jitsi.net",
+				// Hosted STUN/TURN providers.
+				"*.relay.metered.ca",
+				"*.xirsys.com",
+				"stun.stunprotocol.org",
+			},
+			Icon: svgBranded("RTC", "#2563eb", "#dbeafe", "#ffffff"),
+		},
+		{
 			Key:         "github-copilot",
 			DisplayName: "GitHub Copilot",
 			Description: "Copilot Chat + suggestion endpoints",
