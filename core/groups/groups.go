@@ -27,18 +27,29 @@ func KnownGroups() []Group {
 		{
 			Key:         "anthropic",
 			DisplayName: "Claude / Anthropic",
-			Description: "Claude (chat), Anthropic API, Console, Workbench, artifact sandbox",
+			Description: "Claude (web, desktop, Code), Anthropic API, Console, Workbench, artifact & MCP sandboxes",
 			Patterns: []string{
 				"*.anthropic.com",
 				"*.claude.ai",
 				"*.claude.com",
 				"*.claudeusercontent.com", // artifact iframe sandbox
+				"*.claudemcpclient.com",   // MCP client / Desktop connectors
+				"*.claudemcpcontent.com",  // MCP interactive app widgets
+				"*.claude.site",           // published artifacts
+				"*.claude.app",
+				"*.claude.dev",
+				"*.claude.new",
+				"*.clau.de",
+				// Anthropic's dedicated Sentry project ingest host (exact host,
+				// not *.sentry.io — leaves other apps' Sentry in telemetry-common).
+				"o1158394.ingest.us.sentry.io",
 				"challenges.cloudflare.com",
-				// Anthropic's published inbound range (docs.claude.com/en/api/
+				// Anthropic's published inbound IPv4 ranges (docs.claude.com/en/api/
 				// ip-addresses). Catches anything that dials Anthropic by IP or
 				// via a hostname this group doesn't list. IPv4 only — v6 egress
 				// via the proxy utun isn't guaranteed, so 2607:6bc0::/48 is out.
 				"160.79.104.0/23",
+				"153.61.224.0/22",
 			},
 			Icon: svgBranded("A", "#d97757", "#fef2e8", "#ffffff"),
 		},
