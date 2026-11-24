@@ -1,0 +1,875 @@
+// em-walld is the privileged firewall daemon. It runs as root (via
+// LaunchDaemon), owns the SQLite rule store, runs the DNS proxy on
+// 127.0.0.1:53, manages per-host routes, and exposes an IPC socket
+// for the Wails UI to drive it.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/ehsan/em-wall/core/decision"
+	"github.com/ehsan/em-wall/core/dnsproxy"
+	"github.com/ehsan/em-wall/core/geo"
+	"github.com/ehsan/em-wall/core/ipc"
+	"github.com/ehsan/em-wall/core/netprobe"
+	"github.com/ehsan/em-wall/core/pfctl"
+	"github.com/ehsan/em-wall/core/proxy"
+	"github.com/ehsan/em-wall/core/routing"
+	"github.com/ehsan/em-wall/core/rules"
+	"github.com/ehsan/em-wall/core/xray"
+)
+
+// publicFallbackDNS is the last-resort upstream used only when no
+// system/DHCP/VPN resolver can be discovered AND validated. Without a
+// fallback, em-wall would refuse to activate and leave the host with no
+// DNS, so we fall back to well-known always-on public resolvers
+// (Cloudflare + Google). Overridable at launch via -upstream.
+var publicFallbackDNS = []string{"1.1.1.1:53", "8.8.8.8:53"}
+
+func main() {
+	var (
+		dbPath         = flag.String("db", "/usr/local/var/em-wall/rules.db", "path to SQLite database")
+		sockPath       = flag.String("socket", ipc.DefaultSocketPath, "path to IPC unix socket")
+		listenAddr     = flag.String("listen", "127.0.0.1:53", "DNS proxy listen address")
+		upstream       = flag.String("upstream", strings.Join(publicFallbackDNS, ","), "comma-separated upstream DNS servers")
+		noAutoActivate = flag.Bool("no-auto-activate", false, "do not touch system DNS on startup (for tests / dev)")
+		proxyTestTgt   = flag.String("proxy-test-target", defaultProxyTestTarget, "host:port dialed through a proxy by proxies.test to check reachability")
+		xrayBinary     = flag.String("xray-binary", "/usr/local/bin/em-wall-xray", "path to the xray-core binary the supervisor runs")
+		xrayDataDir    = flag.String("xray-data-dir", "/usr/local/share/em-wall", "directory containing xray's geoip.dat + geosite.dat (XRAY_LOCATION_ASSET)")
+		xrayRuntimeDir = flag.String("xray-runtime-dir", "/usr/local/var/em-wall/xray", "directory where the supervisor writes the generated xray config")
+		xrayLogDir     = flag.String("xray-log-dir", "/usr/local/var/log", "directory where xray writes its access/error logs; empty disables xray logging")
+		logFile        = flag.String("log-file", "/usr/local/var/log/em-wall.log", "file launchd redirects our stdout/stderr to, trimmed when it outgrows the cap; empty disables trimming")
+		pprofAddr      = flag.String("pprof", "", "serve Go profiling on this loopback address (e.g. 127.0.0.1:6060); off when empty")
+	)
+	flag.Parse()
+	if *pprofAddr != "" {
+		startPprof(*pprofAddr)
+	}
+
+	// Parse the proxy reachability probe target once. An invalid value
+	// falls back to the default rather than failing startup — the test
+	// feature is non-critical and shouldn't keep the daemon from
+	// booting.
+	proxyTestHost, proxyTestPort := parseProxyTestTarget(*proxyTestTgt)
+
+	if err := os.MkdirAll(filepath.Dir(*dbPath), 0o755); err != nil {
+		log.Fatalf("em-walld: mkdir db dir: %v", err)
+	}
+
+	store, err := rules.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("em-walld: open store: %v", err)
+	}
+	defer store.Close()
+
+	proxyStore, err := proxy.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("em-walld: open proxy store: %v", err)
+	}
+	defer proxyStore.Close()
+
+	xrayStore, err := xray.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("em-walld: open xray store: %v", err)
+	}
+	defer xrayStore.Close()
+
+	// Supervisor probes the binary; in dev (binary not installed) it
+	// constructs disabled and Reconcile is a no-op for the subprocess
+	// but still keeps hidden proxy rows in sync.
+	xraySup := newXraySupervisor(*xrayBinary, *xrayDataDir, *xrayRuntimeDir, *xrayLogDir,
+		xrayStore, proxyStore, log.Default())
+	routes := &routeKeys{} // published by the supervisor, read by the proxy tunnel
+	xraySup.routes = routes
+	liveConns := newLiveConns(log.Default()) // marked by the supervisor, swept for the proxy tunnel
+	xraySup.live = liveConns
+	xraySup.ruleExits = storeRuleExits(store)
+	if err := xraySup.Reconcile(context.Background()); err != nil {
+		log.Printf("em-walld: initial xray reconcile failed (continuing): %v", err)
+	}
+	defer xraySup.Stop()
+
+	// Subscription fetcher: pulls remote node lists on a schedule. Node
+	// rows are pure data here; materializing them into the running xray
+	// process happens live (no restart) via the reconcile path.
+	subFetch := newSubFetcher(xrayStore, proxyStore, log.Default())
+	// A successful refresh live-syncs dialer slot membership (no restart).
+	subFetch.onChange = xraySup.SyncDialerMembers
+
+	// IP→proxy mapping populated by the DNS layer, consumed by the
+	// netstack TCP handler. minTTL keeps a mapping alive long enough
+	// that a connection opened right after resolution isn't orphaned
+	// by an aggressive sweep.
+	proxyTable := proxy.NewTable(60 * time.Second)
+	router := routing.New(nil)
+	proxyLatency := netprobe.NewLatencyTracker(proxyLatencyTTL)
+	// Demotion and recovery are both worth a log line: "the internet got
+	// slow" is almost always one member of a multi-outbound binding going
+	// bad, and this is the only place that says so out loud.
+	proxyLatency.OnBreakerChange(func(name string, open bool, rate float64, samples int) {
+		if open {
+			if rate < netprobe.BreakerOpenRate {
+				// The rate didn't trip it, so the flap rule did.
+				log.Printf("netprobe: upstream %q demoted — kept dropping out (%.0f%% of last %d attempts failed); ranked last until it recovers",
+					name, rate*100, samples)
+			} else {
+				log.Printf("netprobe: upstream %q demoted — %.0f%% of last %d attempts failed; ranked last until it recovers",
+					name, rate*100, samples)
+			}
+			xraySup.noteMasterEdge(displayUpstream(name), true)
+			return
+		}
+		log.Printf("netprobe: upstream %q recovered — %.0f%% failures over last %d attempts", name, rate*100, samples)
+	})
+	proxyLatency.OnSuspectChange(func(name string, suspect bool) {
+		if suspect {
+			log.Printf("netprobe: upstream %q down — ranked behind healthy members until it answers again", name)
+			xraySup.noteMasterEdge(displayUpstream(name), false)
+			return
+		}
+		log.Printf("netprobe: upstream %q answering again — back in rotation", name)
+	})
+	// The pool timeline shows each master's verdict next to the nodes it
+	// rides on (xray_timeline.go).
+	xraySup.masterStanding = func() map[string]masterStanding {
+		out := map[string]masterStanding{}
+		for _, h := range proxyLatency.Snapshot() {
+			out[strings.ToLower(displayUpstream(h.Name))] = masterStanding{down: h.Suspect, demoted: h.Open}
+		}
+		return out
+	}
+	trafficAgg := newTrafficAggregator(store, log.Default())
+
+	// Purge retired app-based routing rules (Interface "app:KEY"). The
+	// app: binding was removed; resolving an app's utun via lsof was
+	// fragile and broke whenever a VPN app hijacked DNS. proxy:/xray:
+	// supersede it. Delete before the engine loads so they never match.
+	if n, err := store.DeleteByInterfacePrefix(context.Background(), "app:"); err != nil {
+		log.Printf("em-walld: purge app: rules failed (continuing): %v", err)
+	} else if n > 0 {
+		log.Printf("em-walld: removed %d retired app-based rule(s)", n)
+	}
+
+	engine := decision.New(store)
+	// Outbound sets ("xrayset:NAME") are indirect bindings; the engine
+	// resolves them to a literal interface at Reload time so the DNS and
+	// netstack paths never see the indirection. Must be installed before
+	// the first Reload or set-bound rules would start out unresolved.
+	engine.SetExpander(xrayStore)
+	// A rule newly bound to a subscription exit needs its xray slot up
+	// before the rule index goes live (xray_subexit.go).
+	engine.SetOnReload((&exitWatch{reconcile: xraySup.Reconcile, logf: log.Printf}).onReload)
+	if err := engine.Reload(context.Background()); err != nil {
+		log.Fatalf("em-walld: load rules: %v", err)
+	}
+
+	// The netstack handler consults the engine to resolve IP/CIDR rules
+	// for connections that arrive without a DNS-time mapping, so the
+	// engine must exist before the tunnel is built.
+	connHealth := newConnStats()
+	exits := &exitKeys{} // measured in the background (see the exit-key prober below)
+	setMapExitKeys(exits)
+	proxyTunnel, proxyTunName, proxyFwd := startProxyTunnel(proxyStore, proxyTable, router, engine, proxyLatency, trafficAgg, connHealth, routes, exits, log.Default())
+	if proxyTunnel != nil {
+		defer proxyTunnel.Stop()
+	}
+	if proxyFwd != nil {
+		proxyFwd.live = liveConns
+	}
+
+	pf := pfctl.New(nil)
+	sysDNS := NewSystemDNS(nil)
+
+	logSink := newStoreLogSink(store)
+
+	// Pick upstream: stored setting > flag default. The setting is
+	// populated when the user clicks "Activate" in the UI, capturing
+	// whatever the system was using before we hijacked it.
+	upstreams := loadUpstream(store, *upstream)
+	fwd := dnsproxy.NewMultiUpstream(upstreams, 3*time.Second)
+
+	dnsServer, err := dnsproxy.New(dnsproxy.Config{
+		Listen:       *listenAddr,
+		Decider:      engine,
+		Forwarder:    fwd,
+		Routes:       router,
+		Interfaces:   dnsproxy.DefaultInterfaceChecker,
+		Proxies:      &proxyResolver{store: proxyStore, table: proxyTable},
+		EnableFakeIP: true,
+		FakeIPStore:  fakeIPStore{store: store},
+		ProxyTun:     proxyTunName,
+		Logs:         logSink,
+		Logger:       log.Default(),
+	})
+	if err != nil {
+		log.Fatalf("em-walld: dnsproxy: %v", err)
+	}
+
+	ipcSrv := ipc.NewServer(*sockPath, log.Default())
+	geoDB := geo.Open(geo.Paths{
+		GeoSite:  filepath.Join(*xrayDataDir, "geosite.dat"),
+		GeoIP:    filepath.Join(*xrayDataDir, "geoip.dat"),
+		CityMMDB: filepath.Join(*xrayDataDir, "dbip-city-lite.mmdb"),
+		ASNMMDB:  filepath.Join(*xrayDataDir, "dbip-asn-lite.mmdb"),
+	})
+	sug := newSuggester(geoDB, store)
+	logSink.suggest = sug
+	activeSuggester.Store(sug)
+	// Subscription exit measurement (xray_subexit_probe.go).
+	subExits := newSubExitProber(xrayStore, store, xraySup.Running, log.Default())
+	deps := &handlerDeps{
+		geoDB:         geoDB,
+		store:         store,
+		proxyStore:    proxyStore,
+		proxyTable:    proxyTable,
+		xrayStore:     xrayStore,
+		xraySup:       xraySup,
+		subFetch:      subFetch,
+		subExits:      subExits,
+		engine:        engine,
+		router:        router,
+		pf:            pf,
+		sysDNS:        sysDNS,
+		dnsServer:     dnsServer,
+		latency:       proxyLatency,
+		connHealth:    connHealth,
+		proxyTun:      proxyTunName,
+		listenAddr:    *listenAddr,
+		upstream:      joinCSV(upstreams),
+		startedAt:     time.Now(),
+		proxyTestHost: proxyTestHost,
+		proxyTestPort: proxyTestPort,
+		daemonLogPath: *logFile,
+		xrayLogDir:    *xrayLogDir,
+	}
+	registerHandlers(ipcSrv, deps)
+
+	// Install kernel routes for any IP/CIDR route rules already in the
+	// store so their traffic is pinned to the proxy utun from boot,
+	// without waiting for a rule edit. Best-effort — a route failure must
+	// not block startup.
+	deps.reconcileIPRoutes(context.Background())
+
+	// Restore pf state from settings. Default-on so fresh installs
+	// block DoH/DoT without the user having to toggle it.
+	if v, _ := store.GetSetting(context.Background(), "block_encrypted_dns", "true"); v == "true" {
+		if err := pf.Enable(context.Background()); err != nil {
+			log.Printf("em-walld: pf enable failed (continuing): %v", err)
+		}
+	}
+
+	// Auto-activate the DNS hijack unless explicitly disabled (via flag
+	// or persisted setting). Default-on so the daemon is useful out of
+	// the box; activation now validates upstream and refuses to brick
+	// DNS if nothing works.
+	if *noAutoActivate {
+		log.Printf("em-walld: -no-auto-activate set, leaving system DNS alone")
+	} else if v, _ := store.GetSetting(context.Background(), "system_dns_active", "true"); v == "true" {
+		if err := deps.activateSystemDNS(context.Background()); err != nil {
+			log.Printf("em-walld: auto-activate failed (continuing): %v", err)
+		} else {
+			log.Printf("em-walld: system DNS hijack active")
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Detached handler-spawned background work (e.g. a new subscription's
+	// initial fetch) should cancel on daemon shutdown.
+	deps.bgCtx = ctx
+	go runXrayAccessLog(ctx)
+	go liveConns.run(ctx)
+	logSinkDone := make(chan struct{})
+	go func() { defer close(logSinkDone); logSink.run(ctx) }()
+	go sug.run(ctx)
+	// Land the last batch before store.Close. Deferred calls run LIFO, so
+	// cancel here too or this would wait on a ctx not yet cancelled.
+	defer func() { cancel(); <-logSinkDone }()
+
+	var wg sync.WaitGroup
+	wg.Add(6)
+
+	go func() {
+		defer wg.Done()
+		log.Printf("em-walld: dns proxy listening on %s", *listenAddr)
+		if err := dnsServer.Start(ctx); err != nil {
+			log.Printf("em-walld: dns proxy stopped: %v", err)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		log.Printf("em-walld: ipc socket at %s", *sockPath)
+		if err := ipcSrv.Serve(ctx); err != nil {
+			log.Printf("em-walld: ipc stopped: %v", err)
+		}
+	}()
+
+	// Periodic route TTL sweeper. Also sweeps the proxy IP→proxy table
+	// on the same tick so expired mappings don't outlive their routes.
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		// Usage rollup runs far less often than the sweep: each pass scans
+		// every row past TrafficRollupAge, and only an hour's worth is new.
+		const trafficCompactInterval = 10 * time.Minute
+		var lastCompact time.Time
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				router.SweepExpired(ctx)
+				proxyTable.SweepExpired()
+				if err := store.SweepTraffic(ctx, time.Now().Add(-rules.TrafficRetention)); err != nil {
+					log.Printf("em-walld: traffic stat sweep failed: %v", err)
+				}
+				if time.Since(lastCompact) >= trafficCompactInterval {
+					lastCompact = time.Now()
+					if err := store.CompactTraffic(ctx, time.Now().Add(-rules.TrafficRollupAge)); err != nil {
+						log.Printf("em-walld: traffic stat rollup failed: %v", err)
+					}
+				}
+			}
+		}
+	}()
+
+	// Traffic stat coalescer: drains buffered proxy byte deltas to the
+	// store on its own ticker (separate from the sweep so write batching
+	// and pruning don't share a cadence).
+	go func() {
+		defer wg.Done()
+		trafficAgg.Run(ctx)
+	}()
+
+	// probeNow asks the latency prober for an immediate round (network change).
+	probeNow := make(chan struct{}, 1)
+
+	// Proxy-health reset on a real network change or a wake from sleep:
+	// every verdict (paused destinations, demoted upstreams, measured
+	// latencies) was learned on the old network. Clear it and re-measure at
+	// once, so the first minute isn't spent on stale verdicts.
+	netReset := newNetResetter(func(reason string) {
+		proxyFwd.resetHealth()
+		proxyLatency.Reset()
+		go xraySup.ReturnParked(ctx)
+		select {
+		case probeNow <- struct{}{}:
+		default: // a round is already queued
+		}
+		log.Printf("em-walld: %s → proxy health reset, re-probing upstreams", reason)
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		netReset.watchSleep(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		subExits.run(ctx)
+	}()
+	// A refresh can add nodes, and with them new exits: measure once xray
+	// has their probe outbounds.
+	subFetch.onChange = func(c context.Context) error {
+		err := xraySup.SyncDialerMembers(c)
+		subExits.KickAfter(ctx, 0, subExitAfterRefresh)
+		return err
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deps.runGeoUpdater(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deps.runUpdateNotifier(ctx)
+	}()
+
+	// Proxy latency prober: ranks multi-outbound route bindings by measured
+	// latency. Probes ONLY proxies bound alongside another (nothing to rank
+	// otherwise), so a single-outbound setup does no network work here.
+	// Every proxyProbeInterval it measures all of them; in between, every
+	// proxyProbeFastInterval it re-checks only the unsettled ones (down,
+	// demoted, never measured), so a member that starts working again is
+	// back in its set within seconds.
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(proxyProbeFastInterval)
+		defer t.Stop()
+		var lastFull time.Time
+		fullRounds := 0
+		for {
+			full := false
+			select {
+			case <-ctx.Done():
+				return
+			case <-probeNow: // network changed: re-measure now, not in 30s
+				full = true
+			case <-t.C:
+				full = time.Since(lastFull) >= proxyProbeInterval
+			}
+			rs, err := store.List(ctx)
+			if err != nil {
+				continue
+			}
+			names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
+			transfer := false
+			if full {
+				lastFull = time.Now()
+				fullRounds++
+				transfer = fullRounds%proxyTransferEvery == 1
+			} else {
+				names = proxyLatency.Unsettled(names)
+			}
+			if len(names) == 0 {
+				continue
+			}
+			for _, n := range probeProxies(ctx, proxyStore, proxyLatency, names, netprobe.URLTestHost, netprobe.URLTestPort, transfer) {
+				log.Printf("netprobe: upstream %q answers the URL test but stalls a %d KB transfer — round counted as failed", n, netprobe.DownloadTestBytes>>10)
+			}
+		}
+	}()
+
+	// Exit-IP prober: measures where each member of a multi-member binding
+	// leaves the internet, so members sharing an exit are raced apart and
+	// avoided together for a site that bans it (see exitkeys.go).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(exitKeyFirstDelay):
+		}
+		t := time.NewTicker(exitKeyProbeInterval)
+		defer t.Stop()
+		for {
+			if rs, err := store.List(ctx); err == nil {
+				names := multiBindingProxyNames(deps.expandRuleIfaces(ctx, rs))
+				probeExitKeys(ctx, proxyStore, exits, names, log.Default())
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+
+	// Pool node health: record the pool timeline every tick, and park
+	// subscription nodes that stay dead so the observatory stops probing
+	// them (see xray_nodepark.go, xray_timeline.go).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(nodeTimelineInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				xraySup.PollNodeHealth(ctx)
+			}
+		}
+	}()
+
+	// Pool path prober: test the members that carry (or are next in line
+	// to carry) each master on the real path — a transfer through the
+	// node, and the master chained over it — since the observatory's tiny
+	// ping passes nodes that can't (see xray_pathprobe.go).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(pathProbeInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				xraySup.ProbePaths(ctx)
+			}
+		}
+	}()
+
+	// Log-cap watcher: every minute, check whether xray's access/error
+	// log files have crossed the cap and truncate them in place if so
+	// (never by restarting xray — see RotateLogsIfTooLarge).
+	//
+	// The daemon's own log rides the same tick; it is written by launchd,
+	// so it is trimmed in place too — see rotateDaemonLogIfTooLarge.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				xraySup.RotateLogsIfTooLarge()
+				rotateDaemonLogIfTooLarge(*logFile, daemonLogCapBytes, daemonLogKeepBytes, log.Default())
+			}
+		}
+	}()
+
+	// Subscription refresh scheduler: fetches due subscriptions on start
+	// and on a ticker (per-subscription interval, with a shorter retry
+	// window after a failed fetch).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		subFetch.runSubScheduler(ctx)
+	}()
+
+	// Dynamic group scheduler: re-fetches vendor-published pattern feeds
+	// (Google's IP ranges) and reconciles the rules an applied group owns,
+	// so a vendor adding/removing a prefix doesn't silently leave media
+	// traffic off-proxy.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deps.runDynamicGroupScheduler(ctx)
+	}()
+
+	// Upstream watcher: every 10s, validate that the current upstream
+	// still answers. When the user switches Wi-Fi, sleeps/wakes the
+	// laptop, or toggles a VPN, the DHCP-supplied resolver we picked at
+	// activation time is often no longer reachable — every query hangs
+	// or NXDOMAIN's because we're forwarding into the void. The fix is
+	// to notice and re-pick atomically: chooseUpstream reads
+	// AllDHCPDNS, which queries `ipconfig getoption en0
+	// domain_name_server` live, so it reflects whichever network we're
+	// on now. Forwarder swap is atomic — no daemon restart, no
+	// DNS-down window for the user.
+	//
+	// Same tick also retries activation: if the user wants the hijack
+	// on but it isn't (typical: LaunchDaemon raced ahead of the network
+	// at boot, so activateSystemDNS at startup couldn't validate any
+	// upstream and safely restored DNS without flipping the pref),
+	// re-attempt now that the network has had time to come up.
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		// stableFor counts consecutive ticks where the upstream was healthy
+		// and unchanged. Once it reaches the threshold we skip most checks,
+		// only probing every skipEvery ticks (~60s) instead of every 10s.
+		// Any failure or change resets it to 0 so we recover quickly.
+		const skipEvery = 6 // 6 × 10s = 60s between probes when stable
+		stableFor := 0
+		skipCount := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref == "true" {
+					if active, _ := deps.sysDNS.IsActive(); !active {
+						if err := deps.activateSystemDNS(ctx); err != nil {
+							log.Printf("em-walld: activation retry failed: %v", err)
+						} else {
+							log.Printf("em-walld: system DNS hijack activated on retry")
+						}
+						stableFor = 0
+						skipCount = 0
+						continue
+					}
+				}
+				// Back off DNS health probes when stable: skip most ticks.
+				if stableFor >= skipEvery {
+					skipCount++
+					if skipCount < skipEvery {
+						continue
+					}
+					skipCount = 0
+				}
+				if changed, err := deps.refreshUpstreamIfStale(ctx); err != nil {
+					log.Printf("em-walld: upstream refresh failed: %v", err)
+					stableFor = 0
+					skipCount = 0
+				} else if changed {
+					log.Printf("em-walld: upstream refreshed: now using %s", deps.upstream)
+					stableFor = 0
+					skipCount = 0
+				} else {
+					stableFor++
+				}
+			}
+		}
+	}()
+
+	// Event-driven network-change watcher. Parks a scutil subprocess that
+	// wakes only when the default route or DNS config actually changes
+	// (Wi-Fi switch, VPN toggle, wake-from-sleep) — ~zero CPU while idle,
+	// so it's the primary trigger for re-pointing upstream DNS, and the 10s
+	// poll above is just a backstop. On each change it forces a full
+	// re-pick via repickUpstream, NOT the poll's liveness check: the public
+	// fallback resolver (1.1.1.1) stays reachable across networks and would
+	// mask the now-dead local resolver, so an unconditional recompute off
+	// fresh DHCP/scutil state is what actually follows the user onto the new
+	// network without a manual deactivate/activate.
+	//
+	// The pick made AT the event sees a half-up network: the new router's
+	// resolver may answer while the public fallback isn't routable yet, and
+	// the list validated then (observed: a lone flaky 192.16.95.1, no
+	// 1.1.1.1) would stay live for good — the poll only re-picks once
+	// every entry is dead. So each event also schedules settle re-picks;
+	// a new event restarts them. repickUpstream is a no-op when nothing
+	// changed.
+	var settleMu sync.Mutex
+	var settleTimers []*time.Timer
+	scheduleSettleRepick := func() {
+		settleMu.Lock()
+		defer settleMu.Unlock()
+		for _, t := range settleTimers {
+			t.Stop()
+		}
+		settleTimers = settleTimers[:0]
+		for _, after := range []time.Duration{10 * time.Second, 45 * time.Second} {
+			settleTimers = append(settleTimers, time.AfterFunc(after, func() {
+				if ctx.Err() != nil {
+					return
+				}
+				if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref != "true" {
+					return
+				}
+				if active, _ := deps.sysDNS.IsActive(); !active {
+					return // the poll's activation retry owns this case
+				}
+				if changed, err := deps.repickUpstream(ctx); err == nil && changed {
+					log.Printf("em-walld: network settled → upstream now %s", deps.upstream)
+				}
+			}))
+		}
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		watchNetworkChanges(ctx, func() {
+			netReset.networkEvent() // resets proxy health only if the route really moved
+			scheduleSettleRepick()
+
+			if pref, _ := store.GetSetting(ctx, "system_dns_active", "true"); pref != "true" {
+				return // hijack off — nothing to keep pointed anywhere
+			}
+			if active, _ := deps.sysDNS.IsActive(); !active {
+				if err := deps.activateSystemDNS(ctx); err != nil {
+					log.Printf("em-walld: activation on network change failed: %v", err)
+				} else {
+					log.Printf("em-walld: system DNS hijack activated on network change")
+				}
+				return
+			}
+			if changed, err := deps.repickUpstream(ctx); err != nil {
+				log.Printf("em-walld: upstream repick on network change failed: %v", err)
+			} else if changed {
+				log.Printf("em-walld: network changed → upstream now %s", deps.upstream)
+			}
+		})
+	}()
+
+	// Proxy tunnel: shuttle packets between the daemon-owned utun and
+	// the netstack TCP stack. Only when the utun opened successfully
+	// (needs root) — otherwise proxy: rules are unsupported and there's
+	// nothing to serve. Start() blocks until ctx is cancelled or the
+	// utun fd is closed by Stop().
+	if proxyTunnel != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("em-walld: proxy tunnel serving on %s", proxyTunName)
+			proxyTunnel.Start(ctx)
+		}()
+	}
+
+	// Signal handling.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Printf("em-walld: shutting down")
+
+	cancel()
+	dnsServer.Shutdown()
+	ipcSrv.Shutdown()
+	if proxyTunnel != nil {
+		// Closes the utun fd, which unblocks the read loop (ctx alone
+		// can't — it's parked in a blocking Read). Idempotent with the
+		// deferred Stop().
+		proxyTunnel.Stop()
+	}
+	router.Flush(context.Background())
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		log.Printf("em-walld: shutdown timeout")
+	}
+	log.Printf("em-walld: bye")
+}
+
+// ---------- IPC handler wiring ----------
+
+type handlerDeps struct {
+	store      *rules.Store
+	proxyStore *proxy.Store
+	proxyTable *proxy.Table
+	xrayStore  *xray.Store
+	xraySup    *xraySupervisor
+	subExits   *subExitProber // nil-safe: no exit checks
+	subFetch   *subFetcher
+	engine     *decision.Engine
+	router     *routing.Manager
+	pf         *pfctl.Manager
+	sysDNS     *SystemDNS
+	dnsServer  *dnsproxy.Server
+	latency    *netprobe.LatencyTracker // ranks multi-binding exit-IP probe order
+	connHealth *connStats               // proxied-connection health window; nil-safe
+	geoDB      *geo.DB                  // geosite/geoip/mmdb readers; never nil once wired
+	proxyTun   string                   // daemon-owned utun name; "" if proxy routing is disabled
+	listenAddr string
+	upstream   string
+	startedAt  time.Time
+
+	// Reachability-probe target for proxies.test, parsed from the
+	// -proxy-test-target flag. host may be an IP literal or a DNS name.
+	proxyTestHost string
+	proxyTestPort int
+
+	// Text logs served by logs.tail; "" when not configured.
+	daemonLogPath string
+	xrayLogDir    string
+
+	// bgCtx is the daemon-lifetime context for detached background work
+	// spawned from handlers (e.g. a subscription's initial fetch), set once
+	// the run context exists. Nil-safe via bgContext().
+	bgCtx context.Context
+
+	// updates holds the newest release the background check found.
+	updates updateNotifier
+
+	mu sync.Mutex // guards upstream
+}
+
+// loadUpstream picks the daemon's startup forwarder list. Loopback is
+// stripped at every layer — under no circumstance should we forward
+// queries to ourselves and create a tight loop. The picked list is
+// validated lazily by activateSystemDNS before being applied.
+//
+// Order:
+//  1. settings.upstream_dns (set by Activate, captured pre-hijack)
+//  2. flagDefault (CLI flag)
+//  3. AllDHCPDNS across every non-tunnel hardware port
+//  4. scutil --dns (excluding loopback)
+//  5. public fallback (1.1.1.1, 8.8.8.8) — last resort
+func loadUpstream(store *rules.Store, flagDefault string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if v, _ := store.GetSetting(ctx, "upstream_dns", ""); v != "" {
+		if clean := stripLoopback(splitCSV(v)); len(clean) > 0 {
+			return clean
+		}
+	}
+	if flagDefault != "" {
+		if clean := stripLoopback(splitCSV(flagDefault)); len(clean) > 0 {
+			return clean
+		}
+	}
+	sd := NewSystemDNS(nil)
+	if ips, err := sd.AllDHCPDNS(); err == nil && len(ips) > 0 {
+		return WithPort53(ips)
+	}
+	if ips, err := sd.DetectResolvers(); err == nil && len(ips) > 0 {
+		return WithPort53(ips)
+	}
+	return publicFallbackDNS
+}
+
+// stripLoopback drops 127.* / ::1 entries from a list of host[:port]
+// strings. Empty list → empty list (caller decides fallback).
+func stripLoopback(addrs []string) []string {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		host, _, err := net.SplitHostPort(a)
+		if err != nil {
+			host = a
+		}
+		if isLoopback(host) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func joinCSV(parts []string) string { return strings.Join(parts, ",") }
+
+// parseProxyTestTarget splits a "host:port" string into its parts for
+// the proxies.test reachability probe. host may be an IP or a DNS
+// name. On any parse error (missing port, non-numeric port, etc.) it
+// logs and falls back to the default target — the test feature is
+// non-critical, so a bad flag shouldn't block daemon startup.
+func parseProxyTestTarget(s string) (host string, port int) {
+	h, p, err := net.SplitHostPort(strings.TrimSpace(s))
+	if err == nil {
+		if n, perr := strconv.Atoi(p); perr == nil && n >= 1 && n <= 65535 && h != "" {
+			return h, n
+		}
+	}
+	log.Printf("em-walld: invalid -proxy-test-target %q, using default %q", s, defaultProxyTestTarget)
+	dh, dp, _ := net.SplitHostPort(defaultProxyTestTarget)
+	n, _ := strconv.Atoi(dp)
+	return dh, n
+}
+
+// parseTestTarget is the per-call counterpart used by xray.test: a
+// user-supplied "host:port" with sensible fallback when the field is
+// blank. Returns an error (not a fallback) on a malformed non-empty
+// value so the UI can surface "invalid target: ..." instead of
+// silently dialing the wrong place.
+func parseTestTarget(s, fallbackHost string, fallbackPort int) (host string, port int, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fallbackHost, fallbackPort, nil
+	}
+	h, p, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", 0, err
+	}
+	n, perr := strconv.Atoi(p)
+	if perr != nil || n < 1 || n > 65535 || h == "" {
+		return "", 0, fmt.Errorf("port out of range or host empty")
+	}
+	return h, n, nil
+}
