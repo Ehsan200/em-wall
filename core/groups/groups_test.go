@@ -643,3 +643,51 @@ func TestWebRTC_CoversStunTurnOnly(t *testing.T) {
 		}
 	}
 }
+
+// The anthropic group must cover Claude web, Desktop, Code, MCP widgets,
+// Anthropic's dedicated Sentry ingest, and both published inbound IPv4 CIDRs,
+// while NOT swallowing generic Sentry/Datadog/Statsig hosts that belong in
+// telemetry-common.
+func TestAnthropic_CoversDesktopMCPAndInboundCIDRs(t *testing.T) {
+	g := FindByKey("anthropic")
+	if g == nil {
+		t.Fatal("anthropic group missing")
+	}
+	covered := func(key string) bool {
+		for _, p := range g.Patterns {
+			if rules.MatchKey(p, key) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, k := range []string{
+		"api.anthropic.com",
+		"claude.ai",
+		"downloads.claude.ai",
+		"platform.claude.com",
+		"sso.claude.com",
+		"bridge.claudeusercontent.com",
+		"app.claudemcpclient.com",
+		"widget.claudemcpcontent.com",
+		"demo.claude.site",
+		"claude.app",
+		"o1158394.ingest.us.sentry.io",
+		"160.79.104.10",
+		"153.61.224.10",
+	} {
+		if !covered(k) {
+			t.Errorf("anthropic group must cover %q but does not", k)
+		}
+	}
+	for _, k := range []string{
+		"o999999.ingest.us.sentry.io",
+		"sentry.io",
+		"api.statsigapi.net",
+		"http-intake.logs.us5.datadoghq.com",
+	} {
+		if covered(k) {
+			t.Errorf("anthropic group must not cover shared telemetry host %q", k)
+		}
+	}
+}
