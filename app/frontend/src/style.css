@@ -379,3 +379,27 @@ button .spinner { margin-right: 6px; }
 @media (prefers-reduced-motion: reduce) {
   .spinner, .skeleton, .loading-bar::after { animation-duration: 3s; }
 }
+
+.ui-error-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  max-width: 460px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+}
+.ui-error-toast button { flex: none; }
+.ui-error-msg {
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

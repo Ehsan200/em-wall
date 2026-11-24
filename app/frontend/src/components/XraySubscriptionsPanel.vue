@@ -414,10 +414,10 @@ type NodePick = { m: ipc.XrayActiveMemberDTO; masters: string[] };
 const nodePicks = computed<Record<string, NodePick>>(() => {
   const out: Record<string, NodePick> = {};
   for (const p of xrayActive.value?.pools ?? []) {
-    for (const m of p.members) {
+    for (const m of p.members ?? []) {
       const cur = out[m.key];
       if (!cur || m.recent > cur.m.recent || (m.recent === cur.m.recent && m.picks > cur.m.picks)) {
-        out[m.key] = { m, masters: p.masters };
+        out[m.key] = { m, masters: p.masters ?? [] };
       }
     }
   }
@@ -431,7 +431,9 @@ function nodePickTitle(n: Node): string {
   const p = nodePicks.value[n.fingerprint];
   if (!p) return '';
   const r = xrayActive.value;
-  return `Picked for ${p.masters.join(', ')}: ${p.m.picks} connection${p.m.picks === 1 ? '' : 's'} in the last ${r?.windowSec ?? 60}s (${p.m.sharePct}% of the pool's).\n${PICK_NOTE}`;
+  // An exit-only pool (subscription used as a rule exit) has no masters.
+  const forWhom = p.masters.length ? p.masters.join(', ') : 'rules exiting through this subscription';
+  return `Picked for ${forWhom}:${p.m.picks} connection${p.m.picks === 1 ? '' : 's'} in the last ${r?.windowSec ?? 60}s (${p.m.sharePct}% of the pool's).\n${PICK_NOTE}`;
 }
 
 // ---- Exit IPs (subscription as a rule exit) ----

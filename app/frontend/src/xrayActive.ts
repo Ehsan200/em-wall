@@ -51,5 +51,5 @@ export const PICK_NOTE = 'From xray’s access log: the node the balancer handed
 // poolOf returns the pool a master rides (as owner or alias), if any.
 export function poolOf(r: ipc.XrayActiveResult | null, master: string): ipc.XrayActivePoolDTO | undefined {
   const m = master.toLowerCase();
-  return r?.pools.find(p => p.masters.some(x => x.toLowerCase() === m));
+  return r?.pools?.find(p => (p.masters ?? []).some(x => x.toLowerCase() === m));
 }

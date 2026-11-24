@@ -186,7 +186,7 @@ onUnmounted(() => stopPoll?.());
     <div v-for="p in visible" :key="p.master" class="pool">
       <div class="pool-head">
         <code>{{ p.master }}</code>
-        <span v-if="p.masters.length > 1" class="muted">shared by {{ p.masters.join(', ') }}</span>
+        <span v-if="(p.masters?.length ?? 0) > 1" class="muted">shared by {{ p.masters.join(', ') }}</span>
         <span v-if="p.strategy" class="pill strategy" :class="p.strategy" :title="strategyTitle(p)">{{ strategyText(p) }}</span>
         <span class="stat" :class="{ bad: p.pickLosses > 0 }"
               title="Times every node carrying traffic was down at once while another node answered">

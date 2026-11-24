@@ -248,10 +248,11 @@ func (s DialerSlot) presentPreferred() []string {
 }
 
 // SlotMasters returns every master wired to the slot, owner first.
-// An exit-only slot has none.
+// An exit-only slot has none: an empty slice, never nil — it reaches the UI
+// as JSON (xray.active, health.pools), where null crashed the render.
 func (s DialerSlot) SlotMasters() []string {
 	if s.ExitOnly {
-		return append([]string(nil), s.Aliases...)
+		return append([]string{}, s.Aliases...)
 	}
 	return append([]string{s.Master}, s.Aliases...)
 }

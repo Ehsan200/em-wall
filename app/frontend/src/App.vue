@@ -21,6 +21,7 @@ import { Status, InstallStatus, IsPackaged, AppVersion, CheckForUpdate, Download
 import { BrowserOpenURL, EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import type { ipc, installer, main } from '../wailsjs/go/models';
 import { loadDisplayTimezone } from './timezone';
+import { uiErrorToast, showUIErrors } from './uiErrors';
 
 // Sidebar, grouped by job. Order here is the order on screen.
 const NAV: { title: string; items: { tab: Tab; label: string }[] }[] = [
@@ -435,4 +436,15 @@ onUnmounted(() => {
               @pick="startTour" @close="tourMenuOpen = false" />
     <AppTour :run="tourRun" @close="closeTour" @continue="continueTour" @navigate="(t) => { if (t) tab = t; }" />
   </template>
+
+  <!-- A frontend error (often a panel that rendered blank). Full list and
+       stacks: Logs → UI errors. -->
+  <div v-if="uiErrorToast" class="ui-error-toast" role="alert">
+    <div class="col" style="gap: 2px; min-width: 0">
+      <strong>Something in this window failed</strong>
+      <span class="ui-error-msg">{{ uiErrorToast.component ? uiErrorToast.component + ': ' : '' }}{{ uiErrorToast.message }}</span>
+    </div>
+    <button @click="tab = 'logs'; showUIErrors()">Details</button>
+    <button @click="uiErrorToast = null" aria-label="Dismiss">✕</button>
+  </div>
 </template>
